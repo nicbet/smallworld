@@ -39,10 +39,12 @@ impl GpuContext {
             adapter.get_info().backend
         );
 
+        let required_features = Self::negotiate_features(&adapter);
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("smallworld"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
@@ -72,10 +74,12 @@ impl GpuContext {
             .await
             .expect("no GPU adapter found");
 
+        let required_features = Self::negotiate_features(&adapter);
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("smallworld-headless"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
@@ -94,6 +98,25 @@ impl GpuContext {
     /// Adapter metadata for display in the debug overlay.
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
         self.adapter.get_info()
+    }
+
+    /// Whether the device supports GPU timestamp queries.
+    pub fn supports_timestamps(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+    }
+
+    fn negotiate_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+        let available = adapter.features();
+        let mut features = wgpu::Features::empty();
+        if available.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+            log::info!("GPU timestamps enabled");
+        } else {
+            log::warn!("GPU timestamps not supported by this adapter");
+        }
+        features
     }
 
     /// Convenience: create a [`wgpu::Instance`] with the platform default backends.

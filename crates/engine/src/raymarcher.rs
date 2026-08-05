@@ -273,6 +273,8 @@ impl Raymarcher {
         encoder: &mut wgpu::CommandEncoder,
         surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
+        compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let vp = camera.projection_matrix() * camera.view_matrix();
         let inv_vp = vp.inverse();
@@ -294,7 +296,7 @@ impl Raymarcher {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("raymarch"),
-                timestamp_writes: None,
+                timestamp_writes: compute_timestamps,
             });
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.compute_bind_group, &[]);
@@ -319,7 +321,7 @@ impl Raymarcher {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: blit_timestamps,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

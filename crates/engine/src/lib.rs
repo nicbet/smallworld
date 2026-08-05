@@ -4,6 +4,7 @@
 pub mod assets;
 pub mod camera;
 pub mod gpu;
+pub mod gpu_timing;
 pub mod raymarcher;
 pub mod shaders;
 
