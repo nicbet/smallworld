@@ -36,7 +36,7 @@ struct Uniforms {
     world_min: [f32; 3],
     brick_size: f32,
     grid_dims: [u32; 3],
-    _pad1: u32,
+    flags: u32,
 }
 
 impl Raymarcher {
@@ -251,6 +251,12 @@ impl Raymarcher {
     }
 
     /// Dispatches the compute raymarch pass and blits the result to `surface_view`.
+    /// Flag: enable sun shadow rays.
+    pub const FLAG_SHADOWS: u32 = 1;
+    /// Flag: enable smooth normals from occupancy gradient.
+    pub const FLAG_SMOOTH_NORMALS: u32 = 2;
+
+    /// Dispatches the compute raymarch pass and blits the result to `surface_view`.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -259,6 +265,7 @@ impl Raymarcher {
         surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
         index: &BrickIndex,
+        flags: u32,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
@@ -274,7 +281,7 @@ impl Raymarcher {
             world_min: [wmin.x, wmin.y, wmin.z],
             brick_size: index.brick_size(),
             grid_dims: dims,
-            _pad1: 0,
+            flags,
         };
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));

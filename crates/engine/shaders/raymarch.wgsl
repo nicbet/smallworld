@@ -7,6 +7,11 @@ const SKY_BOT: vec3<f32> = vec3<f32>(0.7, 0.8, 0.95);
 const AMBIENT: f32 = 0.25;
 const MAX_COARSE_STEPS: u32 = 512u;
 const MAX_FINE_STEPS: u32 = 64u;
+const SHADOW_BIAS: f32 = 0.01;
+
+// Uniform flags
+const FLAG_SHADOWS: u32 = 1u;
+const FLAG_SMOOTH_NORMALS: u32 = 2u;
 
 struct Uniforms {
     inv_view_proj: mat4x4<f32>,
@@ -16,7 +21,7 @@ struct Uniforms {
     world_min: vec3<f32>,
     brick_size: f32,
     grid_dims: vec3<u32>,
-    _pad1: u32,
+    flags: u32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -26,6 +31,9 @@ struct Uniforms {
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>;
 
 // ---- helpers ----
+
+const WORDS_PER_BRICK: u32 = BRICK_VOLUME / 4u;
+const PALETTE_ENTRIES: u32 = 256u;
 
 fn sky(dir: vec3<f32>) -> vec3<f32> {
     let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
@@ -56,6 +64,10 @@ fn read_voxel(handle: u32, idx: u32) -> u32 {
     return (word >> ((idx % 4u) * 8u)) & 0xFFu;
 }
 
+fn voxel_idx(v: vec3<i32>) -> u32 {
+    return u32(v.x) + BRICK_EDGE * (u32(v.y) + BRICK_EDGE * u32(v.z));
+}
+
 fn read_palette_color(handle: u32, mat_idx: u32) -> vec3<f32> {
     let packed = palettes[handle * PALETTE_ENTRIES + mat_idx];
     return vec3<f32>(
@@ -65,15 +77,36 @@ fn read_palette_color(handle: u32, mat_idx: u32) -> vec3<f32> {
     ) / 255.0;
 }
 
-const WORDS_PER_BRICK: u32 = BRICK_VOLUME / 4u;
-const PALETTE_ENTRIES: u32 = 256u;
+fn is_solid(handle: u32, v: vec3<i32>) -> f32 {
+    if any(v < vec3<i32>(0)) || any(v >= vec3<i32>(i32(BRICK_EDGE))) {
+        return 0.0;
+    }
+    return select(0.0, 1.0, read_voxel(handle, voxel_idx(v)) != 0u);
+}
+
+// ---- smooth normals from occupancy gradient ----
+
+fn smooth_normal(handle: u32, v: vec3<i32>, face_normal: vec3<f32>) -> vec3<f32> {
+    let gx = is_solid(handle, v - vec3(1,0,0)) - is_solid(handle, v + vec3(1,0,0));
+    let gy = is_solid(handle, v - vec3(0,1,0)) - is_solid(handle, v + vec3(0,1,0));
+    let gz = is_solid(handle, v - vec3(0,0,1)) - is_solid(handle, v + vec3(0,0,1));
+    let grad = vec3<f32>(gx, gy, gz);
+    let len = length(grad);
+    if len > 0.001 {
+        return grad / len;
+    }
+    return face_normal;
+}
 
 // ---- fine DDA inside a 16³ brick ----
 
 struct HitResult {
     hit: bool,
-    color: vec3<f32>,
+    base_color: vec3<f32>,
     normal: vec3<f32>,
+    voxel: vec3<i32>,
+    handle: u32,
+    world_pos: vec3<f32>,
 }
 
 fn trace_brick(
@@ -103,14 +136,12 @@ fn trace_brick(
             break;
         }
 
-        let idx = u32(voxel.x) + BRICK_EDGE * (u32(voxel.y) + BRICK_EDGE * u32(voxel.z));
-        let mat = read_voxel(handle, idx);
+        let mat = read_voxel(handle, voxel_idx(voxel));
 
         if mat != 0u {
             let base = read_palette_color(handle, mat);
-            let ndotl = max(dot(normal, SUN_DIR), 0.0);
-            let color = base * (AMBIENT + (1.0 - AMBIENT) * ndotl);
-            return HitResult(true, color, normal);
+            let wp = brick_min + (vec3<f32>(voxel) + 0.5) * VOXEL_SCALE;
+            return HitResult(true, base, normal, voxel, handle, wp);
         }
 
         if t_max.x < t_max.y {
@@ -136,7 +167,97 @@ fn trace_brick(
         }
     }
 
-    return HitResult(false, vec3<f32>(0.0), vec3<f32>(0.0));
+    return HitResult(false, vec3<f32>(0.0), vec3<f32>(0.0), vec3<i32>(0), 0u, vec3<f32>(0.0));
+}
+
+// ---- shadow ray (any-hit, no shading) ----
+
+fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
+    let inv_rd = 1.0 / rd;
+    let world_max = u.world_min + vec3<f32>(u.grid_dims) * u.brick_size;
+    let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
+    let t_entry = max(world_hit.x, 0.0);
+    if t_entry >= world_hit.y {
+        return false;
+    }
+
+    let inv_brick = 1.0 / u.brick_size;
+    let p_entry = (ro + rd * (t_entry + 0.001)) - u.world_min;
+    var grid_pos = vec3<i32>(floor(p_entry * inv_brick));
+    grid_pos = clamp(grid_pos, vec3<i32>(0), vec3<i32>(u.grid_dims) - vec3<i32>(1));
+
+    let step = vec3<i32>(sign(rd));
+    let abs_inv_grid = abs(vec3<f32>(1.0) / (rd * inv_brick));
+
+    var t_max_g: vec3<f32>;
+    let frac_g = p_entry * inv_brick - vec3<f32>(grid_pos);
+    if rd.x > 0.0 { t_max_g.x = (1.0 - frac_g.x) * abs_inv_grid.x; } else { t_max_g.x = frac_g.x * abs_inv_grid.x; }
+    if rd.y > 0.0 { t_max_g.y = (1.0 - frac_g.y) * abs_inv_grid.y; } else { t_max_g.y = frac_g.y * abs_inv_grid.y; }
+    if rd.z > 0.0 { t_max_g.z = (1.0 - frac_g.z) * abs_inv_grid.z; } else { t_max_g.z = frac_g.z * abs_inv_grid.z; }
+
+    for (var c = 0u; c < MAX_COARSE_STEPS; c++) {
+        if !in_grid(grid_pos) {
+            break;
+        }
+
+        let handle = grid_map[grid_flat(grid_pos)];
+        if handle != EMPTY {
+            let brick_min = u.world_min + vec3<f32>(grid_pos) * u.brick_size;
+            let brick_max = brick_min + vec3<f32>(u.brick_size);
+            let brick_hit = ray_aabb(ro, inv_rd, brick_min, brick_max);
+            let brick_t = max(brick_hit.x, 0.0);
+
+            let inv_voxel = 1.0 / VOXEL_SCALE;
+            let p_brick = (ro + rd * (brick_t + 0.0005)) - brick_min;
+            var voxel = vec3<i32>(floor(p_brick * inv_voxel));
+            voxel = clamp(voxel, vec3<i32>(0), vec3<i32>(i32(BRICK_EDGE) - 1));
+
+            let fine_step = vec3<i32>(sign(rd));
+            let abs_inv_fine = abs(vec3<f32>(1.0) / (rd * inv_voxel));
+
+            var t_max_f: vec3<f32>;
+            let frac_f = p_brick * inv_voxel - vec3<f32>(voxel);
+            if rd.x > 0.0 { t_max_f.x = (1.0 - frac_f.x) * abs_inv_fine.x; } else { t_max_f.x = frac_f.x * abs_inv_fine.x; }
+            if rd.y > 0.0 { t_max_f.y = (1.0 - frac_f.y) * abs_inv_fine.y; } else { t_max_f.y = frac_f.y * abs_inv_fine.y; }
+            if rd.z > 0.0 { t_max_f.z = (1.0 - frac_f.z) * abs_inv_fine.z; } else { t_max_f.z = frac_f.z * abs_inv_fine.z; }
+
+            for (var i = 0u; i < MAX_FINE_STEPS; i++) {
+                if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(i32(BRICK_EDGE))) {
+                    break;
+                }
+                if read_voxel(handle, voxel_idx(voxel)) != 0u {
+                    return true;
+                }
+                if t_max_f.x < t_max_f.y {
+                    if t_max_f.x < t_max_f.z {
+                        voxel.x += fine_step.x;
+                        t_max_f.x += abs_inv_fine.x;
+                    } else {
+                        voxel.z += fine_step.z;
+                        t_max_f.z += abs_inv_fine.z;
+                    }
+                } else {
+                    if t_max_f.y < t_max_f.z {
+                        voxel.y += fine_step.y;
+                        t_max_f.y += abs_inv_fine.y;
+                    } else {
+                        voxel.z += fine_step.z;
+                        t_max_f.z += abs_inv_fine.z;
+                    }
+                }
+            }
+        }
+
+        if t_max_g.x < t_max_g.y {
+            if t_max_g.x < t_max_g.z { grid_pos.x += step.x; t_max_g.x += abs_inv_grid.x; }
+            else                      { grid_pos.z += step.z; t_max_g.z += abs_inv_grid.z; }
+        } else {
+            if t_max_g.y < t_max_g.z { grid_pos.y += step.y; t_max_g.y += abs_inv_grid.y; }
+            else                      { grid_pos.z += step.z; t_max_g.z += abs_inv_grid.z; }
+        }
+    }
+
+    return false;
 }
 
 // ---- main entry point ----
@@ -148,6 +269,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if px.x >= res.x || px.y >= res.y {
         return;
     }
+
+    let shadows_on = (u.flags & FLAG_SHADOWS) != 0u;
+    let smooth_on  = (u.flags & FLAG_SMOOTH_NORMALS) != 0u;
 
     // Pixel → world ray
     let uv = (vec2<f32>(px) + 0.5) / u.resolution;
@@ -171,11 +295,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Future hooks: transmission (water) and accumulation (fog/god rays)
+    // Future hooks
     var throughput = vec3<f32>(1.0);
     var accumulation = vec3<f32>(0.0);
 
-    // Coarse DDA setup (grid space: one cell = one brick)
+    // Coarse DDA setup
     let inv_brick = 1.0 / u.brick_size;
     let p_entry = (ro + rd * (t_entry + 0.001)) - u.world_min;
     var grid_pos = vec3<i32>(floor(p_entry * inv_brick));
@@ -190,7 +314,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if rd.y > 0.0 { t_max_g.y = (1.0 - frac_g.y) * abs_inv_grid.y; } else { t_max_g.y = frac_g.y * abs_inv_grid.y; }
     if rd.z > 0.0 { t_max_g.z = (1.0 - frac_g.z) * abs_inv_grid.z; } else { t_max_g.z = frac_g.z * abs_inv_grid.z; }
 
-    // Initial entry face normal from world AABB
+    // Initial entry face normal
     let tmin_faces = (u.world_min - ro) * inv_rd;
     let tmax_faces = (world_max - ro) * inv_rd;
     let tmin_v = min(tmin_faces, tmax_faces);
@@ -220,21 +344,32 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal);
             if result.hit {
-                final_color = accumulation + throughput * result.color;
-                hit_found = true;
+                // Normal selection
+                var normal = result.normal;
+                if smooth_on {
+                    normal = smooth_normal(result.handle, result.voxel, normal);
+                }
 
-                // Future: if material is transmissive (water):
-                //   throughput *= transmission_color;
-                //   accumulation += emission;
-                //   (continue instead of break)
+                // Lighting
+                let ndotl = max(dot(normal, SUN_DIR), 0.0);
+
+                // Shadow
+                var shadow = 1.0;
+                if shadows_on {
+                    let shadow_origin = result.world_pos + normal * (VOXEL_SCALE * 0.5 + SHADOW_BIAS);
+                    if trace_shadow(shadow_origin, SUN_DIR) {
+                        shadow = 0.0;
+                    }
+                }
+
+                let color = result.base_color * (AMBIENT + (1.0 - AMBIENT) * ndotl * shadow);
+                final_color = accumulation + throughput * color;
+                hit_found = true;
                 break;
             }
         }
 
-        // Future: per-step fog/god ray accumulation
-        // accumulation += sample_fog(grid_pos) * throughput * step_length;
-
-        // Step to next grid cell, track entry face normal
+        // Step to next grid cell
         if t_max_g.x < t_max_g.y {
             if t_max_g.x < t_max_g.z {
                 grid_pos.x += step.x;

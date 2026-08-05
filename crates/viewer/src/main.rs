@@ -125,6 +125,8 @@ struct RunState {
     camera: FreeCamera,
     input: InputState,
     render_scale: f32,
+    shadows: bool,
+    smooth_normals: bool,
     last_frame: Instant,
     frame_history: FrameHistory,
 }
@@ -202,7 +204,9 @@ impl ApplicationHandler for App {
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = FreeCamera::new(aspect);
+        let mut camera = FreeCamera::new(aspect);
+        camera.position = glam::Vec3::new(0.0, 10.0, 18.0);
+        camera.pitch = -25.0_f32.to_radians();
 
         self.state = Some(RunState {
             window,
@@ -219,6 +223,8 @@ impl ApplicationHandler for App {
             camera,
             input: InputState::default(),
             render_scale,
+            shadows: true,
+            smooth_normals: false,
             last_frame: Instant::now(),
             frame_history: FrameHistory::new(),
         });
@@ -332,10 +338,14 @@ impl ApplicationHandler for App {
                 // Run egui every frame so texture deltas are always consumed.
                 let raw_input = state.egui_state.take_egui_input(&state.window);
                 let mut render_scale = state.render_scale;
+                let mut shadows = state.shadows;
+                let mut smooth_normals = state.smooth_normals;
                 let mut full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
-                    draw_debug_panel(ctx, state, &mut render_scale);
+                    draw_debug_panel(ctx, state, &mut render_scale, &mut shadows, &mut smooth_normals);
                     draw_frame_graph(ctx, &state.frame_history);
                 });
+                state.shadows = shadows;
+                state.smooth_normals = smooth_normals;
                 if (render_scale - state.render_scale).abs() > 0.001 {
                     state.render_scale = render_scale;
                     let rw = ((state.surface_config.width as f32) * render_scale) as u32;
@@ -416,12 +426,16 @@ impl ApplicationHandler for App {
                     let blit_ts = state.timestamps.as_ref().map(|ts| ts.render_pass_writes(1));
                     let egui_ts = state.timestamps.as_ref().map(|ts| ts.render_pass_writes(2));
 
+                    let mut flags = 0u32;
+                    if state.shadows { flags |= Raymarcher::FLAG_SHADOWS; }
+                    if state.smooth_normals { flags |= Raymarcher::FLAG_SMOOTH_NORMALS; }
                     state.raymarcher.render(
                         &state.gpu,
                         &mut encoder,
                         &view,
                         &state.camera,
                         &state.brick_index,
+                        flags,
                         compute_ts,
                         blit_ts,
                     );
@@ -514,7 +528,13 @@ impl ApplicationHandler for App {
 // Debug overlay
 // ---------------------------------------------------------------------------
 
-fn draw_debug_panel(ctx: &egui::Context, state: &RunState, render_scale: &mut f32) {
+fn draw_debug_panel(
+    ctx: &egui::Context,
+    state: &RunState,
+    render_scale: &mut f32,
+    shadows: &mut bool,
+    smooth_normals: &mut bool,
+) {
     let info = state.gpu.adapter_info();
     let dt = state.last_frame.elapsed().as_secs_f32();
 
@@ -537,6 +557,10 @@ fn draw_debug_panel(ctx: &egui::Context, state: &RunState, render_scale: &mut f3
                     .text("Scale")
                     .step_by(0.05),
             );
+            ui.horizontal(|ui| {
+                ui.checkbox(shadows, "Shadows");
+                ui.checkbox(smooth_normals, "Smooth N");
+            });
             ui.separator();
             ui.label(format!(
                 "Pos: ({:.1}, {:.1}, {:.1})",
@@ -595,6 +619,7 @@ fn draw_frame_graph(ctx: &egui::Context, history: &FrameHistory) {
         .default_pos([8.0, 280.0])
         .default_width(FRAME_HISTORY_LEN as f32 * BAR_WIDTH + 16.0)
         .collapsible(true)
+        .default_open(false)
         .show(ctx, |ui| {
             if history.count == 0 {
                 ui.label("No data yet");
