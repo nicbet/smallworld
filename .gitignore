@@ -1,2 +1,9 @@
 .xpo/issues.snapshot.json
 .xpo/git.lock
+
+# Rust
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store

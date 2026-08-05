@@ -1,0 +1,3 @@
+# Runtime data loaded through `smallworld_engine::assets` — textures, material palettes,
+# saved worlds. Shaders do not belong here: they are engine source and live in
+# crates/engine/shaders/, baked into the binary.

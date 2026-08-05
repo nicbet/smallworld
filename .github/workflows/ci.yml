@@ -1,0 +1,64 @@
+# The Makefile mirrors this workflow: `make ci` runs the same sequence locally. Keep the
+# two in step. This file calls cargo directly rather than `make`, because GNU make is not
+# guaranteed on the windows-latest runner image.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  check:
+    # macos-latest is Apple Silicon (Metal); ubuntu and windows cover the Vulkan side of
+    # the wgpu portability risk in docs/DESIGN.md §13.
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # winit and wgpu need X11, Wayland and a Vulkan loader on Linux. Installed ahead of
+      # those dependencies so the matrix stays green when they land.
+      - name: Install Linux graphics dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxkbcommon-dev libwayland-dev \
+            libxrandr-dev libxi-dev libxcursor-dev \
+            mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Smoke test
+        run: cargo run -p smallworld-viewer

@@ -1,0 +1,18 @@
+[package]
+name = "smallworld-viewer"
+description = "Debug viewer and application shell for the smallworld engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "smallworld"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+smallworld-engine.workspace = true
