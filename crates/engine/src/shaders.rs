@@ -28,6 +28,10 @@ pub const SHADER_DIR_ENV: &str = "SMALLWORLD_SHADER_DIR";
 pub enum Shader {
     /// Constants and helpers shared by every pass; prepend it with [`compose`].
     Common,
+    /// Fullscreen compute-pass raymarcher for a dense voxel volume.
+    Raymarch,
+    /// Fullscreen-triangle blit: copies compute output to the surface.
+    Blit,
 }
 
 impl Shader {
@@ -36,6 +40,8 @@ impl Shader {
     pub const fn file_name(self) -> &'static str {
         match self {
             Self::Common => "common.wgsl",
+            Self::Raymarch => "raymarch.wgsl",
+            Self::Blit => "blit.wgsl",
         }
     }
 
@@ -44,6 +50,8 @@ impl Shader {
     pub const fn baked(self) -> &'static str {
         match self {
             Self::Common => include_str!("../shaders/common.wgsl"),
+            Self::Raymarch => include_str!("../shaders/raymarch.wgsl"),
+            Self::Blit => include_str!("../shaders/blit.wgsl"),
         }
     }
 }
@@ -103,7 +111,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// Every shader the engine knows about. Extend alongside [`Shader`].
-    const ALL: &[Shader] = &[Shader::Common];
+    const ALL: &[Shader] = &[Shader::Common, Shader::Raymarch, Shader::Blit];
 
     fn shader_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders")

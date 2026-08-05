@@ -22,6 +22,9 @@ egui-winit = "0.36"
 # Math
 glam = "0.33"
 
+# Serialisation
+bytemuck = { version = "1", features = ["derive"] }
+
 # Async
 pollster = "0.4"
 

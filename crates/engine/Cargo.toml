@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytemuck.workspace = true
 glam.workspace = true
 log.workspace = true
 wgpu.workspace = true

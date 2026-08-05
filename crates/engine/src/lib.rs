@@ -4,6 +4,7 @@
 pub mod assets;
 pub mod camera;
 pub mod gpu;
+pub mod raymarcher;
 pub mod shaders;
 
 /// Re-export wgpu so the viewer (and future crates) share one version.

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::gpu::GpuContext;
+use smallworld_engine::raymarcher::Raymarcher;
 use smallworld_engine::wgpu;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
@@ -69,6 +70,7 @@ struct RunState {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    raymarcher: Raymarcher,
     camera: FreeCamera,
     input: InputState,
     last_frame: Instant,
@@ -120,6 +122,13 @@ impl ApplicationHandler for App {
             egui_wgpu::RendererOptions::default(),
         );
 
+        let raymarcher = Raymarcher::new(
+            &gpu,
+            size.width.max(1),
+            size.height.max(1),
+            surface_config.format,
+        );
+
         let aspect = size.width as f32 / size.height.max(1) as f32;
         let camera = FreeCamera::new(aspect);
 
@@ -131,6 +140,7 @@ impl ApplicationHandler for App {
             egui_ctx,
             egui_state,
             egui_renderer,
+            raymarcher,
             camera,
             input: InputState::default(),
             last_frame: Instant::now(),
@@ -159,6 +169,7 @@ impl ApplicationHandler for App {
                 let w = new_size.width.max(1);
                 let h = new_size.height.max(1);
                 state.surface_config = state.gpu.configure_surface(&state.surface, w, h);
+                state.raymarcher.resize(&state.gpu, w, h);
                 state.camera.aspect = w as f32 / h as f32;
             }
 
@@ -294,18 +305,17 @@ impl ApplicationHandler for App {
                         .texture
                         .create_view(&wgpu::TextureViewDescriptor::default());
 
+                    state
+                        .raymarcher
+                        .render(&state.gpu, &mut encoder, &view, &state.camera);
+
                     let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("main"),
+                        label: Some("egui"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.1,
-                                    g: 0.1,
-                                    b: 0.12,
-                                    a: 1.0,
-                                }),
+                                load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
                             },
                             depth_slice: None,
