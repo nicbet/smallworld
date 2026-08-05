@@ -175,8 +175,8 @@ impl Raymarcher {
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 

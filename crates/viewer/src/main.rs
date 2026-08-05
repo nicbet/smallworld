@@ -124,6 +124,7 @@ struct RunState {
     timestamps: Option<GpuTimestamps>,
     camera: FreeCamera,
     input: InputState,
+    render_scale: f32,
     last_frame: Instant,
     frame_history: FrameHistory,
 }
@@ -187,10 +188,14 @@ impl ApplicationHandler for App {
         let mut brick_index = BrickIndex::new(&gpu.device, grid_dims, world_min);
         generate_test_world(&gpu.queue, &mut brick_pool, &mut brick_index);
 
+        let render_scale = if window.scale_factor() > 1.0 { 0.5 } else { 1.0 };
+        let render_w = ((size.width.max(1) as f32) * render_scale) as u32;
+        let render_h = ((size.height.max(1) as f32) * render_scale) as u32;
+
         let raymarcher = Raymarcher::new(
             &gpu,
-            size.width.max(1),
-            size.height.max(1),
+            render_w.max(1),
+            render_h.max(1),
             surface_config.format,
             &brick_pool,
             &brick_index,
@@ -213,6 +218,7 @@ impl ApplicationHandler for App {
             timestamps,
             camera,
             input: InputState::default(),
+            render_scale,
             last_frame: Instant::now(),
             frame_history: FrameHistory::new(),
         });
@@ -240,9 +246,15 @@ impl ApplicationHandler for App {
                 let w = new_size.width.max(1);
                 let h = new_size.height.max(1);
                 state.surface_config = state.gpu.configure_surface(&state.surface, w, h);
-                state
-                    .raymarcher
-                    .resize(&state.gpu, w, h, &state.brick_pool, &state.brick_index);
+                let rw = ((w as f32) * state.render_scale) as u32;
+                let rh = ((h as f32) * state.render_scale) as u32;
+                state.raymarcher.resize(
+                    &state.gpu,
+                    rw.max(1),
+                    rh.max(1),
+                    &state.brick_pool,
+                    &state.brick_index,
+                );
                 state.camera.aspect = w as f32 / h as f32;
             }
 
@@ -319,10 +331,23 @@ impl ApplicationHandler for App {
 
                 // Run egui every frame so texture deltas are always consumed.
                 let raw_input = state.egui_state.take_egui_input(&state.window);
+                let mut render_scale = state.render_scale;
                 let mut full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
-                    draw_debug_panel(ctx, state);
+                    draw_debug_panel(ctx, state, &mut render_scale);
                     draw_frame_graph(ctx, &state.frame_history);
                 });
+                if (render_scale - state.render_scale).abs() > 0.001 {
+                    state.render_scale = render_scale;
+                    let rw = ((state.surface_config.width as f32) * render_scale) as u32;
+                    let rh = ((state.surface_config.height as f32) * render_scale) as u32;
+                    state.raymarcher.resize(
+                        &state.gpu,
+                        rw.max(1),
+                        rh.max(1),
+                        &state.brick_pool,
+                        &state.brick_index,
+                    );
+                }
                 state
                     .egui_state
                     .handle_platform_output(&state.window, full_output.platform_output);
@@ -489,7 +514,7 @@ impl ApplicationHandler for App {
 // Debug overlay
 // ---------------------------------------------------------------------------
 
-fn draw_debug_panel(ctx: &egui::Context, state: &RunState) {
+fn draw_debug_panel(ctx: &egui::Context, state: &RunState, render_scale: &mut f32) {
     let info = state.gpu.adapter_info();
     let dt = state.last_frame.elapsed().as_secs_f32();
 
@@ -501,10 +526,17 @@ fn draw_debug_panel(ctx: &egui::Context, state: &RunState) {
             ui.label(format!("Adapter: {} — {:?}", info.name, info.backend));
             ui.label(format!("Driver: {}", info.driver));
             ui.separator();
+            let rw = ((state.surface_config.width as f32) * *render_scale) as u32;
+            let rh = ((state.surface_config.height as f32) * *render_scale) as u32;
             ui.label(format!(
-                "Window: {}×{}",
-                state.surface_config.width, state.surface_config.height
+                "Window: {}×{}  Render: {}×{}",
+                state.surface_config.width, state.surface_config.height, rw, rh
             ));
+            ui.add(
+                egui::Slider::new(render_scale, 0.25..=1.0)
+                    .text("Scale")
+                    .step_by(0.05),
+            );
             ui.separator();
             ui.label(format!(
                 "Pos: ({:.1}, {:.1}, {:.1})",
