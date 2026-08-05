@@ -15,6 +15,9 @@ pub const BRICK_EDGE: u32 = 16;
 /// Total voxels in one brick.
 pub const BRICK_VOLUME: u32 = BRICK_EDGE * BRICK_EDGE * BRICK_EDGE;
 
+/// Edge length of one voxel in metres (matches `common.wgsl`).
+pub const VOXEL_SCALE: f32 = 0.1;
+
 /// Opaque handle to a live brick in the pool.
 ///
 /// The `slot` field is the GPU buffer index; `generation` is a CPU-side guard

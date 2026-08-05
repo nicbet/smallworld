@@ -1,11 +1,11 @@
-//! Compute-shader raymarcher for a dense 256³ voxel volume.
+//! Compute-shader raymarcher over a sparse brick grid.
 
+use crate::brick_index::BrickIndex;
+use crate::brick_pool::BrickPool;
 use crate::camera::FreeCamera;
 use crate::gpu::GpuContext;
 use crate::shaders::{self, Shader};
 
-const VOLUME_EDGE: usize = 256;
-const VOLUME_LEN: usize = VOLUME_EDGE * VOLUME_EDGE * VOLUME_EDGE;
 const WORKGROUP_SIZE: u32 = 8;
 
 /// GPU-resident raymarcher: compute pass writes to a storage texture, blit pass
@@ -17,9 +17,7 @@ pub struct Raymarcher {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     compute_bind_group: wgpu::BindGroup,
     blit_bind_group: wgpu::BindGroup,
-    camera_buf: wgpu::Buffer,
-    #[allow(dead_code)]
-    voxel_buf: wgpu::Buffer,
+    uniform_buf: wgpu::Buffer,
     #[allow(dead_code)]
     output_texture: wgpu::Texture,
     output_view: wgpu::TextureView,
@@ -30,21 +28,26 @@ pub struct Raymarcher {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniforms {
+struct Uniforms {
     inv_view_proj: [f32; 16],
     camera_pos: [f32; 4],
     resolution: [f32; 2],
-    _pad: [f32; 2],
+    _pad0: [f32; 2],
+    world_min: [f32; 3],
+    brick_size: f32,
+    grid_dims: [u32; 3],
+    _pad1: u32,
 }
 
 impl Raymarcher {
-    /// Creates pipelines, allocates the voxel buffer with a procedural test scene,
-    /// and creates the output texture at the given resolution.
+    /// Creates pipelines and bind groups referencing the brick pool and index.
     pub fn new(
         gpu: &GpuContext,
         width: u32,
         height: u32,
         surface_format: wgpu::TextureFormat,
+        pool: &BrickPool,
+        index: &BrickIndex,
     ) -> Self {
         let compute_source = shaders::compose(&[Shader::Common, Shader::Raymarch]);
         let compute_module = gpu
@@ -62,42 +65,25 @@ impl Raymarcher {
                 source: wgpu::ShaderSource::Wgsl(blit_source),
             });
 
-        // --- Compute pipeline ---
+        // --- Compute bind group layout (5 bindings) ---
         let compute_bind_group_layout =
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("raymarch"),
                     entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::StorageTexture {
+                        bgl_entry(0, wgpu::ShaderStages::COMPUTE, uniform_binding()),
+                        bgl_entry(1, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                        bgl_entry(2, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                        bgl_entry(3, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                        bgl_entry(
+                            4,
+                            wgpu::ShaderStages::COMPUTE,
+                            wgpu::BindingType::StorageTexture {
                                 access: wgpu::StorageTextureAccess::WriteOnly,
                                 format: wgpu::TextureFormat::Rgba8Unorm,
                                 view_dimension: wgpu::TextureViewDimension::D2,
                             },
-                            count: None,
-                        },
+                        ),
                     ],
                 });
 
@@ -120,28 +106,26 @@ impl Raymarcher {
                     cache: None,
                 });
 
-        // --- Blit pipeline ---
+        // --- Blit pipeline (unchanged) ---
         let blit_bind_group_layout =
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("blit"),
                     entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
+                        bgl_entry(
+                            0,
+                            wgpu::ShaderStages::FRAGMENT,
+                            wgpu::BindingType::Texture {
                                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                                 view_dimension: wgpu::TextureViewDimension::D2,
                                 multisampled: false,
                             },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
+                        ),
+                        bgl_entry(
+                            1,
+                            wgpu::ShaderStages::FRAGMENT,
+                            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        ),
                     ],
                 });
 
@@ -182,22 +166,12 @@ impl Raymarcher {
                 });
 
         // --- Buffers ---
-        let camera_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera_uniforms"),
-            size: size_of::<CameraUniforms>() as u64,
+        let uniform_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raymarch_uniforms"),
+            size: size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let voxel_data = generate_test_volume();
-        let voxel_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("voxel_data"),
-            size: (VOLUME_LEN * size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&voxel_buf, 0, bytemuck::cast_slice(&voxel_data));
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit"),
@@ -211,8 +185,10 @@ impl Raymarcher {
         let compute_bind_group = create_compute_bind_group(
             &gpu.device,
             &compute_bind_group_layout,
-            &camera_buf,
-            &voxel_buf,
+            &uniform_buf,
+            index.buffer(),
+            pool.voxel_buffer(),
+            pool.palette_buffer(),
             &output_view,
         );
         let blit_bind_group = create_blit_bind_group(
@@ -229,8 +205,7 @@ impl Raymarcher {
             blit_bind_group_layout,
             compute_bind_group,
             blit_bind_group,
-            camera_buf,
-            voxel_buf,
+            uniform_buf,
             output_texture,
             output_view,
             sampler,
@@ -240,7 +215,14 @@ impl Raymarcher {
     }
 
     /// Recreates the output texture and bind groups at a new resolution.
-    pub fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) {
+    pub fn resize(
+        &mut self,
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        pool: &BrickPool,
+        index: &BrickIndex,
+    ) {
         if width == self.width && height == self.height {
             return;
         }
@@ -254,8 +236,10 @@ impl Raymarcher {
         self.compute_bind_group = create_compute_bind_group(
             &gpu.device,
             &self.compute_bind_group_layout,
-            &self.camera_buf,
-            &self.voxel_buf,
+            &self.uniform_buf,
+            index.buffer(),
+            pool.voxel_buffer(),
+            pool.palette_buffer(),
             &self.output_view,
         );
         self.blit_bind_group = create_blit_bind_group(
@@ -267,30 +251,33 @@ impl Raymarcher {
     }
 
     /// Dispatches the compute raymarch pass and blits the result to `surface_view`.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
+        index: &BrickIndex,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let vp = camera.projection_matrix() * camera.view_matrix();
         let inv_vp = vp.inverse();
-        let uniforms = CameraUniforms {
+        let wmin = index.world_min();
+        let dims = index.dims();
+        let uniforms = Uniforms {
             inv_view_proj: inv_vp.to_cols_array(),
-            camera_pos: [
-                camera.position.x,
-                camera.position.y,
-                camera.position.z,
-                1.0,
-            ],
+            camera_pos: [camera.position.x, camera.position.y, camera.position.z, 1.0],
             resolution: [self.width as f32, self.height as f32],
-            _pad: [0.0; 2],
+            _pad0: [0.0; 2],
+            world_min: [wmin.x, wmin.y, wmin.z],
+            brick_size: index.brick_size(),
+            grid_dims: dims,
+            _pad1: 0,
         };
         gpu.queue
-            .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniforms));
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         // Compute pass
         {
@@ -332,6 +319,37 @@ impl Raymarcher {
     }
 }
 
+// --- helpers ---
+
+fn bgl_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BindingType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty,
+        count: None,
+    }
+}
+
+fn uniform_binding() -> wgpu::BindingType {
+    wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    }
+}
+
+fn storage_ro_binding() -> wgpu::BindingType {
+    wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    }
+}
+
 fn create_output_texture(
     device: &wgpu::Device,
     width: u32,
@@ -358,8 +376,10 @@ fn create_output_texture(
 fn create_compute_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    camera_buf: &wgpu::Buffer,
+    uniform_buf: &wgpu::Buffer,
+    index_buf: &wgpu::Buffer,
     voxel_buf: &wgpu::Buffer,
+    palette_buf: &wgpu::Buffer,
     output_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -368,14 +388,22 @@ fn create_compute_bind_group(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_buf.as_entire_binding(),
+                resource: uniform_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: voxel_buf.as_entire_binding(),
+                resource: index_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
+                resource: voxel_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: palette_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
                 resource: wgpu::BindingResource::TextureView(output_view),
             },
         ],
@@ -402,31 +430,4 @@ fn create_blit_bind_group(
             },
         ],
     })
-}
-
-fn generate_test_volume() -> Vec<u32> {
-    let mut data = vec![0u32; VOLUME_LEN];
-    let edge = VOLUME_EDGE as i32;
-    let center = edge / 2;
-    let sphere_radius_sq = 40 * 40;
-    let ground_height = 80;
-
-    for z in 0..edge {
-        for y in 0..edge {
-            for x in 0..edge {
-                let idx = (x + edge * (y + edge * z)) as usize;
-
-                let dx = x - center;
-                let dy = y - center;
-                let dz = z - center;
-                if dx * dx + dy * dy + dz * dz <= sphere_radius_sq {
-                    data[idx] = 2;
-                } else if y < ground_height {
-                    data[idx] = 1;
-                }
-            }
-        }
-    }
-
-    data
 }

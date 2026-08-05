@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use smallworld_engine::brick_index::BrickIndex;
+use smallworld_engine::brick_pool::{BrickPool, BRICK_EDGE, BRICK_VOLUME};
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
@@ -116,6 +118,8 @@ struct RunState {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    brick_pool: BrickPool,
+    brick_index: BrickIndex,
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
     camera: FreeCamera,
@@ -176,11 +180,20 @@ impl ApplicationHandler for App {
             None
         };
 
+        let grid_dims = [16u32, 16, 16];
+        let world_min = glam::Vec3::splat(-12.8);
+
+        let mut brick_pool = BrickPool::new(&gpu.device, 4096);
+        let mut brick_index = BrickIndex::new(&gpu.device, grid_dims, world_min);
+        generate_test_world(&gpu.queue, &mut brick_pool, &mut brick_index);
+
         let raymarcher = Raymarcher::new(
             &gpu,
             size.width.max(1),
             size.height.max(1),
             surface_config.format,
+            &brick_pool,
+            &brick_index,
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -194,6 +207,8 @@ impl ApplicationHandler for App {
             egui_ctx,
             egui_state,
             egui_renderer,
+            brick_pool,
+            brick_index,
             raymarcher,
             timestamps,
             camera,
@@ -225,7 +240,9 @@ impl ApplicationHandler for App {
                 let w = new_size.width.max(1);
                 let h = new_size.height.max(1);
                 state.surface_config = state.gpu.configure_surface(&state.surface, w, h);
-                state.raymarcher.resize(&state.gpu, w, h);
+                state
+                    .raymarcher
+                    .resize(&state.gpu, w, h, &state.brick_pool, &state.brick_index);
                 state.camera.aspect = w as f32 / h as f32;
             }
 
@@ -379,6 +396,7 @@ impl ApplicationHandler for App {
                         &mut encoder,
                         &view,
                         &state.camera,
+                        &state.brick_index,
                         compute_ts,
                         blit_ts,
                     );
@@ -505,6 +523,12 @@ fn draw_debug_panel(ctx: &egui::Context, state: &RunState) {
                     1.0 / dt
                 ));
             }
+            ui.separator();
+            ui.label(format!(
+                "Bricks: {} / {}",
+                state.brick_pool.live_count(),
+                state.brick_pool.capacity(),
+            ));
             ui.separator();
             if let Some(ts) = &state.timestamps {
                 let avg = ts.averages();
@@ -662,4 +686,68 @@ fn legend_dot(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 2.0, color);
     ui.label(egui::RichText::new(label).size(10.0));
+}
+
+// ---------------------------------------------------------------------------
+// Test world generation
+// ---------------------------------------------------------------------------
+
+fn generate_test_world(
+    queue: &wgpu::Queue,
+    pool: &mut BrickPool,
+    index: &mut BrickIndex,
+) {
+    let dims = index.dims();
+    let total_voxels_edge = dims[0] * BRICK_EDGE;
+    let center = (total_voxels_edge / 2) as i32;
+    let sphere_radius_sq: i32 = 40 * 40;
+    let ground_height: u32 = 80;
+
+    let palette: &[[u8; 4]] = &[
+        [0, 0, 0, 0],         // 0 = air
+        [102, 140, 77, 255],  // 1 = ground
+        [179, 166, 153, 255], // 2 = stone
+    ];
+
+    let mut allocated = 0u32;
+    for gz in 0..dims[2] {
+        for gy in 0..dims[1] {
+            for gx in 0..dims[0] {
+                let mut voxels = [0u8; BRICK_VOLUME as usize];
+                let mut has_solid = false;
+
+                for lz in 0..BRICK_EDGE {
+                    for ly in 0..BRICK_EDGE {
+                        for lx in 0..BRICK_EDGE {
+                            let wx = (gx * BRICK_EDGE + lx) as i32;
+                            let wy = (gy * BRICK_EDGE + ly) as i32;
+                            let wz = (gz * BRICK_EDGE + lz) as i32;
+                            let idx = (lx + BRICK_EDGE * (ly + BRICK_EDGE * lz)) as usize;
+
+                            let dx = wx - center;
+                            let dy = wy - center;
+                            let dz = wz - center;
+                            if dx * dx + dy * dy + dz * dz <= sphere_radius_sq {
+                                voxels[idx] = 2;
+                                has_solid = true;
+                            } else if (gy * BRICK_EDGE + ly) < ground_height {
+                                voxels[idx] = 1;
+                                has_solid = true;
+                            }
+                        }
+                    }
+                }
+
+                if has_solid {
+                    let handle = pool.alloc().expect("brick pool exhausted");
+                    pool.write_voxels(queue, handle, &voxels);
+                    pool.write_palette(queue, handle, palette);
+                    index.set([gx, gy, gz], handle);
+                    allocated += 1;
+                }
+            }
+        }
+    }
+    index.upload(queue);
+    log::info!("test world: {allocated} bricks allocated");
 }
