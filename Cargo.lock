@@ -2376,6 +2376,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "log",
+ "pollster",
  "wgpu",
 ]
 
