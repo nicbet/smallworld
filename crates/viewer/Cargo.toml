@@ -15,4 +15,12 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+env_logger.workspace = true
+glam.workspace = true
+log.workspace = true
+pollster.workspace = true
 smallworld-engine.workspace = true
+winit.workspace = true

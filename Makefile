@@ -45,7 +45,10 @@ build: ## Build every crate in the workspace
 run: ## Run the viewer
 	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG)
 
-ci: lint test build run ## Everything ci.yml runs, in the same order
+smoke: ## Run headless smoke test (adapter probe)
+	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG) -- --info
+
+ci: lint test build smoke ## Everything ci.yml runs, in the same order
 
 clean: ## Remove build artifacts
 	$(CARGO) clean

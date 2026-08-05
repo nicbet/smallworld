@@ -61,4 +61,4 @@ jobs:
         run: cargo test --workspace
 
       - name: Smoke test
-        run: cargo run -p smallworld-viewer
+        run: cargo run -p smallworld-viewer -- --info
