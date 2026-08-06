@@ -157,7 +157,12 @@ fn subdivide(
     subdivide(nodes, indices, aabbs, centroids, left_idx + 1);
 }
 
-fn aabb_of_range(aabbs: &[(Vec3, Vec3)], indices: &[u32], start: usize, count: usize) -> (Vec3, Vec3) {
+fn aabb_of_range(
+    aabbs: &[(Vec3, Vec3)],
+    indices: &[u32],
+    start: usize,
+    count: usize,
+) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
     for i in start..start + count {

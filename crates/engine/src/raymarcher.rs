@@ -147,33 +147,33 @@ impl Raymarcher {
                     immediate_size: 0,
                 });
 
-        let blit_pipeline =
-            gpu.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("blit"),
-                    layout: Some(&blit_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &blit_module,
-                        entry_point: Some("vs_main"),
-                        buffers: &[],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &blit_module,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: surface_format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                });
+        let blit_pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blit"),
+                layout: Some(&blit_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &blit_module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blit_module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         // --- Buffers ---
         let uniform_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -214,12 +214,8 @@ impl Raymarcher {
             grid_buf,
             bvh_buf,
         );
-        let blit_bind_group = create_blit_bind_group(
-            &gpu.device,
-            &blit_bind_group_layout,
-            &output_view,
-            &sampler,
-        );
+        let blit_bind_group =
+            create_blit_bind_group(&gpu.device, &blit_bind_group_layout, &output_view, &sampler);
 
         Self {
             compute_pipeline,

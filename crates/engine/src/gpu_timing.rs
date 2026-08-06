@@ -107,8 +107,7 @@ impl GpuTimestamps {
                 let end = ticks[i * 2 + 1];
                 let duration_ns = (end.wrapping_sub(begin)) as f64 * self.timestamp_period as f64;
                 let duration_ms = duration_ns / 1_000_000.0;
-                self.averages[i] =
-                    self.averages[i] * (1.0 - EMA_ALPHA) + duration_ms * EMA_ALPHA;
+                self.averages[i] = self.averages[i] * (1.0 - EMA_ALPHA) + duration_ms * EMA_ALPHA;
             }
         }
 

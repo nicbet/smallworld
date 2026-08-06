@@ -1,6 +1,6 @@
 //! Instanced voxel objects: models (shared voxel data) and instances (transforms).
 
-use crate::brick_pool::{BrickHandle, BrickPool, BRICK_EDGE, BRICK_VOLUME};
+use crate::brick_pool::{BRICK_EDGE, BRICK_VOLUME, BrickHandle, BrickPool};
 use glam::{Mat4, Quat, Vec3};
 
 /// Shared voxel data for an object type (tree, rock, prop).
@@ -170,11 +170,7 @@ pub struct VoxelInstanceGpu {
 impl VoxelInstanceGpu {
     /// Builds GPU instance data from a CPU instance + model + grid offset.
     #[must_use]
-    pub fn from_instance(
-        inst: &VoxelInstance,
-        model: &VoxelModel,
-        grid_offset: u32,
-    ) -> Self {
+    pub fn from_instance(inst: &VoxelInstance, model: &VoxelModel, grid_offset: u32) -> Self {
         let transform = inst.transform(model);
         let inv_transform = transform.inverse();
         let (aabb_min, aabb_max) = inst.world_aabb(model);
@@ -183,7 +179,12 @@ impl VoxelInstanceGpu {
             transform: transform.to_cols_array(),
             inv_transform: inv_transform.to_cols_array(),
             aabb_min: [aabb_min.x, aabb_min.y, aabb_min.z, model.voxel_scale()],
-            aabb_max: [aabb_max.x, aabb_max.y, aabb_max.z, f32::from_bits(grid_offset)],
+            aabb_max: [
+                aabb_max.x,
+                aabb_max.y,
+                aabb_max.z,
+                f32::from_bits(grid_offset),
+            ],
             grid_dims: [dims[0], dims[1], dims[2], dims[0] * dims[1] * dims[2]],
         }
     }

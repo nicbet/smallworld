@@ -8,12 +8,10 @@ pub mod bvh;
 pub mod camera;
 pub mod gpu;
 pub mod gpu_timing;
-pub mod model_gen;
 pub mod raymarcher;
 pub mod scene;
 pub mod shaders;
 pub mod voxel_object;
-pub mod worldgen;
 
 /// Re-export wgpu so the viewer (and future crates) share one version.
 pub use wgpu;

@@ -1,6 +1,6 @@
 [package]
-name = "smallworld-viewer"
-description = "Debug viewer and application shell for the smallworld engine."
+name = "smallworld-sandbox"
+description = "Dev/test harness for the smallworld engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

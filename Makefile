@@ -8,7 +8,7 @@
 # Written for the stock macOS make (GNU make 3.81): no make-4-only syntax.
 
 CARGO ?= cargo
-VIEWER := smallworld-viewer
+SANDBOX := smallworld-sandbox
 
 # RELEASE=1 make build|run
 ifdef RELEASE
@@ -16,7 +16,7 @@ PROFILE_FLAG := --release
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt lint test build run ci clean
+.PHONY: help fmt lint test build sandbox ci clean
 
 # Targets share one cargo target directory; serialise them even under `make -j`.
 .NOTPARALLEL:
@@ -42,15 +42,15 @@ test: ## Run the workspace test suite
 build: ## Build every crate in the workspace
 	$(CARGO) build --workspace $(PROFILE_FLAG)
 
-run: ## Run the viewer
-	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG)
+sandbox: ## Run the sandbox
+	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG)
 
 smoke: ## Run headless smoke test (adapter probe)
-	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG) -- --info
+	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG) -- --info
 
 screenshot: ## Run viewer, capture window screenshot (DEST=path)
 	@DEST=$${DEST:-/tmp/smallworld-screenshot.png}; \
-	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG) & \
+	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG) & \
 	PID=$$!; \
 	sleep $${DELAY:-6}; \
 	WID=$$(osascript -e "tell application \"System Events\" to get id of first window of (first process whose unix id is $$PID)" 2>/dev/null); \

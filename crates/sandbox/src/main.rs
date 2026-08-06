@@ -1,4 +1,7 @@
-//! Debug viewer and application shell for the smallworld engine.
+//! Sandbox: dev/test harness for the smallworld engine.
+
+mod model_gen;
+mod worldgen;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,17 +11,16 @@ use smallworld_engine::brick_pool::BrickPool;
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
-use smallworld_engine::model_gen;
 use smallworld_engine::raymarcher::Raymarcher;
 use smallworld_engine::scene::Scene;
 use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
-use smallworld_engine::worldgen::WorldGenerator;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
+use worldgen::WorldGenerator;
 
 fn main() {
     env_logger::init();
@@ -38,7 +40,7 @@ fn print_adapter_info() {
     let instance = GpuContext::create_instance();
     let ctx = pollster::block_on(GpuContext::headless(instance));
     let info = ctx.adapter_info();
-    println!("smallworld-viewer {}", env!("CARGO_PKG_VERSION"));
+    println!("smallworld-sandbox {}", env!("CARGO_PKG_VERSION"));
     println!("  engine      {}", smallworld_engine::VERSION);
     println!("  adapter     {}", info.name);
     println!("  backend     {:?}", info.backend);
@@ -199,7 +201,11 @@ impl ApplicationHandler for App {
         populate_scene(&gpu.queue, &mut brick_pool, &mut scene, &brick_index);
         scene.upload(&gpu.device);
 
-        let render_scale = if window.scale_factor() > 1.0 { 0.5 } else { 1.0 };
+        let render_scale = if window.scale_factor() > 1.0 {
+            0.5
+        } else {
+            1.0
+        };
         let render_w = ((size.width.max(1) as f32) * render_scale) as u32;
         let render_h = ((size.height.max(1) as f32) * render_scale) as u32;
 
@@ -353,7 +359,13 @@ impl ApplicationHandler for App {
                 let mut shadows = state.shadows;
                 let mut smooth_normals = state.smooth_normals;
                 let mut full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
-                    draw_debug_panel(ctx, state, &mut render_scale, &mut shadows, &mut smooth_normals);
+                    draw_debug_panel(
+                        ctx,
+                        state,
+                        &mut render_scale,
+                        &mut shadows,
+                        &mut smooth_normals,
+                    );
                     draw_frame_graph(ctx, &state.frame_history);
                 });
                 state.shadows = shadows;
@@ -435,13 +447,20 @@ impl ApplicationHandler for App {
                         .texture
                         .create_view(&wgpu::TextureViewDescriptor::default());
 
-                    let compute_ts = state.timestamps.as_ref().map(|ts| ts.compute_pass_writes(0));
+                    let compute_ts = state
+                        .timestamps
+                        .as_ref()
+                        .map(|ts| ts.compute_pass_writes(0));
                     let blit_ts = state.timestamps.as_ref().map(|ts| ts.render_pass_writes(1));
                     let egui_ts = state.timestamps.as_ref().map(|ts| ts.render_pass_writes(2));
 
                     let mut flags = 0u32;
-                    if state.shadows { flags |= Raymarcher::FLAG_SHADOWS; }
-                    if state.smooth_normals { flags |= Raymarcher::FLAG_SMOOTH_NORMALS; }
+                    if state.shadows {
+                        flags |= Raymarcher::FLAG_SHADOWS;
+                    }
+                    if state.smooth_normals {
+                        flags |= Raymarcher::FLAG_SMOOTH_NORMALS;
+                    }
                     state.raymarcher.render(
                         &state.gpu,
                         &mut encoder,
@@ -641,7 +660,8 @@ fn draw_frame_graph(ctx: &egui::Context, history: &FrameHistory) {
                 return;
             }
 
-            let latest = history.samples[(history.write + FRAME_HISTORY_LEN - 1) % FRAME_HISTORY_LEN];
+            let latest =
+                history.samples[(history.write + FRAME_HISTORY_LEN - 1) % FRAME_HISTORY_LEN];
             ui.label(format!(
                 "dt {:.1} ms  cpu {:.1} ms  gpu {:.1} ms",
                 latest.dt_ms, latest.cpu_ms, latest.gpu_ms
@@ -673,7 +693,10 @@ fn draw_frame_graph(ctx: &egui::Context, history: &FrameHistory) {
                 let y = y_for(TARGET_60);
                 painter.line_segment(
                     [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 255, 100, 60)),
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_premultiplied(100, 255, 100, 60),
+                    ),
                 );
                 painter.text(
                     egui::pos2(rect.right() - 2.0, y - 2.0),
@@ -687,7 +710,10 @@ fn draw_frame_graph(ctx: &egui::Context, history: &FrameHistory) {
                 let y = y_for(TARGET_30);
                 painter.line_segment(
                     [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 100, 100, 60)),
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_premultiplied(255, 100, 100, 60),
+                    ),
                 );
                 painter.text(
                     egui::pos2(rect.right() - 2.0, y - 2.0),
@@ -764,11 +790,7 @@ fn legend_dot(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
 // World generation
 // ---------------------------------------------------------------------------
 
-fn generate_world(
-    queue: &wgpu::Queue,
-    pool: &mut BrickPool,
-    index: &mut BrickIndex,
-) {
+fn generate_world(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut BrickIndex) {
     let start = Instant::now();
     let wg = WorldGenerator::new(42);
     let dims = index.dims();
@@ -816,8 +838,7 @@ fn populate_scene(
     let world_min = terrain.world_min();
     let dims = terrain.dims();
     let world_max = world_min
-        + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32)
-            * terrain.brick_size();
+        + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * terrain.brick_size();
 
     let tree_ext = scene.models()[tree_id].world_extent();
     let rock_ext = scene.models()[rock_id].world_extent();
@@ -832,25 +853,27 @@ fn populate_scene(
     while x < world_max.x - spacing {
         let mut z = world_min.z + spacing;
         while z < world_max.z - spacing {
-            let h = smallworld_engine::worldgen::hash_for_placement(x, z, 42);
+            let h = worldgen::hash_for_placement(x, z, 42);
             if let Some(surface_y) = wg.find_surface_y(x, z)
-                && surface_y > 0.0 && surface_y < world_max.y - 3.0 {
-                    if h.is_multiple_of(5) && tree_count < 100 {
-                        scene.add_instance(VoxelInstance {
-                            model_id: tree_id,
-                            position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
-                            rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
-                        });
-                        tree_count += 1;
-                    } else if h.is_multiple_of(11) && rock_count < 50 {
-                        scene.add_instance(VoxelInstance {
-                            model_id: rock_id,
-                            position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
-                            rotation: glam::Quat::from_rotation_y((h % 314) as f32 / 100.0),
-                        });
-                        rock_count += 1;
-                    }
+                && surface_y > 0.0
+                && surface_y < world_max.y - 3.0
+            {
+                if h.is_multiple_of(5) && tree_count < 100 {
+                    scene.add_instance(VoxelInstance {
+                        model_id: tree_id,
+                        position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
+                        rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
+                    });
+                    tree_count += 1;
+                } else if h.is_multiple_of(11) && rock_count < 50 {
+                    scene.add_instance(VoxelInstance {
+                        model_id: rock_id,
+                        position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
+                        rotation: glam::Quat::from_rotation_y((h % 314) as f32 / 100.0),
+                    });
+                    rock_count += 1;
                 }
+            }
             z += spacing;
         }
         x += spacing;
@@ -862,17 +885,20 @@ fn populate_scene(
     while px < world_max.x - 1.0 {
         let mut pz = world_min.z + 1.0;
         while pz < world_max.z - 1.0 {
-            let h = smallworld_engine::worldgen::hash_for_placement(px, pz, 9999);
+            let h = worldgen::hash_for_placement(px, pz, 9999);
             if h.is_multiple_of(3)
                 && let Some(sy) = wg.find_surface_y(px, pz)
-                    && sy > 0.0 && sy < world_max.y - 1.0 && pebble_count < 500 {
-                        scene.add_instance(VoxelInstance {
-                            model_id: pebble_id,
-                            position: glam::Vec3::new(px, sy + pebble_ext.y * 0.5, pz),
-                            rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
-                        });
-                        pebble_count += 1;
-                    }
+                && sy > 0.0
+                && sy < world_max.y - 1.0
+                && pebble_count < 500
+            {
+                scene.add_instance(VoxelInstance {
+                    model_id: pebble_id,
+                    position: glam::Vec3::new(px, sy + pebble_ext.y * 0.5, pz),
+                    rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
+                });
+                pebble_count += 1;
+            }
             pz += pebble_spacing;
         }
         px += pebble_spacing;

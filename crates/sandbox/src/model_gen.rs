@@ -1,16 +1,17 @@
 //! Procedural voxel model generators (trees, rocks).
 
-use crate::brick_pool::{BrickPool, BRICK_EDGE, BRICK_VOLUME};
-use crate::voxel_object::VoxelModel;
+use smallworld_engine::brick_pool::{BRICK_EDGE, BRICK_VOLUME, BrickPool};
+use smallworld_engine::voxel_object::VoxelModel;
+use smallworld_engine::wgpu;
 
 const FINE_SCALE: f32 = 0.025;
 
 const PALETTE_TREE: &[[u8; 4]] = &[
-    [0, 0, 0, 0],         // 0 air
-    [90, 60, 30, 255],    // 1 bark
-    [35, 110, 20, 255],   // 2 leaves dark
-    [50, 130, 25, 255],   // 3 leaves mid
-    [65, 145, 35, 255],   // 4 leaves light
+    [0, 0, 0, 0],       // 0 air
+    [90, 60, 30, 255],  // 1 bark
+    [35, 110, 20, 255], // 2 leaves dark
+    [50, 130, 25, 255], // 3 leaves mid
+    [65, 145, 35, 255], // 4 leaves light
 ];
 
 const PALETTE_ROCK: &[[u8; 4]] = &[
@@ -71,7 +72,12 @@ pub fn generate_tree(pool: &mut BrickPool, queue: &wgpu::Queue, seed: u32) -> Vo
                             let d = (x * x + z * z) / (canopy_radius_m * canopy_radius_m)
                                 + (cy * cy) / (canopy_height_m * canopy_height_m);
                             if d < 1.0 && y > trunk_height_m * 0.3 {
-                                let h = pseudo_u((x * 50.0) as i32, (y * 50.0) as i32, (z * 50.0) as i32, seed);
+                                let h = pseudo_u(
+                                    (x * 50.0) as i32,
+                                    (y * 50.0) as i32,
+                                    (z * 50.0) as i32,
+                                    seed,
+                                );
                                 voxels[idx] = 2 + (h % 3) as u8;
                                 has_solid = true;
                             }
@@ -127,7 +133,12 @@ pub fn generate_rock(pool: &mut BrickPool, queue: &wgpu::Queue, seed: u32) -> Vo
                                 + (z * z) / (radius_m * radius_m);
 
                             if d < 1.0 {
-                                let h = pseudo_u((x * 40.0) as i32, (y * 40.0) as i32, (z * 40.0) as i32, seed);
+                                let h = pseudo_u(
+                                    (x * 40.0) as i32,
+                                    (y * 40.0) as i32,
+                                    (z * 40.0) as i32,
+                                    seed,
+                                );
                                 voxels[idx] = 1 + (h % 3) as u8;
                                 has_solid = true;
                             }
@@ -175,7 +186,12 @@ pub fn generate_pebble(pool: &mut BrickPool, queue: &wgpu::Queue, seed: u32) -> 
 
                             let d = (x * x) / (rx * rx) + (y * y) / (ry * ry) + (z * z) / (rz * rz);
                             if d < 1.0 {
-                                let h = pseudo_u((x * 80.0) as i32, (y * 80.0) as i32, (z * 80.0) as i32, seed);
+                                let h = pseudo_u(
+                                    (x * 80.0) as i32,
+                                    (y * 80.0) as i32,
+                                    (z * 80.0) as i32,
+                                    seed,
+                                );
                                 voxels[idx] = 1 + (h % 3) as u8;
                                 has_solid = true;
                             }

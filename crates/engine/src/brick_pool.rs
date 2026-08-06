@@ -123,10 +123,7 @@ impl BrickPool {
     /// Debug-asserts that the handle's generation matches the slot's current
     /// generation (detects use-after-free).
     pub fn free(&mut self, handle: BrickHandle) {
-        debug_assert!(
-            !handle.is_none(),
-            "cannot free BrickHandle::NONE"
-        );
+        debug_assert!(!handle.is_none(), "cannot free BrickHandle::NONE");
         let slot = handle.slot as usize;
         debug_assert!(
             slot < self.capacity as usize,
@@ -156,7 +153,12 @@ impl BrickPool {
 
     /// Uploads voxel data (4096 × u8) for the given brick, packing four u8
     /// values per u32 word.
-    pub fn write_voxels(&self, queue: &wgpu::Queue, handle: BrickHandle, data: &[u8; BRICK_VOLUME as usize]) {
+    pub fn write_voxels(
+        &self,
+        queue: &wgpu::Queue,
+        handle: BrickHandle,
+        data: &[u8; BRICK_VOLUME as usize],
+    ) {
         debug_assert!(self.is_valid(handle), "writing voxels to an invalid handle");
 
         let mut packed = [0u32; WORDS_PER_BRICK as usize];
@@ -176,7 +178,10 @@ impl BrickPool {
     /// `entries` may have fewer than 256 elements; indices beyond the slice
     /// length are unspecified on the GPU.
     pub fn write_palette(&self, queue: &wgpu::Queue, handle: BrickHandle, entries: &[[u8; 4]]) {
-        debug_assert!(self.is_valid(handle), "writing palette to an invalid handle");
+        debug_assert!(
+            self.is_valid(handle),
+            "writing palette to an invalid handle"
+        );
         debug_assert!(
             entries.len() <= PALETTE_ENTRIES as usize,
             "palette has {} entries, max is {PALETTE_ENTRIES}",

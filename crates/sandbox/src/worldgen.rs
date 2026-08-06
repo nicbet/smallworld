@@ -1,6 +1,6 @@
 //! Procedural world generator: 3D density terrain with strata, caves, and water.
 
-use crate::brick_pool::{BRICK_EDGE, BRICK_VOLUME, VOXEL_SCALE};
+use smallworld_engine::brick_pool::{BRICK_EDGE, BRICK_VOLUME, VOXEL_SCALE};
 
 const MAT_AIR: u8 = 0;
 const MAT_GRASS: u8 = 1;
@@ -56,17 +56,10 @@ impl WorldGenerator {
     /// Generates voxel data for one brick at the given grid position.
     /// Returns `None` if the brick is entirely empty (air above water table).
     #[must_use]
-    pub fn generate_brick(
-        &self,
-        grid_pos: [u32; 3],
-        world_min: glam::Vec3,
-    ) -> Option<BrickData> {
+    pub fn generate_brick(&self, grid_pos: [u32; 3], world_min: glam::Vec3) -> Option<BrickData> {
         let brick_min = world_min
-            + glam::Vec3::new(
-                grid_pos[0] as f32,
-                grid_pos[1] as f32,
-                grid_pos[2] as f32,
-            ) * (BRICK_EDGE as f32 * VOXEL_SCALE);
+            + glam::Vec3::new(grid_pos[0] as f32, grid_pos[1] as f32, grid_pos[2] as f32)
+                * (BRICK_EDGE as f32 * VOXEL_SCALE);
 
         let mut voxels = [MAT_AIR; BRICK_VOLUME as usize];
         let mut has_content = false;
@@ -109,8 +102,20 @@ impl WorldGenerator {
             return MAT_WATER;
         }
 
-        let cave_a = fbm3d(wx * 0.08, wy * 0.08, wz * 0.08, 2, self.seed.wrapping_add(777));
-        let cave_b = fbm3d(wx * 0.08, wy * 0.1, wz * 0.08, 2, self.seed.wrapping_add(1234));
+        let cave_a = fbm3d(
+            wx * 0.08,
+            wy * 0.08,
+            wz * 0.08,
+            2,
+            self.seed.wrapping_add(777),
+        );
+        let cave_b = fbm3d(
+            wx * 0.08,
+            wy * 0.1,
+            wz * 0.08,
+            2,
+            self.seed.wrapping_add(1234),
+        );
         if cave_a > self.cave_threshold && cave_b > self.cave_threshold && density < 1.5 {
             if wy <= self.water_level {
                 return MAT_WATER;
@@ -119,8 +124,17 @@ impl WorldGenerator {
         }
 
         if density < 0.08 {
-            let h = hash((wx * 10.0) as i32, (wy * 10.0) as i32, (wz * 10.0) as i32, self.seed.wrapping_add(2222));
-            if h.is_multiple_of(3) { MAT_GRASS_ALT } else { MAT_GRASS }
+            let h = hash(
+                (wx * 10.0) as i32,
+                (wy * 10.0) as i32,
+                (wz * 10.0) as i32,
+                self.seed.wrapping_add(2222),
+            );
+            if h.is_multiple_of(3) {
+                MAT_GRASS_ALT
+            } else {
+                MAT_GRASS
+            }
         } else if density < 0.25 {
             MAT_DIRT
         } else if wy > -5.0 {
@@ -154,13 +168,17 @@ impl WorldGenerator {
         }
         None
     }
-
 }
 
 /// Deterministic hash for object placement at a world (x, z) coordinate.
 #[must_use]
 pub fn hash_for_placement(x: f32, z: f32, seed: u32) -> u32 {
-    hash((x * 100.0) as i32, 0, (z * 100.0) as i32, seed.wrapping_add(55555))
+    hash(
+        (x * 100.0) as i32,
+        0,
+        (z * 100.0) as i32,
+        seed.wrapping_add(55555),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +284,11 @@ mod tests {
         let mut empty = 0;
         for gy in 0..16u32 {
             let result = wg.generate_brick([8, gy, 8], world_min);
-            if result.is_some() { solid += 1; } else { empty += 1; }
+            if result.is_some() {
+                solid += 1;
+            } else {
+                empty += 1;
+            }
         }
         assert!(solid > 0, "no solid bricks at all");
         assert!(empty > 0, "no empty bricks — terrain should have sky above");

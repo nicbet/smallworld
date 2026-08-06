@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/viewer"]
+members = ["crates/engine", "crates/sandbox"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,6 +33,9 @@ log = "0.4"
 env_logger = "0.11"
 
 [profile.dev.package.smallworld-engine]
+opt-level = 3
+
+[profile.dev.package.smallworld-sandbox]
 opt-level = 3
 
 [workspace.lints.rust]

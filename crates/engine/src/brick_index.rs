@@ -1,6 +1,6 @@
 //! Flat 3D grid mapping world-space brick coordinates to brick pool handles.
 
-use crate::brick_pool::{BrickHandle, BRICK_EDGE, VOXEL_SCALE};
+use crate::brick_pool::{BRICK_EDGE, BrickHandle, VOXEL_SCALE};
 use glam::Vec3;
 
 /// Flat 3D grid of brick handles, backed by a GPU storage buffer.
