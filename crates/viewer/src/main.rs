@@ -210,6 +210,7 @@ impl ApplicationHandler for App {
             surface_config.format,
             &brick_pool,
             &brick_index,
+            &scene,
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -270,6 +271,7 @@ impl ApplicationHandler for App {
                     rh.max(1),
                     &state.brick_pool,
                     &state.brick_index,
+                    &state.scene,
                 );
                 state.camera.aspect = w as f32 / h as f32;
             }
@@ -366,6 +368,7 @@ impl ApplicationHandler for App {
                         rh.max(1),
                         &state.brick_pool,
                         &state.brick_index,
+                        &state.scene,
                     );
                 }
                 state
@@ -445,6 +448,7 @@ impl ApplicationHandler for App {
                         &view,
                         &state.camera,
                         &state.brick_index,
+                        &state.scene,
                         flags,
                         compute_ts,
                         blit_ts,
@@ -820,13 +824,18 @@ fn populate_scene(
         let mut z = world_min.z + spacing;
         while z < world_max.z - spacing {
             let h = smallworld_engine::worldgen::hash_for_placement(x, z, 42);
-            let surface_y = wg.approx_surface_y(x, z);
+            let surface_y = match wg.find_surface_y(x, z) {
+                Some(y) => y,
+                None => continue,
+            };
 
-            if surface_y > -0.5 && surface_y < world_max.y - 3.0 {
+            if surface_y > 0.0 && surface_y < world_max.y - 3.0 {
+                let tree_ext = scene.models()[tree_id].world_extent();
+                let rock_ext = scene.models()[rock_id].world_extent();
                 if h.is_multiple_of(5) && tree_count < 100 {
                     scene.add_instance(VoxelInstance {
                         model_id: tree_id,
-                        position: glam::Vec3::new(x, surface_y, z),
+                        position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
                         rotation: glam::Quat::from_rotation_y(
                             (h % 628) as f32 / 100.0,
                         ),
@@ -835,7 +844,7 @@ fn populate_scene(
                 } else if h.is_multiple_of(11) && rock_count < 50 {
                     scene.add_instance(VoxelInstance {
                         model_id: rock_id,
-                        position: glam::Vec3::new(x, surface_y, z),
+                        position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
                         rotation: glam::Quat::from_rotation_y(
                             (h % 314) as f32 / 100.0,
                         ),
