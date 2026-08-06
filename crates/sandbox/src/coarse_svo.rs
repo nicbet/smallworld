@@ -522,6 +522,7 @@ mod tests {
 mod render_probe {
     use super::*;
     use crate::worldgen::WorldGenerator;
+    // CpuSource is shared with gpu_bench.
     use smallworld_engine::brick_data::BrickData;
     use smallworld_engine::brick_pager::{BrickPager, PagerConfig};
     use smallworld_engine::brick_pool::BrickPool;
@@ -670,5 +671,149 @@ mod render_probe {
         }
         std::fs::write(&out, &ppm).unwrap();
         eprintln!("wrote {out}");
+    }
+}
+
+#[cfg(test)]
+mod gpu_bench {
+    use super::*;
+    use crate::worldgen::WorldGenerator;
+    use smallworld_engine::brick_data::BrickData;
+    use smallworld_engine::brick_pager::{BrickPager, PagerConfig};
+    use smallworld_engine::brick_pool::BrickPool;
+    use smallworld_engine::brick_source::BrickSource;
+    use smallworld_engine::camera::FreeCamera;
+    use smallworld_engine::gpu::GpuContext;
+    use smallworld_engine::raymarcher::Raymarcher;
+    use smallworld_engine::scene::Scene;
+    use smallworld_engine::wgpu;
+    use std::sync::Arc;
+
+    struct CpuSource(WorldGenerator);
+    impl BrickSource for CpuSource {
+        fn generate(&self, grid_pos: [u32; 3], world_min: Vec3) -> Option<BrickData> {
+            self.0
+                .generate_brick(grid_pos, world_min)
+                .map(|g| BrickData {
+                    voxels: g.voxels,
+                    palette: g.palette.to_vec(),
+                })
+        }
+    }
+
+    /// Wall-clocks the raymarch compute pass headlessly (median of 30 after
+    /// 5 warmup frames), shadows on and off. Nothing else runs on the GPU,
+    /// so wall time ≈ GPU time. `BENCH_WORLD=large` benches the 1 km world
+    /// at the user's measured viewpoint; default is the Default preset.
+    /// Run: cargo test --release -p smallworld-sandbox bench_raymarch -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_raymarch() {
+        let large = std::env::var("BENCH_WORLD").as_deref() == Ok("large");
+        let instance = GpuContext::create_instance();
+        let ctx = pollster::block_on(GpuContext::headless(instance));
+
+        let (dims, cells, capacity) = if large {
+            ([1024u32, 16, 1024], 1024u32, 8_000_000u32)
+        } else {
+            ([32u32, 12, 32], 32, 1_000_000)
+        };
+        let world_size = cells as f32 * BRICK_SIZE;
+        let half = Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * BRICK_SIZE * 0.5;
+        let world_min = -half;
+        let mut svo = Svo::new(&ctx.device, capacity, world_min, world_size);
+        let generator = WorldGenerator::new(42);
+        let coarse = build_coarse(&mut svo, &generator, dims);
+
+        let mut pool = BrickPool::new(&ctx.device, 32768);
+        let mut pager = BrickPager::new(
+            Arc::new(CpuSource(WorldGenerator::new(42))),
+            dims,
+            world_min,
+            coarse.column_range,
+            32768,
+            PagerConfig {
+                worker_threads: 8,
+                ..PagerConfig::default()
+            },
+        );
+        let camera_pos = if large {
+            Vec3::new(-2.0, 20.1, 16.8)
+        } else {
+            Vec3::new(-4.0, 5.0, 9.6)
+        };
+        if large {
+            pager.preload_radius(camera_pos, 60.0, &mut svo, &mut pool, &ctx.queue);
+        } else {
+            pager.preload_all(&mut svo, &mut pool, &ctx.queue);
+        }
+
+        let mut scene = Scene::new();
+        scene.upload(&ctx.device);
+
+        let (w, h) = (1280u32, 720u32);
+        let raymarcher = Raymarcher::new(
+            &ctx,
+            w,
+            h,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &pool,
+            &svo,
+            &scene,
+        );
+
+        let mut camera = FreeCamera::new(w as f32 / h as f32);
+        camera.position = camera_pos;
+        if large {
+            camera.yaw = (4.1_f32).to_radians();
+            camera.pitch = (-32.7_f32).to_radians();
+        } else {
+            camera.yaw = (-6.0_f32).to_radians();
+            camera.pitch = (-30.3_f32).to_radians();
+        }
+
+        let sse: f32 = std::env::var("BENCH_SSE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.8);
+        for &flags in &[Raymarcher::FLAG_SHADOWS, 0u32] {
+            let mut samples = Vec::new();
+            for i in 0..35 {
+                let mut encoder = ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                raymarcher.compute_pass(
+                    &ctx,
+                    &mut encoder,
+                    &camera,
+                    &svo,
+                    &scene,
+                    flags,
+                    sse,
+                    None,
+                );
+                let start = std::time::Instant::now();
+                ctx.queue.submit(std::iter::once(encoder.finish()));
+                let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                if i >= 5 {
+                    samples.push(ms);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            let label = if flags != 0 {
+                "shadows ON "
+            } else {
+                "shadows OFF"
+            };
+            println!(
+                "{} sse={sse} {}: median {:.2} ms  (p10 {:.2}, p90 {:.2})",
+                if large { "large" } else { "default" },
+                label,
+                samples[samples.len() / 2],
+                samples[3],
+                samples[samples.len() - 4]
+            );
+        }
     }
 }

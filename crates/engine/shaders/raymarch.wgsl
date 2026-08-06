@@ -481,12 +481,114 @@ fn any_hit_brick(ro: vec3<f32>, rd: vec3<f32>, t_enter: f32, handle: u32, brick_
     return false;
 }
 
+// Any-hit SVO traversal for shadow rays: returns on the FIRST occluder
+// instead of finding the closest one — no best-t tracking, no normal or
+// color work. Same cursor-based descent as trace_svo.
+fn trace_svo_any(ro: vec3<f32>, rd: vec3<f32>) -> bool {
+    let inv_rd = 1.0 / rd;
+    let world_max = u.world_min + vec3<f32>(u.world_size);
+
+    let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
+    if max(world_hit.x, 0.0) >= world_hit.y {
+        return false;
+    }
+
+    let dir_mask = select(vec3<u32>(0u), vec3<u32>(1u, 2u, 4u), rd < vec3<f32>(0.0));
+    let flip = dir_mask.x | dir_mask.y | dir_mask.z;
+
+    var stack: array<SvoFrame, MAX_SVO_DEPTH>;
+    var sp = 0u;
+
+    var node_idx = u.svo_root;
+    var node_min = u.world_min;
+    var node_size = u.world_size;
+    var cursor = 0u;
+
+    loop {
+        if cursor == 0u {
+            let node = svo_nodes[node_idx];
+            let node_max = node_min + vec3<f32>(node_size);
+            let eps = node_size * 0.001;
+            let hit = ray_aabb(ro, inv_rd, node_min - vec3(eps), node_max + vec3(eps));
+            let t_near = max(hit.x, 0.0);
+
+            var terminal = true;
+            if t_near < hit.y {
+                let child_mask = node.node_flags & 0xFFu;
+                let has_brick = (node.node_flags & (1u << 8u)) != 0u;
+                let has_children = node.children != 0u && child_mask != 0u;
+                let sse = node_size * u.focal_length / max(t_near, 0.001);
+
+                if has_brick {
+                    let brick_vs = node_size / f32(BRICK_EDGE);
+                    if any_hit_brick(ro, rd, t_near, node.brick, node_min, brick_vs) {
+                        return true;
+                    }
+                } else if !has_children || sse < u.sse_threshold {
+                    if unpack_alpha(node.color) > 0.0 {
+                        return true;
+                    }
+                } else {
+                    terminal = false;
+                }
+            }
+
+            if terminal {
+                if sp == 0u {
+                    break;
+                }
+                sp -= 1u;
+                node_idx = stack[sp].node_idx;
+                node_min = stack[sp].node_min;
+                cursor = stack[sp].cursor;
+                node_size = node_size * 2.0;
+                continue;
+            }
+        }
+
+        let node = svo_nodes[node_idx];
+        let child_mask = node.node_flags & 0xFFu;
+        let half = node_size * 0.5;
+        var descended = false;
+        while cursor < 8u && sp < MAX_SVO_DEPTH {
+            let octant = cursor ^ flip;
+            cursor += 1u;
+            if (child_mask & (1u << octant)) != 0u {
+                stack[sp] = SvoFrame(node_idx, node_min, cursor);
+                sp += 1u;
+                node_idx = node.children + octant;
+                node_min = node_min + vec3<f32>(
+                    select(0.0, half, (octant & 1u) != 0u),
+                    select(0.0, half, (octant & 2u) != 0u),
+                    select(0.0, half, (octant & 4u) != 0u),
+                );
+                node_size = half;
+                cursor = 0u;
+                descended = true;
+                break;
+            }
+        }
+
+        if !descended {
+            if sp == 0u {
+                break;
+            }
+            sp -= 1u;
+            node_idx = stack[sp].node_idx;
+            node_min = stack[sp].node_min;
+            cursor = stack[sp].cursor;
+            node_size = node_size * 2.0;
+        }
+    }
+
+    return false;
+}
+
 fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
     let inv_rd = 1.0 / rd;
 
-    // Test SVO
-    let svo_hit = trace_svo(ro, rd, 1e20);
-    if svo_hit.hit {
+    // Test SVO (any-hit: first occluder wins)
+    if trace_svo_any(ro, rd) {
         return true;
     }
 

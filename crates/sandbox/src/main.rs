@@ -564,6 +564,13 @@ impl ApplicationHandler for App {
                     &screen_desc,
                 );
 
+                // Each timed pass gets its own encoder: Metal resolves
+                // pass-boundary timestamps at command-buffer granularity,
+                // so passes sharing a buffer all report the buffer total
+                // (sw-2ef59d). Separate command buffers in one submit give
+                // real per-pass numbers.
+                let mut compute_encoder = None;
+                let mut blit_encoder = None;
                 if let Some(ref frame) = frame {
                     let view = frame
                         .texture
@@ -583,18 +590,35 @@ impl ApplicationHandler for App {
                     if state.smooth_normals {
                         flags |= Raymarcher::FLAG_SMOOTH_NORMALS;
                     }
-                    state.raymarcher.render(
+
+                    let mut cenc =
+                        state
+                            .gpu
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("raymarch_compute"),
+                            });
+                    state.raymarcher.compute_pass(
                         &state.gpu,
-                        &mut encoder,
-                        &view,
+                        &mut cenc,
                         &state.camera,
                         &state.svo,
                         &state.scene,
                         flags,
                         state.sse_threshold,
                         compute_ts,
-                        blit_ts,
                     );
+                    compute_encoder = Some(cenc);
+
+                    let mut benc =
+                        state
+                            .gpu
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("raymarch_blit"),
+                            });
+                    state.raymarcher.blit_pass(&mut benc, &view, blit_ts);
+                    blit_encoder = Some(benc);
 
                     let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("egui"),
@@ -630,6 +654,8 @@ impl ApplicationHandler for App {
                 state.gpu.queue.submit(
                     cmd_buffers
                         .into_iter()
+                        .chain(compute_encoder.map(wgpu::CommandEncoder::finish))
+                        .chain(blit_encoder.map(wgpu::CommandEncoder::finish))
                         .chain(std::iter::once(encoder.finish())),
                 );
                 if let Some(frame) = frame {

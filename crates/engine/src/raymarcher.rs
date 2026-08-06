@@ -286,6 +286,12 @@ impl Raymarcher {
     pub const FLAG_SMOOTH_NORMALS: u32 = 2;
 
     /// Dispatches the compute raymarch pass and blits the result to `surface_view`.
+    ///
+    /// Both passes go into one encoder. For per-pass GPU timing on Metal use
+    /// [`compute_pass`](Self::compute_pass) / [`blit_pass`](Self::blit_pass)
+    /// with separate encoders — Metal resolves pass-boundary timestamps at
+    /// command-buffer granularity, so passes sharing a buffer all report the
+    /// buffer's total time.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -299,6 +305,32 @@ impl Raymarcher {
         sse_threshold: f32,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        self.compute_pass(
+            gpu,
+            encoder,
+            camera,
+            svo,
+            scene,
+            flags,
+            sse_threshold,
+            compute_timestamps,
+        );
+        self.blit_pass(encoder, surface_view, blit_timestamps);
+    }
+
+    /// Writes uniforms and dispatches the raymarch compute pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_pass(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        camera: &FreeCamera,
+        svo: &Svo,
+        scene: &Scene,
+        flags: u32,
+        sse_threshold: f32,
+        compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let vp = camera.projection_matrix() * camera.view_matrix();
         let inv_vp = vp.inverse();
@@ -334,7 +366,15 @@ impl Raymarcher {
                 1,
             );
         }
+    }
 
+    /// Blits the compute output to `surface_view`.
+    pub fn blit_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_view: &wgpu::TextureView,
+        blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
         // Blit pass
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
