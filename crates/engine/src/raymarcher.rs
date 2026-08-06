@@ -40,8 +40,8 @@ struct Uniforms {
     grid_dims: [u32; 3],
     flags: u32,
     instance_count: u32,
-    _pad1: u32,
-    _pad2: u32,
+    focal_length: f32,
+    sse_threshold: f32,
     _pad3: u32,
 }
 
@@ -294,6 +294,7 @@ impl Raymarcher {
         index: &BrickIndex,
         scene: &Scene,
         flags: u32,
+        sse_threshold: f32,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         blit_timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
@@ -311,8 +312,8 @@ impl Raymarcher {
             grid_dims: dims,
             flags,
             instance_count: scene.instance_count(),
-            _pad1: 0,
-            _pad2: 0,
+            focal_length: self.height as f32 / (2.0 * (camera.fov_y * 0.5).tan()),
+            sse_threshold,
             _pad3: 0,
         };
         gpu.queue

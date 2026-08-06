@@ -140,6 +140,7 @@ struct RunState {
     render_scale: f32,
     shadows: bool,
     smooth_normals: bool,
+    sse_threshold: f32,
     last_frame: Instant,
     frame_history: FrameHistory,
     bench: Option<bench::BenchState>,
@@ -304,6 +305,7 @@ impl ApplicationHandler for App {
             render_scale,
             shadows: true,
             smooth_normals: false,
+            sse_threshold: 0.5,
             last_frame: Instant::now(),
             frame_history: FrameHistory::new(),
             bench: bench_state,
@@ -425,6 +427,7 @@ impl ApplicationHandler for App {
                 let mut render_scale = state.render_scale;
                 let mut shadows = state.shadows;
                 let mut smooth_normals = state.smooth_normals;
+                let mut sse_threshold = state.sse_threshold;
                 let mut selected_preset = state.current_preset;
                 let mut full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
                     draw_debug_panel(
@@ -433,12 +436,14 @@ impl ApplicationHandler for App {
                         &mut render_scale,
                         &mut shadows,
                         &mut smooth_normals,
+                        &mut sse_threshold,
                         &mut selected_preset,
                     );
                     draw_frame_graph(ctx, &state.frame_history);
                 });
                 state.shadows = shadows;
                 state.smooth_normals = smooth_normals;
+                state.sse_threshold = sse_threshold;
                 if selected_preset != state.current_preset {
                     state.load_preset(selected_preset);
                 }
@@ -541,6 +546,7 @@ impl ApplicationHandler for App {
                         &state.brick_index,
                         &state.scene,
                         flags,
+                        state.sse_threshold,
                         compute_ts,
                         blit_ts,
                     );
@@ -664,6 +670,7 @@ fn draw_debug_panel(
     render_scale: &mut f32,
     shadows: &mut bool,
     smooth_normals: &mut bool,
+    sse_threshold: &mut f32,
     selected_preset: &mut Preset,
 ) {
     let info = state.gpu.adapter_info();
@@ -700,6 +707,11 @@ fn draw_debug_panel(
                 ui.checkbox(shadows, "Shadows");
                 ui.checkbox(smooth_normals, "Smooth N");
             });
+            ui.add(
+                egui::Slider::new(sse_threshold, 0.0..=4.0)
+                    .text("SSE")
+                    .step_by(0.1),
+            );
             ui.separator();
             ui.label(format!(
                 "Pos: ({:.1}, {:.1}, {:.1})",

@@ -22,8 +22,8 @@ struct Uniforms {
     grid_dims: vec3<u32>,
     flags: u32,
     instance_count: u32,
-    _pad1a: u32,
-    _pad1b: u32,
+    focal_length: f32,
+    sse_threshold: f32,
     _pad1c: u32,
 }
 
@@ -190,6 +190,22 @@ fn trace_brick(
     return no_hit();
 }
 
+fn sample_brick_lod(handle: u32) -> vec3<f32> {
+    let probes = array<vec3<i32>, 4>(
+        vec3<i32>(8, 8, 8),
+        vec3<i32>(4, 4, 4),
+        vec3<i32>(12, 12, 12),
+        vec3<i32>(8, 4, 8),
+    );
+    for (var i = 0u; i < 4u; i++) {
+        let mat = read_voxel(handle, voxel_idx(probes[i]));
+        if mat != 0u {
+            return read_palette_color(handle, mat);
+        }
+    }
+    return vec3<f32>(-1.0);
+}
+
 // ---- terrain traversal ----
 
 fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
@@ -244,6 +260,15 @@ fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
             let brick_t = max(brick_hit.x, 0.0);
 
             if brick_t < max_t {
+                let dist = max(brick_t, 0.001);
+                let sse = terrain_vs * u.focal_length / dist;
+                if sse < u.sse_threshold {
+                    let lod_color = sample_brick_lod(handle);
+                    if lod_color.x >= 0.0 {
+                        let wp = ro + rd * brick_t;
+                        return HitResult(true, lod_color, coarse_normal, vec3<i32>(0), handle, wp, brick_t);
+                    }
+                }
                 let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal, terrain_vs);
                 if result.hit {
                     return result;
@@ -343,9 +368,20 @@ fn trace_object(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -
             let brick_hit = ray_aabb(obj_ro, inv_obj_rd, brick_min, brick_max);
             let brick_t = max(brick_hit.x, 0.0);
 
+            let world_brick_t = brick_t / rd_scale;
+            let world_dist = max(world_brick_t, 0.001);
+            let sse = obj_vs * u.focal_length / world_dist;
+            if sse < u.sse_threshold {
+                let lod_color = sample_brick_lod(handle);
+                if lod_color.x >= 0.0 {
+                    let obj_wp = obj_ro + obj_rd * brick_t;
+                    let world_pos = (obj.transform * vec4<f32>(obj_wp, 1.0)).xyz;
+                    let world_normal = normalize((obj.transform * vec4<f32>(coarse_normal, 0.0)).xyz);
+                    return HitResult(true, lod_color, world_normal, vec3<i32>(0), handle, world_pos, world_brick_t);
+                }
+            }
             let result = trace_brick(obj_ro, obj_rd, brick_t, handle, brick_min, coarse_normal, obj_vs);
             if result.hit {
-                // Transform hit back to world space
                 let world_pos = (obj.transform * vec4<f32>(result.world_pos, 1.0)).xyz;
                 let world_normal = normalize((obj.transform * vec4<f32>(result.normal, 0.0)).xyz);
                 let world_t = result.t / rd_scale;
