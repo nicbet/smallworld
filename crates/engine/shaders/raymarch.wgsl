@@ -1,4 +1,4 @@
-// Two-level DDA raymarcher: dense voxel grid + instanced voxel volumes.
+// SVO raymarcher: octree descent + instanced voxel volumes.
 
 const EMPTY: u32 = 0xFFFFFFFFu;
 const SUN_DIR: vec3<f32> = normalize(vec3<f32>(0.4, 0.8, 0.3));
@@ -7,6 +7,7 @@ const SKY_BOT: vec3<f32> = vec3<f32>(0.7, 0.8, 0.95);
 const AMBIENT: f32 = 0.25;
 const MAX_COARSE_STEPS: u32 = 512u;
 const MAX_FINE_STEPS: u32 = 64u;
+const MAX_SVO_STACK: u32 = 24u;
 const SHADOW_BIAS: f32 = 0.01;
 
 const FLAG_SHADOWS: u32 = 1u;
@@ -18,13 +19,20 @@ struct Uniforms {
     resolution: vec2<f32>,
     _pad0: vec2<f32>,
     world_min: vec3<f32>,
-    brick_size: f32,
+    world_size: f32,
     grid_dims: vec3<u32>,
     flags: u32,
     instance_count: u32,
     focal_length: f32,
     sse_threshold: f32,
-    _pad1c: u32,
+    svo_root: u32,
+}
+
+struct SvoNodeGpu {
+    children: u32,
+    brick: u32,
+    color: u32,
+    node_flags: u32,
 }
 
 struct ObjectInstance {
@@ -36,7 +44,7 @@ struct ObjectInstance {
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var<storage, read> grid_map: array<u32>;
+@group(0) @binding(1) var<storage, read> svo_nodes: array<SvoNodeGpu>;
 @group(0) @binding(2) var<storage, read> voxels: array<u32>;
 @group(0) @binding(3) var<storage, read> palettes: array<u32>;
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>;
@@ -150,6 +158,8 @@ fn trace_brick(
     if rd.z > 0.0 { t_max.z = (1.0 - frac.z) * abs_inv.z; } else { t_max.z = frac.z * abs_inv.z; }
 
     var normal = entry_normal;
+    // t of the current voxel's entry, measured from p_entry along rd.
+    var t_local = 0.0;
 
     for (var i = 0u; i < MAX_FINE_STEPS; i++) {
         if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(i32(BRICK_EDGE))) {
@@ -161,26 +171,30 @@ fn trace_brick(
         if mat != 0u {
             let base = read_palette_color(handle, mat);
             let wp = brick_min + (vec3<f32>(voxel) + 0.5) * vs;
-            return HitResult(true, base, normal, voxel, handle, wp, t_enter);
+            return HitResult(true, base, normal, voxel, handle, wp, t_enter + vs * 0.005 + t_local);
         }
 
         if t_max.x < t_max.y {
             if t_max.x < t_max.z {
                 voxel.x += step.x;
+                t_local = t_max.x;
                 t_max.x += abs_inv.x;
                 normal = vec3<f32>(f32(-step.x), 0.0, 0.0);
             } else {
                 voxel.z += step.z;
+                t_local = t_max.z;
                 t_max.z += abs_inv.z;
                 normal = vec3<f32>(0.0, 0.0, f32(-step.z));
             }
         } else {
             if t_max.y < t_max.z {
                 voxel.y += step.y;
+                t_local = t_max.y;
                 t_max.y += abs_inv.y;
                 normal = vec3<f32>(0.0, f32(-step.y), 0.0);
             } else {
                 voxel.z += step.z;
+                t_local = t_max.z;
                 t_max.z += abs_inv.z;
                 normal = vec3<f32>(0.0, 0.0, f32(-step.z));
             }
@@ -190,91 +204,130 @@ fn trace_brick(
     return no_hit();
 }
 
-// ---- dense grid traversal ----
+// ---- SVO traversal ----
 
-fn trace_grid(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
+fn unpack_color(packed: u32) -> vec3<f32> {
+    return vec3<f32>(
+        f32(packed & 0xFFu),
+        f32((packed >> 8u) & 0xFFu),
+        f32((packed >> 16u) & 0xFFu),
+    ) / 255.0;
+}
+
+fn unpack_alpha(packed: u32) -> f32 {
+    return f32((packed >> 24u) & 0xFFu) / 255.0;
+}
+
+fn aabb_normal(ro: vec3<f32>, inv_rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> vec3<f32> {
+    let t0 = (bmin - ro) * inv_rd;
+    let t1 = (bmax - ro) * inv_rd;
+    let tmin = min(t0, t1);
+    if tmin.x > tmin.y && tmin.x > tmin.z {
+        return vec3<f32>(-sign(inv_rd.x), 0.0, 0.0);
+    } else if tmin.y > tmin.z {
+        return vec3<f32>(0.0, -sign(inv_rd.y), 0.0);
+    }
+    return vec3<f32>(0.0, 0.0, -sign(inv_rd.z));
+}
+
+struct SvoStackEntry {
+    node_idx: u32,
+    node_min: vec3<f32>,
+    node_size: f32,
+}
+
+fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
     let inv_rd = 1.0 / rd;
-    let world_max = u.world_min + vec3<f32>(u.grid_dims) * u.brick_size;
-    let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
-    let t_entry = max(world_hit.x, 0.0);
+    let world_max = u.world_min + vec3<f32>(u.world_size);
 
-    if t_entry >= world_hit.y || t_entry >= max_t {
+    let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
+    if max(world_hit.x, 0.0) >= world_hit.y || max(world_hit.x, 0.0) >= max_t {
         return no_hit();
     }
 
-    let inv_brick = 1.0 / u.brick_size;
-    let p_entry = (ro + rd * (t_entry + 0.001)) - u.world_min;
-    var grid_pos = vec3<i32>(floor(p_entry * inv_brick));
-    grid_pos = clamp(grid_pos, vec3<i32>(0), vec3<i32>(u.grid_dims) - vec3<i32>(1));
+    var stack: array<SvoStackEntry, MAX_SVO_STACK>;
+    var sp = 1u;
+    stack[0] = SvoStackEntry(u.svo_root, u.world_min, u.world_size);
 
-    let step = vec3<i32>(sign(rd));
-    let abs_inv_grid = abs(vec3<f32>(1.0) / (rd * inv_brick));
+    var best = no_hit();
 
-    var t_max_g: vec3<f32>;
-    let frac_g = p_entry * inv_brick - vec3<f32>(grid_pos);
-    if rd.x > 0.0 { t_max_g.x = (1.0 - frac_g.x) * abs_inv_grid.x; } else { t_max_g.x = frac_g.x * abs_inv_grid.x; }
-    if rd.y > 0.0 { t_max_g.y = (1.0 - frac_g.y) * abs_inv_grid.y; } else { t_max_g.y = frac_g.y * abs_inv_grid.y; }
-    if rd.z > 0.0 { t_max_g.z = (1.0 - frac_g.z) * abs_inv_grid.z; } else { t_max_g.z = frac_g.z * abs_inv_grid.z; }
+    let dir_mask = select(vec3<u32>(0u), vec3<u32>(1u, 2u, 4u), rd < vec3<f32>(0.0));
+    let flip = dir_mask.x | dir_mask.y | dir_mask.z;
 
-    let tmin_faces = (u.world_min - ro) * inv_rd;
-    let tmax_faces = (world_max - ro) * inv_rd;
-    let tmin_v = min(tmin_faces, tmax_faces);
-    var coarse_normal: vec3<f32>;
-    if tmin_v.x > tmin_v.y && tmin_v.x > tmin_v.z {
-        coarse_normal = vec3<f32>(-sign(rd.x), 0.0, 0.0);
-    } else if tmin_v.y > tmin_v.z {
-        coarse_normal = vec3<f32>(0.0, -sign(rd.y), 0.0);
-    } else {
-        coarse_normal = vec3<f32>(0.0, 0.0, -sign(rd.z));
-    }
+    while sp > 0u {
+        sp -= 1u;
+        let entry = stack[sp];
+        let node = svo_nodes[entry.node_idx];
 
-    let grid_vs = VOXEL_SCALE;
-
-    for (var c = 0u; c < MAX_COARSE_STEPS; c++) {
-        if !all(grid_pos >= vec3<i32>(0)) || !all(grid_pos < vec3<i32>(u.grid_dims)) {
-            break;
+        let node_max = entry.node_min + vec3<f32>(entry.node_size);
+        let eps = entry.node_size * 0.001;
+        let hit = ray_aabb(ro, inv_rd, entry.node_min - vec3(eps), node_max + vec3(eps));
+        let t_near = max(hit.x, 0.0);
+        if t_near >= hit.y || t_near >= best.t {
+            continue;
         }
 
-        let flat = u32(grid_pos.x) + u.grid_dims.x * (u32(grid_pos.y) + u.grid_dims.y * u32(grid_pos.z));
-        let handle = grid_map[flat];
-        if handle != EMPTY {
-            let brick_min = u.world_min + vec3<f32>(grid_pos) * u.brick_size;
-            let brick_max = brick_min + vec3<f32>(u.brick_size);
-            let brick_hit = ray_aabb(ro, inv_rd, brick_min, brick_max);
-            let brick_t = max(brick_hit.x, 0.0);
+        let child_mask = node.node_flags & 0xFFu;
+        let has_brick = (node.node_flags & (1u << 8u)) != 0u;
+        let has_children = node.children != 0u && child_mask != 0u;
 
-            if brick_t < max_t {
-                let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal, grid_vs);
-                if result.hit {
-                    return result;
+        if has_brick {
+            let brick_vs = entry.node_size / f32(BRICK_EDGE);
+            let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
+            let result = trace_brick(ro, rd, t_near, node.brick, entry.node_min, normal, brick_vs);
+            if result.hit && result.t < best.t {
+                best = result;
+            }
+            continue;
+        }
+
+        if !has_children {
+            if unpack_alpha(node.color) > 0.0 {
+                let wp = ro + rd * t_near;
+                let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
+                let color = unpack_color(node.color);
+                let t_hit = t_near;
+                if t_hit < best.t {
+                    best = HitResult(true, color, normal, vec3<i32>(0), 0u, wp, t_hit);
                 }
             }
+            continue;
         }
 
-        if t_max_g.x < t_max_g.y {
-            if t_max_g.x < t_max_g.z {
-                grid_pos.x += step.x;
-                t_max_g.x += abs_inv_grid.x;
-                coarse_normal = vec3<f32>(f32(-step.x), 0.0, 0.0);
-            } else {
-                grid_pos.z += step.z;
-                t_max_g.z += abs_inv_grid.z;
-                coarse_normal = vec3<f32>(0.0, 0.0, f32(-step.z));
+        let dist = max(t_near, 0.001);
+        let sse = entry.node_size * u.focal_length / dist;
+        if sse < u.sse_threshold {
+            if unpack_alpha(node.color) > 0.0 {
+                let wp = ro + rd * t_near;
+                let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
+                let color = unpack_color(node.color);
+                if t_near < best.t {
+                    best = HitResult(true, color, normal, vec3<i32>(0), 0u, wp, t_near);
+                }
             }
-        } else {
-            if t_max_g.y < t_max_g.z {
-                grid_pos.y += step.y;
-                t_max_g.y += abs_inv_grid.y;
-                coarse_normal = vec3<f32>(0.0, f32(-step.y), 0.0);
-            } else {
-                grid_pos.z += step.z;
-                t_max_g.z += abs_inv_grid.z;
-                coarse_normal = vec3<f32>(0.0, 0.0, f32(-step.z));
+            continue;
+        }
+
+        let half = entry.node_size * 0.5;
+        for (var i = 0u; i < 8u; i++) {
+            let octant = (7u - i) ^ flip;
+            if (child_mask & (1u << octant)) == 0u {
+                continue;
             }
+            if sp >= MAX_SVO_STACK {
+                break;
+            }
+            let child_min = entry.node_min + vec3<f32>(
+                select(0.0, half, (octant & 1u) != 0u),
+                select(0.0, half, (octant & 2u) != 0u),
+                select(0.0, half, (octant & 4u) != 0u),
+            );
+            stack[sp] = SvoStackEntry(node.children + octant, child_min, half);
+            sp += 1u;
         }
     }
 
-    return no_hit();
+    return best;
 }
 
 // ---- instanced volume traversal ----
@@ -411,46 +464,12 @@ fn any_hit_brick(ro: vec3<f32>, rd: vec3<f32>, t_enter: f32, handle: u32, brick_
 }
 
 fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
-    // Test grid
     let inv_rd = 1.0 / rd;
-    let world_max = u.world_min + vec3<f32>(u.grid_dims) * u.brick_size;
-    let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
-    let t_entry = max(world_hit.x, 0.0);
 
-    if t_entry < world_hit.y {
-        let inv_brick = 1.0 / u.brick_size;
-        let p_entry = (ro + rd * (t_entry + 0.001)) - u.world_min;
-        var grid_pos = vec3<i32>(floor(p_entry * inv_brick));
-        grid_pos = clamp(grid_pos, vec3<i32>(0), vec3<i32>(u.grid_dims) - vec3<i32>(1));
-
-        let step = vec3<i32>(sign(rd));
-        let abs_inv_grid = abs(vec3<f32>(1.0) / (rd * inv_brick));
-
-        var t_max_g: vec3<f32>;
-        let frac_g = p_entry * inv_brick - vec3<f32>(grid_pos);
-        if rd.x > 0.0 { t_max_g.x = (1.0 - frac_g.x) * abs_inv_grid.x; } else { t_max_g.x = frac_g.x * abs_inv_grid.x; }
-        if rd.y > 0.0 { t_max_g.y = (1.0 - frac_g.y) * abs_inv_grid.y; } else { t_max_g.y = frac_g.y * abs_inv_grid.y; }
-        if rd.z > 0.0 { t_max_g.z = (1.0 - frac_g.z) * abs_inv_grid.z; } else { t_max_g.z = frac_g.z * abs_inv_grid.z; }
-
-        for (var c = 0u; c < MAX_COARSE_STEPS; c++) {
-            if !all(grid_pos >= vec3<i32>(0)) || !all(grid_pos < vec3<i32>(u.grid_dims)) { break; }
-            let flat = u32(grid_pos.x) + u.grid_dims.x * (u32(grid_pos.y) + u.grid_dims.y * u32(grid_pos.z));
-            let handle = grid_map[flat];
-            if handle != EMPTY {
-                let brick_min = u.world_min + vec3<f32>(grid_pos) * u.brick_size;
-                let brick_hit = ray_aabb(ro, inv_rd, brick_min, brick_min + vec3(u.brick_size));
-                if any_hit_brick(ro, rd, max(brick_hit.x, 0.0), handle, brick_min, VOXEL_SCALE) {
-                    return true;
-                }
-            }
-            if t_max_g.x < t_max_g.y {
-                if t_max_g.x < t_max_g.z { grid_pos.x += step.x; t_max_g.x += abs_inv_grid.x; }
-                else { grid_pos.z += step.z; t_max_g.z += abs_inv_grid.z; }
-            } else {
-                if t_max_g.y < t_max_g.z { grid_pos.y += step.y; t_max_g.y += abs_inv_grid.y; }
-                else { grid_pos.z += step.z; t_max_g.z += abs_inv_grid.z; }
-            }
-        }
+    // Test SVO
+    let svo_hit = trace_svo(ro, rd, 1e20);
+    if svo_hit.hit {
+        return true;
     }
 
     // Test object instances (BVH)
@@ -550,8 +569,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ro = u.camera_pos.xyz;
     let rd = normalize(far_w - near_w);
 
-    // Trace terrain
-    var best = trace_grid(ro, rd, 1e20);
+    // Trace terrain (SVO)
+    var best = trace_svo(ro, rd, 1e20);
 
     // Trace object instances (BVH traversal)
     let inv_rd = 1.0 / rd;

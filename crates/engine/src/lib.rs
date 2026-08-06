@@ -14,6 +14,7 @@ pub mod gpu_timing;
 pub mod raymarcher;
 pub mod scene;
 pub mod shaders;
+pub mod svo;
 pub mod voxel_object;
 
 /// Re-export wgpu so the viewer (and future crates) share one version.

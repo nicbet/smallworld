@@ -10,9 +10,12 @@ use crossbeam_channel::{Receiver, Sender};
 use glam::Vec3;
 
 use crate::brick_data::BrickData;
-use crate::brick_index::{BRICK_SIZE, BrickIndex};
-use crate::brick_pool::BrickPool;
+use crate::brick_pool::{BRICK_EDGE, BrickPool, VOXEL_SCALE};
 use crate::brick_source::BrickSource;
+use crate::svo::Svo;
+
+/// World-space edge length of one brick (same as `brick_index::BRICK_SIZE`).
+const BRICK_SIZE: f32 = BRICK_EDGE as f32 * VOXEL_SCALE;
 
 const REQUEST_CHANNEL_CAP: usize = 4096;
 
@@ -145,13 +148,7 @@ impl BrickPager {
     /// Call once during scene setup so terrain is fully populated before the
     /// first frame. Workers run in parallel; this method just waits for them
     /// and uploads results as they arrive.
-    pub fn preload_all(
-        &mut self,
-        index: &mut BrickIndex,
-        pool: &mut BrickPool,
-
-        queue: &wgpu::Queue,
-    ) {
+    pub fn preload_all(&mut self, svo: &mut Svo, pool: &mut BrickPool, queue: &wgpu::Queue) {
         let start = Instant::now();
         let mut total_to_load = 0u32;
 
@@ -189,7 +186,14 @@ impl BrickPager {
                     pool.write_voxels(queue, handle, &data.voxels);
                     pool.write_palette(queue, handle, &data.palette);
 
-                    index.set(result.grid_pos, handle);
+                    let world_pos = self.world_min
+                        + Vec3::new(
+                            result.grid_pos[0] as f32,
+                            result.grid_pos[1] as f32,
+                            result.grid_pos[2] as f32,
+                        ) * BRICK_SIZE;
+                    let avg_color = brick_avg_color(&data);
+                    svo.insert_brick(world_pos, BRICK_SIZE, handle, avg_color);
 
                     let slot = handle.gpu_index();
                     self.cell_states[flat] = CellState::Resident { slot };
@@ -200,7 +204,8 @@ impl BrickPager {
             }
         }
 
-        index.upload(queue);
+        svo.update_colors();
+        svo.upload(queue);
 
         let elapsed = start.elapsed();
         log::info!(
@@ -216,7 +221,7 @@ impl BrickPager {
         &mut self,
         center: Vec3,
         radius: f32,
-        index: &mut BrickIndex,
+        svo: &mut Svo,
         pool: &mut BrickPool,
 
         queue: &wgpu::Queue,
@@ -269,7 +274,14 @@ impl BrickPager {
                     pool.write_voxels(queue, handle, &data.voxels);
                     pool.write_palette(queue, handle, &data.palette);
 
-                    index.set(result.grid_pos, handle);
+                    let world_pos = self.world_min
+                        + Vec3::new(
+                            result.grid_pos[0] as f32,
+                            result.grid_pos[1] as f32,
+                            result.grid_pos[2] as f32,
+                        ) * BRICK_SIZE;
+                    let avg_color = brick_avg_color(&data);
+                    svo.insert_brick(world_pos, BRICK_SIZE, handle, avg_color);
 
                     let slot = handle.gpu_index();
                     self.cell_states[flat] = CellState::Resident { slot };
@@ -280,7 +292,8 @@ impl BrickPager {
             }
         }
 
-        index.upload(queue);
+        svo.update_colors();
+        svo.upload(queue);
 
         let elapsed = start.elapsed();
         log::info!(
@@ -302,14 +315,14 @@ impl BrickPager {
         camera_pos: Vec3,
         focal_length: f32,
         sse_threshold: f32,
-        index: &mut BrickIndex,
+        svo: &mut Svo,
         pool: &mut BrickPool,
 
         queue: &wgpu::Queue,
     ) -> PagerStats {
         self.frame += 1;
 
-        let (uploaded, evicted) = self.drain_results(index, pool, queue);
+        let (uploaded, evicted) = self.drain_results(svo, pool, queue);
 
         self.compute_demand(camera_pos, focal_length, sse_threshold);
 
@@ -334,14 +347,14 @@ impl BrickPager {
     /// Phase 1: drain completed loads and upload to GPU.
     fn drain_results(
         &mut self,
-        index: &mut BrickIndex,
+        svo: &mut Svo,
         pool: &mut BrickPool,
 
         queue: &wgpu::Queue,
     ) -> (u32, u32) {
         let mut uploaded = 0u32;
         let mut evicted = 0u32;
-        let mut index_dirty = false;
+        let mut svo_dirty = false;
 
         let mut eviction_queue: Vec<(u32, usize)> = Vec::new();
         if pool.live_count() >= pool.capacity() {
@@ -395,7 +408,7 @@ impl BrickPager {
                         self.cell_states[old_flat],
                         CellState::MipOnly { .. } | CellState::Resident { .. }
                     ) {
-                        index.clear_cell(self.unflatten(old_flat));
+                        // SVO eviction: the node stays with its averaged color for LOD.
                         self.cell_states[old_flat] = CellState::Unknown;
                         self.slot_cell[old_slot as usize] = None;
                         evicted += 1;
@@ -412,8 +425,15 @@ impl BrickPager {
             pool.write_voxels(queue, handle, &data.voxels);
             pool.write_palette(queue, handle, &data.palette);
 
-            index.set(result.grid_pos, handle);
-            index_dirty = true;
+            let world_pos = self.world_min
+                + Vec3::new(
+                    result.grid_pos[0] as f32,
+                    result.grid_pos[1] as f32,
+                    result.grid_pos[2] as f32,
+                ) * BRICK_SIZE;
+            let avg_color = brick_avg_color(&data);
+            svo.insert_brick(world_pos, BRICK_SIZE, handle, avg_color);
+            svo_dirty = true;
 
             let slot = handle.gpu_index();
             self.cell_states[flat] = CellState::Resident { slot };
@@ -422,8 +442,9 @@ impl BrickPager {
             uploaded += 1;
         }
 
-        if index_dirty {
-            index.upload(queue);
+        if svo_dirty {
+            svo.update_colors();
+            svo.upload(queue);
         }
 
         (uploaded, evicted)
@@ -517,14 +538,6 @@ impl BrickPager {
         (pos[0] + self.dims[0] * (pos[1] + self.dims[1] * pos[2])) as usize
     }
 
-    fn unflatten(&self, flat: usize) -> [u32; 3] {
-        let flat = flat as u32;
-        let x = flat % self.dims[0];
-        let y = (flat / self.dims[0]) % self.dims[1];
-        let z = flat / (self.dims[0] * self.dims[1]);
-        [x, y, z]
-    }
-
     fn spawn_workers(
         source: Arc<dyn BrickSource>,
         world_min: Vec3,
@@ -553,6 +566,37 @@ impl BrickPager {
             })
             .collect()
     }
+}
+
+/// Computes a quick average color from a brick's voxel + palette data.
+fn brick_avg_color(data: &BrickData) -> [u8; 4] {
+    let mut r_sum = 0u32;
+    let mut g_sum = 0u32;
+    let mut b_sum = 0u32;
+    let mut count = 0u32;
+    for &idx in &data.voxels {
+        if idx == 0 {
+            continue; // air
+        }
+        if let Some(color) = data.palette.get(idx as usize) {
+            if color[3] == 0 {
+                continue;
+            }
+            r_sum += color[0] as u32;
+            g_sum += color[1] as u32;
+            b_sum += color[2] as u32;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return [128, 128, 128, 255];
+    }
+    [
+        (r_sum / count) as u8,
+        (g_sum / count) as u8,
+        (b_sum / count) as u8,
+        255,
+    ]
 }
 
 impl Drop for BrickPager {

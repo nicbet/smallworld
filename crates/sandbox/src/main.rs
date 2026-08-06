@@ -12,14 +12,14 @@ mod worldgen;
 use std::sync::Arc;
 use std::time::Instant;
 
-use smallworld_engine::brick_index::BrickIndex;
 use smallworld_engine::brick_pager::{BrickPager, PagerStats};
-use smallworld_engine::brick_pool::BrickPool;
+use smallworld_engine::brick_pool::{BRICK_EDGE, BrickPool, VOXEL_SCALE};
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
 use smallworld_engine::raymarcher::Raymarcher;
 use smallworld_engine::scene::Scene;
+use smallworld_engine::svo::Svo;
 use smallworld_engine::wgpu;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
@@ -135,7 +135,7 @@ struct RunState {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     brick_pool: BrickPool,
-    brick_index: BrickIndex,
+    svo: Svo,
     scene: Scene,
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
@@ -166,14 +166,18 @@ impl RunState {
     fn load_preset(&mut self, preset: Preset) {
         self.pager = None;
         self.brick_pool = BrickPool::new(&self.gpu.device, preset.pool_capacity());
-        self.brick_index =
-            BrickIndex::new(&self.gpu.device, preset.grid_dims(), preset.world_min());
+        let dims = preset.grid_dims();
+        let max_edge = *[dims[0], dims[1], dims[2]].iter().max().unwrap() as f32
+            * BRICK_EDGE as f32
+            * VOXEL_SCALE;
+        let world_size = max_edge;
+        self.svo = Svo::new(&self.gpu.device, 1_000_000, preset.world_min(), world_size);
         self.scene = Scene::new();
         self.pager = preset.setup(
             &self.gpu.device,
             &self.gpu.queue,
             &mut self.brick_pool,
-            &mut self.brick_index,
+            &mut self.svo,
             &mut self.scene,
         );
         self.pager_stats = PagerStats::default();
@@ -187,7 +191,7 @@ impl RunState {
             rh.max(1),
             self.surface_config.format,
             &self.brick_pool,
-            &self.brick_index,
+            &self.svo,
             &self.scene,
         );
 
@@ -253,13 +257,18 @@ impl ApplicationHandler for App {
             .map(|b| b.preset)
             .unwrap_or(Preset::Default);
         let mut brick_pool = BrickPool::new(&gpu.device, preset.pool_capacity());
-        let mut brick_index = BrickIndex::new(&gpu.device, preset.grid_dims(), preset.world_min());
+        let dims = preset.grid_dims();
+        let max_edge = *[dims[0], dims[1], dims[2]].iter().max().unwrap() as f32
+            * BRICK_EDGE as f32
+            * VOXEL_SCALE;
+        let world_size = max_edge;
+        let mut svo = Svo::new(&gpu.device, 1_000_000, preset.world_min(), world_size);
         let mut scene = Scene::new();
         let pager = preset.setup(
             &gpu.device,
             &gpu.queue,
             &mut brick_pool,
-            &mut brick_index,
+            &mut svo,
             &mut scene,
         );
         scene.upload(&gpu.device);
@@ -278,7 +287,7 @@ impl ApplicationHandler for App {
             render_h.max(1),
             surface_config.format,
             &brick_pool,
-            &brick_index,
+            &svo,
             &scene,
         );
 
@@ -304,7 +313,7 @@ impl ApplicationHandler for App {
             egui_state,
             egui_renderer,
             brick_pool,
-            brick_index,
+            svo,
             scene,
             raymarcher,
             timestamps,
@@ -352,7 +361,7 @@ impl ApplicationHandler for App {
                     rw.max(1),
                     rh.max(1),
                     &state.brick_pool,
-                    &state.brick_index,
+                    &state.svo,
                     &state.scene,
                 );
                 state.camera.aspect = w as f32 / h as f32;
@@ -441,7 +450,7 @@ impl ApplicationHandler for App {
                         state.camera.position,
                         focal_length,
                         state.sse_threshold,
-                        &mut state.brick_index,
+                        &mut state.svo,
                         &mut state.brick_pool,
                         &state.gpu.queue,
                     );
@@ -481,7 +490,7 @@ impl ApplicationHandler for App {
                         rw.max(1),
                         rh.max(1),
                         &state.brick_pool,
-                        &state.brick_index,
+                        &state.svo,
                         &state.scene,
                     );
                 }
@@ -568,7 +577,7 @@ impl ApplicationHandler for App {
                         &mut encoder,
                         &view,
                         &state.camera,
-                        &state.brick_index,
+                        &state.svo,
                         &state.scene,
                         flags,
                         state.sse_threshold,

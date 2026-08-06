@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use smallworld_engine::brick_index::BrickIndex;
 use smallworld_engine::brick_pager::{BrickPager, PagerConfig};
 use smallworld_engine::brick_pool::{BRICK_EDGE, BRICK_VOLUME, BrickPool, VOXEL_SCALE};
 use smallworld_engine::scene::Scene;
+use smallworld_engine::svo::Svo;
 use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
 
@@ -167,19 +167,19 @@ impl Preset {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pool: &mut BrickPool,
-        index: &mut BrickIndex,
+        svo: &mut Svo,
         scene: &mut Scene,
     ) -> Option<BrickPager> {
         match self {
             Self::Default => {
                 let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
-                pager.preload_all(index, pool, queue);
-                populate_default_objects(queue, pool, scene, index);
+                pager.preload_all(svo, pool, queue);
+                populate_default_objects(queue, pool, scene, svo);
                 Some(pager)
             }
             Self::TerrainOnly => {
                 let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
-                pager.preload_all(index, pool, queue);
+                pager.preload_all(svo, pool, queue);
                 Some(pager)
             }
             Self::ObjectsOnly => {
@@ -191,7 +191,7 @@ impl Preset {
                 None
             }
             Self::SingleBrick => {
-                setup_single_brick(queue, pool, index);
+                setup_single_brick(queue, pool, svo);
                 None
             }
             Self::Empty => None,
@@ -228,7 +228,7 @@ fn populate_default_objects(
     queue: &wgpu::Queue,
     pool: &mut BrickPool,
     scene: &mut Scene,
-    terrain: &BrickIndex,
+    terrain: &Svo,
 ) {
     let start = Instant::now();
 
@@ -242,9 +242,7 @@ fn populate_default_objects(
     let wg = WorldGenerator::new(42);
     let spacing = 4.0_f32;
     let world_min = terrain.world_min();
-    let dims = terrain.dims();
-    let world_max = world_min
-        + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * terrain.brick_size();
+    let world_max = world_min + glam::Vec3::splat(terrain.world_size());
 
     let tree_ext = scene.models()[tree_id].world_extent();
     let rock_ext = scene.models()[rock_id].world_extent();
@@ -408,7 +406,7 @@ fn populate_stress(queue: &wgpu::Queue, pool: &mut BrickPool, scene: &mut Scene)
     );
 }
 
-fn setup_single_brick(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut BrickIndex) {
+fn setup_single_brick(queue: &wgpu::Queue, pool: &mut BrickPool, svo: &mut Svo) {
     let handle = pool.alloc().expect("brick pool exhausted");
 
     let mut voxels = [0u8; BRICK_VOLUME as usize];
@@ -440,8 +438,12 @@ fn setup_single_brick(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut Bri
 
     pool.write_voxels(queue, handle, &voxels);
     pool.write_palette(queue, handle, palette);
-    index.set([1, 1, 1], handle);
-    index.upload(queue);
+
+    let brick_size = BRICK_EDGE as f32 * VOXEL_SCALE;
+    let world_pos = svo.world_min() + glam::Vec3::new(1.0, 1.0, 1.0) * brick_size;
+    svo.insert_brick(world_pos, brick_size, handle, [128, 128, 128, 255]);
+    svo.update_colors();
+    svo.upload(queue);
 
     log::info!("single-brick: 1 brick with debug material palette");
 }

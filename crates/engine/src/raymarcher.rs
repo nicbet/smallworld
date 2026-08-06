@@ -1,11 +1,11 @@
 //! Compute-shader raymarcher over a sparse brick grid.
 
-use crate::brick_index::BrickIndex;
 use crate::brick_pool::BrickPool;
 use crate::camera::FreeCamera;
 use crate::gpu::GpuContext;
 use crate::scene::Scene;
 use crate::shaders::{self, Shader};
+use crate::svo::Svo;
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -36,13 +36,13 @@ struct Uniforms {
     resolution: [f32; 2],
     _pad0: [f32; 2],
     world_min: [f32; 3],
-    brick_size: f32,
+    world_size: f32,
     grid_dims: [u32; 3],
     flags: u32,
     instance_count: u32,
     focal_length: f32,
     sse_threshold: f32,
-    _pad3: u32,
+    svo_root: u32,
 }
 
 impl Raymarcher {
@@ -54,7 +54,7 @@ impl Raymarcher {
         height: u32,
         surface_format: wgpu::TextureFormat,
         pool: &BrickPool,
-        index: &BrickIndex,
+        svo: &Svo,
         scene: &Scene,
     ) -> Self {
         let compute_source = shaders::compose(&[Shader::Common, Shader::Raymarch]);
@@ -207,7 +207,7 @@ impl Raymarcher {
             &gpu.device,
             &compute_bind_group_layout,
             &uniform_buf,
-            index.buffer(),
+            svo.buffer(),
             pool.voxel_buffer(),
             pool.palette_buffer(),
             &output_view,
@@ -243,7 +243,7 @@ impl Raymarcher {
         width: u32,
         height: u32,
         pool: &BrickPool,
-        index: &BrickIndex,
+        svo: &Svo,
         scene: &Scene,
     ) {
         if width == self.width && height == self.height {
@@ -263,7 +263,7 @@ impl Raymarcher {
             &gpu.device,
             &self.compute_bind_group_layout,
             &self.uniform_buf,
-            index.buffer(),
+            svo.buffer(),
             pool.voxel_buffer(),
             pool.palette_buffer(),
             &self.output_view,
@@ -293,7 +293,7 @@ impl Raymarcher {
         encoder: &mut wgpu::CommandEncoder,
         surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
-        index: &BrickIndex,
+        svo: &Svo,
         scene: &Scene,
         flags: u32,
         sse_threshold: f32,
@@ -302,21 +302,20 @@ impl Raymarcher {
     ) {
         let vp = camera.projection_matrix() * camera.view_matrix();
         let inv_vp = vp.inverse();
-        let wmin = index.world_min();
-        let dims = index.dims();
+        let wmin = svo.world_min();
         let uniforms = Uniforms {
             inv_view_proj: inv_vp.to_cols_array(),
             camera_pos: [camera.position.x, camera.position.y, camera.position.z, 1.0],
             resolution: [self.width as f32, self.height as f32],
             _pad0: [0.0; 2],
             world_min: [wmin.x, wmin.y, wmin.z],
-            brick_size: index.brick_size(),
-            grid_dims: dims,
+            world_size: svo.world_size(),
+            grid_dims: [0, 0, 0],
             flags,
             instance_count: scene.instance_count(),
             focal_length: self.height as f32 / (2.0 * (camera.fov_y * 0.5).tan()),
             sse_threshold,
-            _pad3: 0,
+            svo_root: svo.root(),
         };
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
