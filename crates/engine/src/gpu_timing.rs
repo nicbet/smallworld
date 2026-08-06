@@ -102,10 +102,18 @@ impl GpuTimestamps {
                 .expect("timestamp readback buffer not mapped");
             let ticks: &[u64] = bytemuck::cast_slice(&data);
 
+            // On Apple GPUs, begin-of-pass timestamps sample at command
+            // buffer *scheduling* time, so every pass spans submit→its end
+            // and all passes report near-identical durations. The end
+            // timestamps are real, so each pass's time is bounded below by
+            // the previous pass's end: clamp begin to max(begin, prev_end).
+            // On backends with true pass-boundary begins this is a no-op.
+            let mut prev_end = 0u64;
             for i in 0..self.pass_count as usize {
-                let begin = ticks[i * 2];
+                let begin = ticks[i * 2].max(prev_end);
                 let end = ticks[i * 2 + 1];
-                let duration_ns = (end.wrapping_sub(begin)) as f64 * self.timestamp_period as f64;
+                prev_end = end;
+                let duration_ns = end.saturating_sub(begin) as f64 * self.timestamp_period as f64;
                 let duration_ms = duration_ns / 1_000_000.0;
                 self.averages[i] = self.averages[i] * (1.0 - EMA_ALPHA) + duration_ms * EMA_ALPHA;
             }
