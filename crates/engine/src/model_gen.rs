@@ -145,6 +145,54 @@ pub fn generate_rock(pool: &mut BrickPool, queue: &wgpu::Queue, seed: u32) -> Vo
     model
 }
 
+/// Generates a small pebble at 2.5cm voxel scale (5-10cm across).
+pub fn generate_pebble(pool: &mut BrickPool, queue: &wgpu::Queue, seed: u32) -> VoxelModel {
+    let rx = 0.04 + pseudo_f(seed, 300) * 0.04;
+    let ry = rx * (0.3 + pseudo_f(seed, 301) * 0.4);
+    let rz = rx * (0.7 + pseudo_f(seed, 302) * 0.3);
+
+    let brick_size = BRICK_EDGE as f32 * FINE_SCALE;
+    let dims = [2u32, 2, 2];
+    let mut model = VoxelModel::new(dims, FINE_SCALE);
+
+    let cx = dims[0] as f32 * brick_size * 0.5;
+    let cy = dims[1] as f32 * brick_size * 0.5;
+    let cz = dims[2] as f32 * brick_size * 0.5;
+
+    for bgz in 0..dims[2] {
+        for bgy in 0..dims[1] {
+            for bgx in 0..dims[0] {
+                let mut voxels = [0u8; BRICK_VOLUME as usize];
+                let mut has_solid = false;
+
+                for lz in 0..BRICK_EDGE {
+                    for ly in 0..BRICK_EDGE {
+                        for lx in 0..BRICK_EDGE {
+                            let x = bgx as f32 * brick_size + (lx as f32 + 0.5) * FINE_SCALE - cx;
+                            let y = bgy as f32 * brick_size + (ly as f32 + 0.5) * FINE_SCALE - cy;
+                            let z = bgz as f32 * brick_size + (lz as f32 + 0.5) * FINE_SCALE - cz;
+                            let idx = (lx + BRICK_EDGE * (ly + BRICK_EDGE * lz)) as usize;
+
+                            let d = (x * x) / (rx * rx) + (y * y) / (ry * ry) + (z * z) / (rz * rz);
+                            if d < 1.0 {
+                                let h = pseudo_u((x * 80.0) as i32, (y * 80.0) as i32, (z * 80.0) as i32, seed);
+                                voxels[idx] = 1 + (h % 3) as u8;
+                                has_solid = true;
+                            }
+                        }
+                    }
+                }
+
+                if has_solid {
+                    model.fill_brick([bgx, bgy, bgz], pool, queue, &voxels, PALETTE_ROCK);
+                }
+            }
+        }
+    }
+
+    model
+}
+
 fn pseudo_u(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     let mut h = seed;
     h = h.wrapping_add(x as u32).wrapping_mul(0x9e3779b9);

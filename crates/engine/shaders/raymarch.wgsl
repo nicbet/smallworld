@@ -43,6 +43,15 @@ struct ObjectInstance {
 @group(0) @binding(5) var<storage, read> instances: array<ObjectInstance>;
 @group(0) @binding(6) var<storage, read> object_grids: array<u32>;
 
+struct BvhNode {
+    aabb_min: vec3<f32>,
+    left_or_first: u32,
+    aabb_max: vec3<f32>,
+    count: u32,
+}
+
+@group(0) @binding(7) var<storage, read> bvh_nodes: array<BvhNode>;
+
 // ---- helpers ----
 
 const WORDS_PER_BRICK: u32 = BRICK_VOLUME / 4u;
@@ -444,59 +453,74 @@ fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
         }
     }
 
-    // Test object instances
-    for (var i = 0u; i < u.instance_count; i++) {
-        let obj = instances[i];
-        let obj_aabb_min = obj.aabb_min.xyz;
-        let obj_aabb_max = obj.aabb_max.xyz;
-        let obj_hit = ray_aabb(ro, inv_rd, obj_aabb_min, obj_aabb_max);
-        if obj_hit.x >= obj_hit.y || obj_hit.x < 0.0 { // behind ray
-            continue;
-        }
+    // Test object instances (BVH)
+    if u.instance_count > 0u {
+        var stack: array<u32, 32>;
+        var sp = 1u;
+        stack[0] = 0u;
 
-        let obj_ro = (obj.inv_transform * vec4<f32>(ro, 1.0)).xyz;
-        let obj_rd = normalize((obj.inv_transform * vec4<f32>(rd, 0.0)).xyz);
-        let obj_vs = obj.aabb_min.w;
-        let obj_brick_size = f32(BRICK_EDGE) * obj_vs;
-        let grid_dims = vec3<u32>(obj.grid_dims.xyz);
-        let grid_offset = bitcast<u32>(obj.aabb_max.w);
-        let obj_max = vec3<f32>(grid_dims) * obj_brick_size;
-
-        let inv_obj_rd = 1.0 / obj_rd;
-        let local_hit = ray_aabb(obj_ro, inv_obj_rd, vec3(0.0), obj_max);
-        let local_t = max(local_hit.x, 0.0);
-        if local_t >= local_hit.y { continue; }
-
-        let inv_brick_o = 1.0 / obj_brick_size;
-        let p_entry_o = obj_ro + obj_rd * (local_t + obj_vs * 0.005);
-        var gp = vec3<i32>(floor(p_entry_o * inv_brick_o));
-        gp = clamp(gp, vec3<i32>(0), vec3<i32>(grid_dims) - vec3<i32>(1));
-
-        let step_o = vec3<i32>(sign(obj_rd));
-        let abs_inv_o = abs(vec3<f32>(1.0) / (obj_rd * inv_brick_o));
-        var tmo: vec3<f32>;
-        let fo = p_entry_o * inv_brick_o - vec3<f32>(gp);
-        if obj_rd.x > 0.0 { tmo.x = (1.0 - fo.x) * abs_inv_o.x; } else { tmo.x = fo.x * abs_inv_o.x; }
-        if obj_rd.y > 0.0 { tmo.y = (1.0 - fo.y) * abs_inv_o.y; } else { tmo.y = fo.y * abs_inv_o.y; }
-        if obj_rd.z > 0.0 { tmo.z = (1.0 - fo.z) * abs_inv_o.z; } else { tmo.z = fo.z * abs_inv_o.z; }
-
-        for (var c = 0u; c < 128u; c++) {
-            if !all(gp >= vec3<i32>(0)) || !all(gp < vec3<i32>(grid_dims)) { break; }
-            let flat = u32(gp.x) + grid_dims.x * (u32(gp.y) + grid_dims.y * u32(gp.z));
-            let h = object_grids[grid_offset + flat];
-            if h != EMPTY {
-                let bm = vec3<f32>(gp) * obj_brick_size;
-                let bh = ray_aabb(obj_ro, inv_obj_rd, bm, bm + vec3(obj_brick_size));
-                if any_hit_brick(obj_ro, obj_rd, max(bh.x, 0.0), h, bm, obj_vs) {
-                    return true;
-                }
+        while sp > 0u {
+            sp -= 1u;
+            let node = bvh_nodes[stack[sp]];
+            let node_hit = ray_aabb(ro, inv_rd, node.aabb_min, node.aabb_max);
+            if max(node_hit.x, 0.0) >= node_hit.y {
+                continue;
             }
-            if tmo.x < tmo.y {
-                if tmo.x < tmo.z { gp.x += step_o.x; tmo.x += abs_inv_o.x; }
-                else { gp.z += step_o.z; tmo.z += abs_inv_o.z; }
+
+            if node.count > 0u {
+                for (var idx = node.left_or_first; idx < node.left_or_first + node.count; idx++) {
+                    let obj = instances[idx];
+                    let obj_ro = (obj.inv_transform * vec4<f32>(ro, 1.0)).xyz;
+                    let obj_rd = normalize((obj.inv_transform * vec4<f32>(rd, 0.0)).xyz);
+                    let obj_vs = obj.aabb_min.w;
+                    let obj_brick_size = f32(BRICK_EDGE) * obj_vs;
+                    let grid_dims = vec3<u32>(obj.grid_dims.xyz);
+                    let grid_offset = bitcast<u32>(obj.aabb_max.w);
+                    let obj_max = vec3<f32>(grid_dims) * obj_brick_size;
+
+                    let inv_obj_rd = 1.0 / obj_rd;
+                    let local_hit = ray_aabb(obj_ro, inv_obj_rd, vec3(0.0), obj_max);
+                    let local_t = max(local_hit.x, 0.0);
+                    if local_t >= local_hit.y { continue; }
+
+                    let inv_brick_o = 1.0 / obj_brick_size;
+                    let p_entry_o = obj_ro + obj_rd * (local_t + obj_vs * 0.005);
+                    var gp = vec3<i32>(floor(p_entry_o * inv_brick_o));
+                    gp = clamp(gp, vec3<i32>(0), vec3<i32>(grid_dims) - vec3<i32>(1));
+
+                    let step_o = vec3<i32>(sign(obj_rd));
+                    let abs_inv_o = abs(vec3<f32>(1.0) / (obj_rd * inv_brick_o));
+                    var tmo: vec3<f32>;
+                    let fo = p_entry_o * inv_brick_o - vec3<f32>(gp);
+                    if obj_rd.x > 0.0 { tmo.x = (1.0 - fo.x) * abs_inv_o.x; } else { tmo.x = fo.x * abs_inv_o.x; }
+                    if obj_rd.y > 0.0 { tmo.y = (1.0 - fo.y) * abs_inv_o.y; } else { tmo.y = fo.y * abs_inv_o.y; }
+                    if obj_rd.z > 0.0 { tmo.z = (1.0 - fo.z) * abs_inv_o.z; } else { tmo.z = fo.z * abs_inv_o.z; }
+
+                    for (var c = 0u; c < 128u; c++) {
+                        if !all(gp >= vec3<i32>(0)) || !all(gp < vec3<i32>(grid_dims)) { break; }
+                        let flat = u32(gp.x) + grid_dims.x * (u32(gp.y) + grid_dims.y * u32(gp.z));
+                        let h = object_grids[grid_offset + flat];
+                        if h != EMPTY {
+                            let bm = vec3<f32>(gp) * obj_brick_size;
+                            let bh = ray_aabb(obj_ro, inv_obj_rd, bm, bm + vec3(obj_brick_size));
+                            if any_hit_brick(obj_ro, obj_rd, max(bh.x, 0.0), h, bm, obj_vs) {
+                                return true;
+                            }
+                        }
+                        if tmo.x < tmo.y {
+                            if tmo.x < tmo.z { gp.x += step_o.x; tmo.x += abs_inv_o.x; }
+                            else { gp.z += step_o.z; tmo.z += abs_inv_o.z; }
+                        } else {
+                            if tmo.y < tmo.z { gp.y += step_o.y; tmo.y += abs_inv_o.y; }
+                            else { gp.z += step_o.z; tmo.z += abs_inv_o.z; }
+                        }
+                    }
+                }
             } else {
-                if tmo.y < tmo.z { gp.y += step_o.y; tmo.y += abs_inv_o.y; }
-                else { gp.z += step_o.z; tmo.z += abs_inv_o.z; }
+                stack[sp] = node.left_or_first;
+                sp += 1u;
+                stack[sp] = node.left_or_first + 1u;
+                sp += 1u;
             }
         }
     }
@@ -529,18 +553,37 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Trace terrain
     var best = trace_terrain(ro, rd, 1e20);
 
-    // Trace object instances (linear scan)
+    // Trace object instances (BVH traversal)
     let inv_rd = 1.0 / rd;
-    for (var i = 0u; i < u.instance_count; i++) {
-        let obj = instances[i];
-        let aabb_hit = ray_aabb(ro, inv_rd, obj.aabb_min.xyz, obj.aabb_max.xyz);
-        let t_near = max(aabb_hit.x, 0.0);
-        if t_near >= aabb_hit.y || t_near >= best.t {
-            continue;
-        }
-        let obj_hit = trace_object(obj, ro, rd, best.t);
-        if obj_hit.hit && obj_hit.t < best.t {
-            best = obj_hit;
+    if u.instance_count > 0u {
+        var stack: array<u32, 32>;
+        var sp = 1u;
+        stack[0] = 0u;
+
+        while sp > 0u {
+            sp -= 1u;
+            let node = bvh_nodes[stack[sp]];
+            let node_hit = ray_aabb(ro, inv_rd, node.aabb_min, node.aabb_max);
+            if max(node_hit.x, 0.0) >= node_hit.y || max(node_hit.x, 0.0) >= best.t {
+                continue;
+            }
+
+            if node.count > 0u {
+                // Leaf: test instances
+                for (var i = node.left_or_first; i < node.left_or_first + node.count; i++) {
+                    let obj = instances[i];
+                    let obj_hit = trace_object(obj, ro, rd, best.t);
+                    if obj_hit.hit && obj_hit.t < best.t {
+                        best = obj_hit;
+                    }
+                }
+            } else {
+                // Internal: push children
+                stack[sp] = node.left_or_first;
+                sp += 1u;
+                stack[sp] = node.left_or_first + 1u;
+                sp += 1u;
+            }
         }
     }
 

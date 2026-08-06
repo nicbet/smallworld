@@ -4,6 +4,7 @@
 pub mod assets;
 pub mod brick_index;
 pub mod brick_pool;
+pub mod bvh;
 pub mod camera;
 pub mod gpu;
 pub mod gpu_timing;

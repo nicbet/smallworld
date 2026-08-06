@@ -806,8 +806,10 @@ fn populate_scene(
 
     let tree_model = model_gen::generate_tree(pool, queue, 42);
     let rock_model = model_gen::generate_rock(pool, queue, 99);
+    let pebble_model = model_gen::generate_pebble(pool, queue, 77);
     let tree_id = scene.add_model(tree_model);
     let rock_id = scene.add_model(rock_model);
+    let pebble_id = scene.add_model(pebble_model);
 
     let wg = WorldGenerator::new(42);
     let spacing = 4.0_f32;
@@ -817,49 +819,68 @@ fn populate_scene(
         + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32)
             * terrain.brick_size();
 
+    let tree_ext = scene.models()[tree_id].world_extent();
+    let rock_ext = scene.models()[rock_id].world_extent();
+    let pebble_ext = scene.models()[pebble_id].world_extent();
+
     let mut tree_count = 0u32;
     let mut rock_count = 0u32;
+    let mut pebble_count = 0u32;
+
+    // Trees and rocks at 4m spacing
     let mut x = world_min.x + spacing;
     while x < world_max.x - spacing {
         let mut z = world_min.z + spacing;
         while z < world_max.z - spacing {
             let h = smallworld_engine::worldgen::hash_for_placement(x, z, 42);
-            let surface_y = match wg.find_surface_y(x, z) {
-                Some(y) => y,
-                None => continue,
-            };
-
-            if surface_y > 0.0 && surface_y < world_max.y - 3.0 {
-                let tree_ext = scene.models()[tree_id].world_extent();
-                let rock_ext = scene.models()[rock_id].world_extent();
-                if h.is_multiple_of(5) && tree_count < 100 {
-                    scene.add_instance(VoxelInstance {
-                        model_id: tree_id,
-                        position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
-                        rotation: glam::Quat::from_rotation_y(
-                            (h % 628) as f32 / 100.0,
-                        ),
-                    });
-                    tree_count += 1;
-                } else if h.is_multiple_of(11) && rock_count < 50 {
-                    scene.add_instance(VoxelInstance {
-                        model_id: rock_id,
-                        position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
-                        rotation: glam::Quat::from_rotation_y(
-                            (h % 314) as f32 / 100.0,
-                        ),
-                    });
-                    rock_count += 1;
+            if let Some(surface_y) = wg.find_surface_y(x, z)
+                && surface_y > 0.0 && surface_y < world_max.y - 3.0 {
+                    if h.is_multiple_of(5) && tree_count < 100 {
+                        scene.add_instance(VoxelInstance {
+                            model_id: tree_id,
+                            position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
+                            rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
+                        });
+                        tree_count += 1;
+                    } else if h.is_multiple_of(11) && rock_count < 50 {
+                        scene.add_instance(VoxelInstance {
+                            model_id: rock_id,
+                            position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
+                            rotation: glam::Quat::from_rotation_y((h % 314) as f32 / 100.0),
+                        });
+                        rock_count += 1;
+                    }
                 }
-            }
             z += spacing;
         }
         x += spacing;
     }
 
+    // Pebbles at 1.5m spacing — many more
+    let pebble_spacing = 1.5_f32;
+    let mut px = world_min.x + 1.0;
+    while px < world_max.x - 1.0 {
+        let mut pz = world_min.z + 1.0;
+        while pz < world_max.z - 1.0 {
+            let h = smallworld_engine::worldgen::hash_for_placement(px, pz, 9999);
+            if h.is_multiple_of(3)
+                && let Some(sy) = wg.find_surface_y(px, pz)
+                    && sy > 0.0 && sy < world_max.y - 1.0 && pebble_count < 500 {
+                        scene.add_instance(VoxelInstance {
+                            model_id: pebble_id,
+                            position: glam::Vec3::new(px, sy + pebble_ext.y * 0.5, pz),
+                            rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
+                        });
+                        pebble_count += 1;
+                    }
+            pz += pebble_spacing;
+        }
+        px += pebble_spacing;
+    }
+
     let elapsed = start.elapsed();
     log::info!(
-        "scene: {tree_count} trees + {rock_count} rocks in {:.1} ms",
+        "scene: {tree_count} trees + {rock_count} rocks + {pebble_count} pebbles in {:.1} ms",
         elapsed.as_secs_f64() * 1000.0
     );
 }

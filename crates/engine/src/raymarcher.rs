@@ -93,6 +93,7 @@ impl Raymarcher {
                         ),
                         bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                         bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                        bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                     ],
                 });
 
@@ -200,6 +201,7 @@ impl Raymarcher {
         let (output_texture, output_view) = create_output_texture(&gpu.device, width, height);
         let instance_buf = scene.instance_buffer().unwrap_or(&dummy_buf);
         let grid_buf = scene.grid_buffer().unwrap_or(&dummy_buf);
+        let bvh_buf = scene.bvh_buffer().unwrap_or(&dummy_buf);
         let compute_bind_group = create_compute_bind_group(
             &gpu.device,
             &compute_bind_group_layout,
@@ -210,6 +212,7 @@ impl Raymarcher {
             &output_view,
             instance_buf,
             grid_buf,
+            bvh_buf,
         );
         let blit_bind_group = create_blit_bind_group(
             &gpu.device,
@@ -257,6 +260,7 @@ impl Raymarcher {
 
         let instance_buf = scene.instance_buffer().unwrap_or(&self.dummy_buf);
         let grid_buf = scene.grid_buffer().unwrap_or(&self.dummy_buf);
+        let bvh_buf = scene.bvh_buffer().unwrap_or(&self.dummy_buf);
         self.compute_bind_group = create_compute_bind_group(
             &gpu.device,
             &self.compute_bind_group_layout,
@@ -267,6 +271,7 @@ impl Raymarcher {
             &self.output_view,
             instance_buf,
             grid_buf,
+            bvh_buf,
         );
         self.blit_bind_group = create_blit_bind_group(
             &gpu.device,
@@ -422,6 +427,7 @@ fn create_compute_bind_group(
     output_view: &wgpu::TextureView,
     instance_buf: &wgpu::Buffer,
     object_grid_buf: &wgpu::Buffer,
+    bvh_buf: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
@@ -454,6 +460,10 @@ fn create_compute_bind_group(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: object_grid_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: bvh_buf.as_entire_binding(),
             },
         ],
     })

@@ -1,5 +1,6 @@
 //! Scene: terrain + instanced voxel objects with packed GPU buffers.
 
+use crate::bvh;
 use crate::voxel_object::{VoxelInstance, VoxelInstanceGpu, VoxelModel};
 
 /// Holds all instanced voxel objects and their packed GPU data.
@@ -8,6 +9,7 @@ pub struct Scene {
     instances: Vec<VoxelInstance>,
     packed_grids_buf: Option<wgpu::Buffer>,
     instance_buf: Option<wgpu::Buffer>,
+    bvh_buf: Option<wgpu::Buffer>,
     instance_count: u32,
 }
 
@@ -26,6 +28,7 @@ impl Scene {
             instances: Vec::new(),
             packed_grids_buf: None,
             instance_buf: None,
+            bvh_buf: None,
             instance_count: 0,
         }
     }
@@ -57,11 +60,21 @@ impl Scene {
             packed_grids.extend_from_slice(model.grid_data());
         }
 
-        // Build GPU instance data
-        let gpu_instances: Vec<VoxelInstanceGpu> = self
+        // Build AABBs for BVH
+        let aabbs: Vec<(glam::Vec3, glam::Vec3)> = self
             .instances
             .iter()
-            .map(|inst| {
+            .map(|inst| inst.world_aabb(&self.models[inst.model_id]))
+            .collect();
+
+        // Build BVH (reorders indices)
+        let (bvh_nodes, bvh_indices) = bvh::build(&aabbs);
+
+        // Build GPU instance data in BVH leaf order
+        let gpu_instances: Vec<VoxelInstanceGpu> = bvh_indices
+            .iter()
+            .map(|&orig_idx| {
+                let inst = &self.instances[orig_idx as usize];
                 let model = &self.models[inst.model_id];
                 let offset = grid_offsets[inst.model_id];
                 VoxelInstanceGpu::from_instance(inst, model, offset)
@@ -69,6 +82,25 @@ impl Scene {
             .collect();
 
         self.instance_count = gpu_instances.len() as u32;
+
+        // Upload BVH nodes
+        if !bvh_nodes.is_empty() {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bvh_nodes"),
+                size: (bvh_nodes.len() * size_of::<bvh::BvhNode>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: true,
+            });
+            {
+                let mut view = buf
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .expect("failed to map BVH buffer");
+                view.copy_from_slice(bytemuck::cast_slice(&bvh_nodes));
+            }
+            buf.unmap();
+            self.bvh_buf = Some(buf);
+        }
 
         // Upload packed grids
         if !packed_grids.is_empty() {
@@ -107,10 +139,11 @@ impl Scene {
         self.instance_buf = Some(buf);
 
         log::info!(
-            "scene: {} instances, {} models, {} grid cells packed",
+            "scene: {} instances, {} models, {} grid cells, {} BVH nodes",
             self.instance_count,
             self.models.len(),
             packed_grids.len(),
+            bvh_nodes.len(),
         );
     }
 
@@ -118,6 +151,12 @@ impl Scene {
     #[must_use]
     pub fn grid_buffer(&self) -> Option<&wgpu::Buffer> {
         self.packed_grids_buf.as_ref()
+    }
+
+    /// The BVH node buffer, for shader bind groups.
+    #[must_use]
+    pub fn bvh_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.bvh_buf.as_ref()
     }
 
     /// The instance data buffer, for shader bind groups.
