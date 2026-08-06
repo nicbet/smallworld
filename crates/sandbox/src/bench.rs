@@ -89,21 +89,52 @@ impl BenchState {
             brick_count, pool_capacity, instance_count
         );
         println!("──────────────────────────────────────────────────");
-        println!();
+
+        let dt_s = stat(&dts);
+        let cpu_s = stat(&cpus);
+        let gpu_s = stat(&gpus);
+        let fps_s = stat(&fps);
+        println!(
+            "{{\"preset\":\"{preset_name}\",\"duration_secs\":{elapsed:.2},\"frames\":{n},\
+             \"dt\":{{\"min\":{:.2},\"avg\":{:.2},\"max\":{:.2},\"p99\":{:.2}}},\
+             \"cpu\":{{\"min\":{:.2},\"avg\":{:.2},\"max\":{:.2},\"p99\":{:.2}}},\
+             \"gpu\":{{\"min\":{:.2},\"avg\":{:.2},\"max\":{:.2},\"p99\":{:.2}}},\
+             \"fps\":{{\"min\":{:.2},\"avg\":{:.2},\"max\":{:.2},\"p99\":{:.2}}},\
+             \"bricks\":{brick_count},\"pool_capacity\":{pool_capacity},\"instances\":{instance_count}}}",
+            dt_s.0,
+            dt_s.1,
+            dt_s.2,
+            dt_s.3,
+            cpu_s.0,
+            cpu_s.1,
+            cpu_s.2,
+            cpu_s.3,
+            gpu_s.0,
+            gpu_s.1,
+            gpu_s.2,
+            gpu_s.3,
+            fps_s.0,
+            fps_s.1,
+            fps_s.2,
+            fps_s.3,
+        );
     }
 }
 
 fn print_stat(label: &str, values: &[f32], unit: &str) {
+    let (min, avg, max, p99) = stat(values);
+    println!("  {label:<6} {min:>8.2} {avg:>8.2} {max:>8.2} {p99:>8.2}  {unit}");
+}
+
+fn stat(values: &[f32]) -> (f32, f32, f32, f32) {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
     let min = sorted[0];
     let max = sorted[sorted.len() - 1];
     let avg = sorted.iter().sum::<f32>() / sorted.len() as f32;
     let p99_idx = ((sorted.len() as f32) * 0.99) as usize;
     let p99 = sorted[p99_idx.min(sorted.len() - 1)];
-
-    println!("  {label:<6} {min:>8.2} {avg:>8.2} {max:>8.2} {p99:>8.2}  {unit}");
+    (min, avg, max, p99)
 }
 
 pub fn parse_args() -> Option<BenchConfig> {
