@@ -72,7 +72,7 @@ impl Raymarcher {
                 source: wgpu::ShaderSource::Wgsl(blit_source),
             });
 
-        // --- Compute bind group layout (7 bindings) ---
+        // --- Compute bind group layout (9 bindings) ---
         let compute_bind_group_layout =
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -94,6 +94,7 @@ impl Raymarcher {
                         bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                         bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                         bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                        bgl_entry(8, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                     ],
                 });
 
@@ -213,6 +214,7 @@ impl Raymarcher {
             instance_buf,
             grid_buf,
             bvh_buf,
+            pool.mip_buffer(),
         );
         let blit_bind_group =
             create_blit_bind_group(&gpu.device, &blit_bind_group_layout, &output_view, &sampler);
@@ -268,6 +270,7 @@ impl Raymarcher {
             instance_buf,
             grid_buf,
             bvh_buf,
+            pool.mip_buffer(),
         );
         self.blit_bind_group = create_blit_bind_group(
             &gpu.device,
@@ -425,6 +428,7 @@ fn create_compute_bind_group(
     instance_buf: &wgpu::Buffer,
     object_grid_buf: &wgpu::Buffer,
     bvh_buf: &wgpu::Buffer,
+    mip_buf: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
@@ -461,6 +465,10 @@ fn create_compute_bind_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: bvh_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: mip_buf.as_entire_binding(),
             },
         ],
     })

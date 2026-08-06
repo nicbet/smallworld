@@ -8,6 +8,7 @@ pub mod bvh;
 pub mod camera;
 pub mod gpu;
 pub mod gpu_timing;
+pub mod mip;
 pub mod raymarcher;
 pub mod scene;
 pub mod shaders;

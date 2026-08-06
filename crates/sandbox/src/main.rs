@@ -305,7 +305,7 @@ impl ApplicationHandler for App {
             render_scale,
             shadows: true,
             smooth_normals: false,
-            sse_threshold: 0.5,
+            sse_threshold: 0.8,
             last_frame: Instant::now(),
             frame_history: FrameHistory::new(),
             bench: bench_state,

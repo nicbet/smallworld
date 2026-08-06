@@ -59,6 +59,7 @@ impl BrickHandle {
 pub struct BrickPool {
     voxel_buf: wgpu::Buffer,
     palette_buf: wgpu::Buffer,
+    mip_buf: wgpu::Buffer,
     generations: Vec<u32>,
     free_list: Vec<u32>,
     capacity: u32,
@@ -86,18 +87,29 @@ impl BrickPool {
             mapped_at_creation: false,
         });
 
+        let mip_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brick_mips"),
+            size: u64::from(capacity) * u64::from(crate::mip::MIP_WORDS_PER_BRICK) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let generations = vec![0u32; capacity as usize];
         let free_list: Vec<u32> = (0..capacity).rev().collect();
 
+        let mip_mb =
+            capacity as f64 * crate::mip::MIP_WORDS_PER_BRICK as f64 * 4.0 / (1024.0 * 1024.0);
         log::info!(
-            "brick pool: {capacity} slots, {:.1} MB voxels + {:.1} MB palettes",
+            "brick pool: {capacity} slots, {:.1} MB voxels + {:.1} MB palettes + {:.1} MB mips",
             (capacity as f64 * WORDS_PER_BRICK as f64 * 4.0) / (1024.0 * 1024.0),
             (capacity as f64 * PALETTE_ENTRIES as f64 * 4.0) / (1024.0 * 1024.0),
+            mip_mb,
         );
 
         Self {
             voxel_buf,
             palette_buf,
+            mip_buf,
             generations,
             free_list,
             capacity,
@@ -199,6 +211,18 @@ impl BrickPool {
         queue.write_buffer(&self.palette_buf, offset, bytemuck::cast_slice(&packed));
     }
 
+    /// Uploads pre-computed mip data for the given brick.
+    pub fn write_mips(
+        &self,
+        queue: &wgpu::Queue,
+        handle: BrickHandle,
+        data: &[u32; crate::mip::MIP_WORDS_PER_BRICK as usize],
+    ) {
+        debug_assert!(self.is_valid(handle), "writing mips to an invalid handle");
+        let offset = u64::from(handle.slot) * u64::from(crate::mip::MIP_WORDS_PER_BRICK) * 4;
+        queue.write_buffer(&self.mip_buf, offset, bytemuck::cast_slice(data));
+    }
+
     /// The GPU voxel storage buffer, for shader bind group creation.
     #[must_use]
     pub fn voxel_buffer(&self) -> &wgpu::Buffer {
@@ -209,6 +233,12 @@ impl BrickPool {
     #[must_use]
     pub fn palette_buffer(&self) -> &wgpu::Buffer {
         &self.palette_buf
+    }
+
+    /// The GPU mip storage buffer, for shader bind group creation.
+    #[must_use]
+    pub fn mip_buffer(&self) -> &wgpu::Buffer {
+        &self.mip_buf
     }
 
     /// Maximum number of bricks this pool can hold.

@@ -1,4 +1,4 @@
-// Two-level DDA raymarcher: terrain grid + instanced voxel objects.
+// Two-level DDA raymarcher: dense voxel grid + instanced voxel volumes.
 
 const EMPTY: u32 = 0xFFFFFFFFu;
 const SUN_DIR: vec3<f32> = normalize(vec3<f32>(0.4, 0.8, 0.3));
@@ -42,6 +42,7 @@ struct ObjectInstance {
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var<storage, read> instances: array<ObjectInstance>;
 @group(0) @binding(6) var<storage, read> object_grids: array<u32>;
+@group(0) @binding(8) var<storage, read> mips: array<u32>;
 
 struct BvhNode {
     aabb_min: vec3<f32>,
@@ -190,25 +191,29 @@ fn trace_brick(
     return no_hit();
 }
 
-fn sample_brick_lod(handle: u32) -> vec3<f32> {
-    let probes = array<vec3<i32>, 4>(
-        vec3<i32>(8, 8, 8),
-        vec3<i32>(4, 4, 4),
-        vec3<i32>(12, 12, 12),
-        vec3<i32>(8, 4, 8),
+fn sample_brick_mip(handle: u32, local_uv: vec3<f32>, lod: u32) -> vec4<f32> {
+    let offsets = array<u32, 4>(0u, 512u, 576u, 584u);
+    let edges = array<u32, 4>(8u, 4u, 2u, 1u);
+    let lvl = clamp(lod, 1u, 4u) - 1u;
+    let edge = edges[lvl];
+    let mip_pos = clamp(
+        vec3<i32>(floor(local_uv * f32(edge))),
+        vec3<i32>(0),
+        vec3<i32>(i32(edge) - 1),
     );
-    for (var i = 0u; i < 4u; i++) {
-        let mat = read_voxel(handle, voxel_idx(probes[i]));
-        if mat != 0u {
-            return read_palette_color(handle, mat);
-        }
-    }
-    return vec3<f32>(-1.0);
+    let flat = u32(mip_pos.x) + edge * (u32(mip_pos.y) + edge * u32(mip_pos.z));
+    let packed = mips[handle * MIP_WORDS_PER_BRICK + offsets[lvl] + flat];
+    return vec4<f32>(
+        f32(packed & 0xFFu),
+        f32((packed >> 8u) & 0xFFu),
+        f32((packed >> 16u) & 0xFFu),
+        f32((packed >> 24u) & 0xFFu),
+    ) / 255.0;
 }
 
-// ---- terrain traversal ----
+// ---- dense grid traversal ----
 
-fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
+fn trace_grid(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
     let inv_rd = 1.0 / rd;
     let world_max = u.world_min + vec3<f32>(u.grid_dims) * u.brick_size;
     let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
@@ -244,7 +249,7 @@ fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
         coarse_normal = vec3<f32>(0.0, 0.0, -sign(rd.z));
     }
 
-    let terrain_vs = VOXEL_SCALE;
+    let grid_vs = VOXEL_SCALE;
 
     for (var c = 0u; c < MAX_COARSE_STEPS; c++) {
         if !all(grid_pos >= vec3<i32>(0)) || !all(grid_pos < vec3<i32>(u.grid_dims)) {
@@ -261,15 +266,19 @@ fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
 
             if brick_t < max_t {
                 let dist = max(brick_t, 0.001);
-                let sse = terrain_vs * u.focal_length / dist;
+                let sse = grid_vs * u.focal_length / dist;
                 if sse < u.sse_threshold {
-                    let lod_color = sample_brick_lod(handle);
-                    if lod_color.x >= 0.0 {
+                    let ratio = u.sse_threshold / max(sse, 0.001);
+                    let lod = clamp(u32(ceil(log2(ratio))), 1u, 4u);
+                    let entry = (ro + rd * (brick_t + grid_vs * 0.005) - brick_min) / u.brick_size;
+                    let local_uv = clamp(entry, vec3(0.001), vec3(0.999));
+                    let mip_color = sample_brick_mip(handle, local_uv, lod);
+                    if mip_color.a > 0.0 {
                         let wp = ro + rd * brick_t;
-                        return HitResult(true, lod_color, coarse_normal, vec3<i32>(0), handle, wp, brick_t);
+                        return HitResult(true, mip_color.rgb, coarse_normal, vec3<i32>(0), handle, wp, brick_t);
                     }
                 }
-                let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal, terrain_vs);
+                let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal, grid_vs);
                 if result.hit {
                     return result;
                 }
@@ -302,9 +311,9 @@ fn trace_terrain(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
     return no_hit();
 }
 
-// ---- object instance traversal ----
+// ---- instanced volume traversal ----
 
-fn trace_object(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
+fn trace_instance(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
     let obj_ro = (obj.inv_transform * vec4<f32>(ro, 1.0)).xyz;
     let obj_rd_raw = (obj.inv_transform * vec4<f32>(rd, 0.0)).xyz;
     let rd_scale = length(obj_rd_raw);
@@ -372,12 +381,16 @@ fn trace_object(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -
             let world_dist = max(world_brick_t, 0.001);
             let sse = obj_vs * u.focal_length / world_dist;
             if sse < u.sse_threshold {
-                let lod_color = sample_brick_lod(handle);
-                if lod_color.x >= 0.0 {
+                let ratio = u.sse_threshold / max(sse, 0.001);
+                let lod = clamp(u32(ceil(log2(ratio))), 1u, 4u);
+                let entry = (obj_ro + obj_rd * (brick_t + obj_vs * 0.005) - brick_min) / obj_brick_size;
+                let local_uv = clamp(entry, vec3(0.001), vec3(0.999));
+                let mip_color = sample_brick_mip(handle, local_uv, lod);
+                if mip_color.a > 0.0 {
                     let obj_wp = obj_ro + obj_rd * brick_t;
                     let world_pos = (obj.transform * vec4<f32>(obj_wp, 1.0)).xyz;
                     let world_normal = normalize((obj.transform * vec4<f32>(coarse_normal, 0.0)).xyz);
-                    return HitResult(true, lod_color, world_normal, vec3<i32>(0), handle, world_pos, world_brick_t);
+                    return HitResult(true, mip_color.rgb, world_normal, vec3<i32>(0), handle, world_pos, world_brick_t);
                 }
             }
             let result = trace_brick(obj_ro, obj_rd, brick_t, handle, brick_min, coarse_normal, obj_vs);
@@ -415,7 +428,7 @@ fn trace_object(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -
     return no_hit();
 }
 
-// ---- shadow ray (terrain + objects) ----
+// ---- shadow ray (grid + instances) ----
 
 fn any_hit_brick(ro: vec3<f32>, rd: vec3<f32>, t_enter: f32, handle: u32, brick_min: vec3<f32>, vs: f32) -> bool {
     let inv_voxel = 1.0 / vs;
@@ -447,7 +460,7 @@ fn any_hit_brick(ro: vec3<f32>, rd: vec3<f32>, t_enter: f32, handle: u32, brick_
 }
 
 fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
-    // Test terrain
+    // Test grid
     let inv_rd = 1.0 / rd;
     let world_max = u.world_min + vec3<f32>(u.grid_dims) * u.brick_size;
     let world_hit = ray_aabb(ro, inv_rd, u.world_min, world_max);
@@ -587,7 +600,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rd = normalize(far_w - near_w);
 
     // Trace terrain
-    var best = trace_terrain(ro, rd, 1e20);
+    var best = trace_grid(ro, rd, 1e20);
 
     // Trace object instances (BVH traversal)
     let inv_rd = 1.0 / rd;
@@ -608,7 +621,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Leaf: test instances
                 for (var i = node.left_or_first; i < node.left_or_first + node.count; i++) {
                     let obj = instances[i];
-                    let obj_hit = trace_object(obj, ro, rd, best.t);
+                    let obj_hit = trace_instance(obj, ro, rd, best.t);
                     if obj_hit.hit && obj_hit.t < best.t {
                         best = obj_hit;
                     }

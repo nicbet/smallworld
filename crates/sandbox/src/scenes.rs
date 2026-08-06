@@ -198,6 +198,9 @@ fn generate_terrain(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut Brick
                     let handle = pool.alloc().expect("brick pool exhausted");
                     pool.write_voxels(queue, handle, &data.voxels);
                     pool.write_palette(queue, handle, data.palette);
+                    let mips =
+                        smallworld_engine::mip::compute_brick_mips(&data.voxels, data.palette);
+                    pool.write_mips(queue, handle, &mips);
                     index.set([gx, gy, gz], handle);
                     allocated += 1;
                 }
@@ -428,6 +431,8 @@ fn setup_single_brick(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut Bri
 
     pool.write_voxels(queue, handle, &voxels);
     pool.write_palette(queue, handle, palette);
+    let mips = smallworld_engine::mip::compute_brick_mips(&voxels, palette);
+    pool.write_mips(queue, handle, &mips);
     index.set([1, 1, 1], handle);
     index.upload(queue);
 
