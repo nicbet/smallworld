@@ -1,6 +1,9 @@
 //! Procedural world generator: 3D density terrain with strata, caves, and water.
 
+use glam::Vec3;
+use smallworld_engine::brick_data::BrickData;
 use smallworld_engine::brick_pool::{BRICK_EDGE, BRICK_VOLUME, VOXEL_SCALE};
+use smallworld_engine::brick_source::BrickSource;
 
 const MAT_AIR: u8 = 0;
 const MAT_GRASS: u8 = 1;
@@ -23,8 +26,8 @@ pub const PALETTE: &[[u8; 4]] = &[
     [55, 130, 15, 255],   // 8 grass alt
 ];
 
-/// Data for one generated brick.
-pub struct BrickData {
+/// Data for one generated brick (internal to worldgen).
+pub struct GeneratedBrick {
     /// 16³ voxel material indices.
     pub voxels: [u8; BRICK_VOLUME as usize],
     /// Palette entries used by this brick.
@@ -56,7 +59,11 @@ impl WorldGenerator {
     /// Generates voxel data for one brick at the given grid position.
     /// Returns `None` if the brick is entirely empty (air above water table).
     #[must_use]
-    pub fn generate_brick(&self, grid_pos: [u32; 3], world_min: glam::Vec3) -> Option<BrickData> {
+    pub fn generate_brick(
+        &self,
+        grid_pos: [u32; 3],
+        world_min: glam::Vec3,
+    ) -> Option<GeneratedBrick> {
         let brick_min = world_min
             + glam::Vec3::new(grid_pos[0] as f32, grid_pos[1] as f32, grid_pos[2] as f32)
                 * (BRICK_EDGE as f32 * VOXEL_SCALE);
@@ -85,7 +92,7 @@ impl WorldGenerator {
             return None;
         }
 
-        Some(BrickData {
+        Some(GeneratedBrick {
             voxels,
             palette: PALETTE,
         })
@@ -248,6 +255,16 @@ fn fbm3d(x: f32, y: f32, z: f32, octaves: u32, seed: u32) -> f32 {
         freq *= 2.0;
     }
     value / max_amp
+}
+
+impl BrickSource for WorldGenerator {
+    fn generate(&self, grid_pos: [u32; 3], world_min: Vec3) -> Option<BrickData> {
+        self.generate_brick(grid_pos, world_min)
+            .map(|gb| BrickData {
+                voxels: gb.voxels,
+                palette: gb.palette.to_vec(),
+            })
+    }
 }
 
 #[cfg(test)]

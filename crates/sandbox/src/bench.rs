@@ -152,10 +152,10 @@ pub fn parse_args() -> Option<BenchConfig> {
                 duration_secs = args[i].parse().unwrap_or(20.0);
             }
         } else {
+            let normalized = args[i].replace(['-', ' '], "");
             for &p in Preset::ALL {
-                if p.label().eq_ignore_ascii_case(&args[i])
-                    || p.label().replace(' ', "").eq_ignore_ascii_case(&args[i])
-                {
+                let label_norm = p.label().replace(' ', "");
+                if label_norm.eq_ignore_ascii_case(&normalized) {
                     preset = p;
                     break;
                 }

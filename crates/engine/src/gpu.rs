@@ -41,11 +41,17 @@ impl GpuContext {
 
         let required_features = Self::negotiate_features(&adapter);
 
+        let adapter_limits = adapter.limits();
+        log::info!(
+            "max storage buffer binding: {} MB",
+            adapter_limits.max_storage_buffer_binding_size / (1024 * 1024)
+        );
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("smallworld"),
                 required_features,
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
             })
@@ -80,7 +86,7 @@ impl GpuContext {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("smallworld-headless"),
                 required_features,
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter.limits(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
             })

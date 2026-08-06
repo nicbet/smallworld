@@ -1,7 +1,11 @@
 //! Sandbox: dev/test harness for the smallworld engine.
 
 mod bench;
+mod cached_source;
+mod gpu_cached_source;
+mod gpu_worldgen;
 mod model_gen;
+mod region;
 mod scenes;
 mod worldgen;
 
@@ -9,8 +13,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use smallworld_engine::brick_index::BrickIndex;
+use smallworld_engine::brick_pager::{BrickPager, PagerStats};
 use smallworld_engine::brick_pool::BrickPool;
 use smallworld_engine::camera::FreeCamera;
+use smallworld_engine::coarse_mip_grid::CoarseMipGrid;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
 use smallworld_engine::raymarcher::Raymarcher;
@@ -131,11 +137,14 @@ struct RunState {
     egui_renderer: egui_wgpu::Renderer,
     brick_pool: BrickPool,
     brick_index: BrickIndex,
+    coarse_mip_grid: CoarseMipGrid,
     scene: Scene,
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
     camera: FreeCamera,
     current_preset: Preset,
+    pager: Option<BrickPager>,
+    pager_stats: PagerStats,
     input: InputState,
     render_scale: f32,
     shadows: bool,
@@ -157,17 +166,21 @@ impl App {
 
 impl RunState {
     fn load_preset(&mut self, preset: Preset) {
+        self.pager = None;
         self.brick_pool = BrickPool::new(&self.gpu.device, preset.pool_capacity());
         self.brick_index =
             BrickIndex::new(&self.gpu.device, preset.grid_dims(), preset.world_min());
+        self.coarse_mip_grid = CoarseMipGrid::new(&self.gpu.device, preset.grid_dims());
         self.scene = Scene::new();
-        preset.setup(
+        self.pager = preset.setup(
             &self.gpu.device,
             &self.gpu.queue,
             &mut self.brick_pool,
             &mut self.brick_index,
+            &mut self.coarse_mip_grid,
             &mut self.scene,
         );
+        self.pager_stats = PagerStats::default();
         self.scene.upload(&self.gpu.device);
 
         let rw = ((self.surface_config.width as f32) * self.render_scale) as u32;
@@ -180,6 +193,7 @@ impl RunState {
             &self.brick_pool,
             &self.brick_index,
             &self.scene,
+            &self.coarse_mip_grid,
         );
 
         let (pos, yaw, pitch) = preset.camera_start();
@@ -245,12 +259,14 @@ impl ApplicationHandler for App {
             .unwrap_or(Preset::Default);
         let mut brick_pool = BrickPool::new(&gpu.device, preset.pool_capacity());
         let mut brick_index = BrickIndex::new(&gpu.device, preset.grid_dims(), preset.world_min());
+        let mut coarse_mip_grid = CoarseMipGrid::new(&gpu.device, preset.grid_dims());
         let mut scene = Scene::new();
-        preset.setup(
+        let pager = preset.setup(
             &gpu.device,
             &gpu.queue,
             &mut brick_pool,
             &mut brick_index,
+            &mut coarse_mip_grid,
             &mut scene,
         );
         scene.upload(&gpu.device);
@@ -271,6 +287,7 @@ impl ApplicationHandler for App {
             &brick_pool,
             &brick_index,
             &scene,
+            &coarse_mip_grid,
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -296,11 +313,14 @@ impl ApplicationHandler for App {
             egui_renderer,
             brick_pool,
             brick_index,
+            coarse_mip_grid,
             scene,
             raymarcher,
             timestamps,
             camera,
             current_preset: preset,
+            pager,
+            pager_stats: PagerStats::default(),
             input: InputState::default(),
             render_scale,
             shadows: true,
@@ -343,6 +363,7 @@ impl ApplicationHandler for App {
                     &state.brick_pool,
                     &state.brick_index,
                     &state.scene,
+                    &state.coarse_mip_grid,
                 );
                 state.camera.aspect = w as f32 / h as f32;
             }
@@ -422,6 +443,21 @@ impl ApplicationHandler for App {
                     state.camera.translate(delta);
                 }
 
+                // Pager update: stream bricks based on camera position
+                if let Some(pager) = &mut state.pager {
+                    let rh = ((state.surface_config.height as f32) * state.render_scale).max(1.0);
+                    let focal_length = rh / (2.0 * (state.camera.fov_y * 0.5).tan());
+                    state.pager_stats = pager.update(
+                        state.camera.position,
+                        focal_length,
+                        state.sse_threshold,
+                        &mut state.brick_index,
+                        &mut state.brick_pool,
+                        &mut state.coarse_mip_grid,
+                        &state.gpu.queue,
+                    );
+                }
+
                 // Run egui every frame so texture deltas are always consumed.
                 let raw_input = state.egui_state.take_egui_input(&state.window);
                 let mut render_scale = state.render_scale;
@@ -458,6 +494,7 @@ impl ApplicationHandler for App {
                         &state.brick_pool,
                         &state.brick_index,
                         &state.scene,
+                        &state.coarse_mip_grid,
                     );
                 }
                 state
@@ -737,6 +774,20 @@ fn draw_debug_panel(
                 state.brick_pool.capacity(),
                 state.scene.instance_count(),
             ));
+            if state.pager.is_some() {
+                let ps = &state.pager_stats;
+                ui.separator();
+                ui.label("Pager");
+                ui.label(format!(
+                    "Resident: {}  Mip-only: {}  Loading: {}",
+                    ps.resident, ps.mip_only, ps.loading
+                ));
+                ui.label(format!("Air: {}  Unknown: {}", ps.air, ps.unknown));
+                ui.label(format!(
+                    "Uploads: {}/f  Evictions: {}/f",
+                    ps.uploaded_this_frame, ps.evicted_this_frame
+                ));
+            }
             ui.separator();
             if let Some(ts) = &state.timestamps {
                 let avg = ts.averages();

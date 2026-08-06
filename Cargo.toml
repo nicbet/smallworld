@@ -25,6 +25,12 @@ glam = "0.33"
 # Serialisation
 bytemuck = { version = "1", features = ["derive"] }
 
+# Channels
+crossbeam-channel = "0.5"
+
+# Compression
+zstd = "0.13"
+
 # Async
 pollster = "0.4"
 

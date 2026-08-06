@@ -100,6 +100,12 @@ impl BrickIndex {
         self.data.iter().filter(|&&v| v != u32::MAX).count() as u32
     }
 
+    /// Clears a grid cell back to empty (`u32::MAX`).
+    pub fn clear_cell(&mut self, pos: [u32; 3]) {
+        let idx = self.flat_index(pos);
+        self.data[idx] = u32::MAX;
+    }
+
     fn flat_index(&self, pos: [u32; 3]) -> usize {
         debug_assert!(
             pos[0] < self.dims[0] && pos[1] < self.dims[1] && pos[2] < self.dims[2],

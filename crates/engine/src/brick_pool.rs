@@ -252,6 +252,23 @@ impl BrickPool {
     pub fn live_count(&self) -> u32 {
         self.live_count
     }
+
+    /// Reassigns an existing slot to a new logical brick without a free/alloc
+    /// round-trip. Bumps the slot's generation so stale handles are detected.
+    ///
+    /// Used by the pager when evicting a cold brick and reusing its slot.
+    pub fn reassign(&mut self, slot: u32) -> BrickHandle {
+        debug_assert!(
+            (slot as usize) < self.capacity as usize,
+            "reassign slot {slot} out of range (capacity {})",
+            self.capacity
+        );
+        self.generations[slot as usize] = self.generations[slot as usize].wrapping_add(1);
+        BrickHandle {
+            slot,
+            generation: self.generations[slot as usize],
+        }
+    }
 }
 
 #[cfg(test)]
