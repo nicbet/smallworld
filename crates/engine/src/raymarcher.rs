@@ -185,7 +185,7 @@ impl Raymarcher {
 
         let dummy_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dummy"),
-            size: 16,
+            size: 256,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });

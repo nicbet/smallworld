@@ -28,8 +28,14 @@ impl BrickIndex {
             label: Some("brick_index"),
             size: (total * size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            mapped_at_creation: true,
         });
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("mapped at creation")
+            .copy_from_slice(bytemuck::cast_slice(&data));
+        buffer.unmap();
 
         log::info!(
             "brick index: {}×{}×{} ({total} cells, {:.1} KB)",

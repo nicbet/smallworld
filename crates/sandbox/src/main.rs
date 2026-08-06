@@ -1,6 +1,7 @@
 //! Sandbox: dev/test harness for the smallworld engine.
 
 mod model_gen;
+mod scenes;
 mod worldgen;
 
 use std::sync::Arc;
@@ -13,14 +14,14 @@ use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
 use smallworld_engine::raymarcher::Raymarcher;
 use smallworld_engine::scene::Scene;
-use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
-use worldgen::WorldGenerator;
+
+use scenes::Preset;
 
 fn main() {
     env_logger::init();
@@ -130,6 +131,7 @@ struct RunState {
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
     camera: FreeCamera,
+    current_preset: Preset,
     input: InputState,
     render_scale: f32,
     shadows: bool,
@@ -141,6 +143,43 @@ struct RunState {
 impl App {
     fn new() -> Self {
         Self { state: None }
+    }
+}
+
+impl RunState {
+    fn load_preset(&mut self, preset: Preset) {
+        self.brick_pool = BrickPool::new(&self.gpu.device, preset.pool_capacity());
+        self.brick_index =
+            BrickIndex::new(&self.gpu.device, preset.grid_dims(), preset.world_min());
+        self.scene = Scene::new();
+        preset.setup(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut self.brick_pool,
+            &mut self.brick_index,
+            &mut self.scene,
+        );
+        self.scene.upload(&self.gpu.device);
+
+        let rw = ((self.surface_config.width as f32) * self.render_scale) as u32;
+        let rh = ((self.surface_config.height as f32) * self.render_scale) as u32;
+        self.raymarcher = Raymarcher::new(
+            &self.gpu,
+            rw.max(1),
+            rh.max(1),
+            self.surface_config.format,
+            &self.brick_pool,
+            &self.brick_index,
+            &self.scene,
+        );
+
+        let (pos, yaw, pitch) = preset.camera_start();
+        self.camera.position = pos;
+        self.camera.yaw = yaw;
+        self.camera.pitch = pitch;
+        self.current_preset = preset;
+
+        log::info!("loaded preset: {}", preset.label());
     }
 }
 
@@ -190,15 +229,17 @@ impl ApplicationHandler for App {
             None
         };
 
-        let grid_dims = [32u32, 12, 32];
-        let world_min = glam::Vec3::new(-25.6, -9.6, -25.6);
-
-        let mut brick_pool = BrickPool::new(&gpu.device, 32768);
-        let mut brick_index = BrickIndex::new(&gpu.device, grid_dims, world_min);
-        generate_world(&gpu.queue, &mut brick_pool, &mut brick_index);
-
+        let preset = Preset::Default;
+        let mut brick_pool = BrickPool::new(&gpu.device, preset.pool_capacity());
+        let mut brick_index = BrickIndex::new(&gpu.device, preset.grid_dims(), preset.world_min());
         let mut scene = Scene::new();
-        populate_scene(&gpu.queue, &mut brick_pool, &mut scene, &brick_index);
+        preset.setup(
+            &gpu.device,
+            &gpu.queue,
+            &mut brick_pool,
+            &mut brick_index,
+            &mut scene,
+        );
         scene.upload(&gpu.device);
 
         let render_scale = if window.scale_factor() > 1.0 {
@@ -220,9 +261,11 @@ impl ApplicationHandler for App {
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
+        let (cam_pos, cam_yaw, cam_pitch) = preset.camera_start();
         let mut camera = FreeCamera::new(aspect);
-        camera.position = glam::Vec3::new(0.0, 8.0, 14.0);
-        camera.pitch = -20.0_f32.to_radians();
+        camera.position = cam_pos;
+        camera.yaw = cam_yaw;
+        camera.pitch = cam_pitch;
 
         self.state = Some(RunState {
             window,
@@ -238,6 +281,7 @@ impl ApplicationHandler for App {
             raymarcher,
             timestamps,
             camera,
+            current_preset: preset,
             input: InputState::default(),
             render_scale,
             shadows: true,
@@ -358,6 +402,7 @@ impl ApplicationHandler for App {
                 let mut render_scale = state.render_scale;
                 let mut shadows = state.shadows;
                 let mut smooth_normals = state.smooth_normals;
+                let mut selected_preset = state.current_preset;
                 let mut full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
                     draw_debug_panel(
                         ctx,
@@ -365,11 +410,15 @@ impl ApplicationHandler for App {
                         &mut render_scale,
                         &mut shadows,
                         &mut smooth_normals,
+                        &mut selected_preset,
                     );
                     draw_frame_graph(ctx, &state.frame_history);
                 });
                 state.shadows = shadows;
                 state.smooth_normals = smooth_normals;
+                if selected_preset != state.current_preset {
+                    state.load_preset(selected_preset);
+                }
                 if (render_scale - state.render_scale).abs() > 0.001 {
                     state.render_scale = render_scale;
                     let rw = ((state.surface_config.width as f32) * render_scale) as u32;
@@ -567,6 +616,7 @@ fn draw_debug_panel(
     render_scale: &mut f32,
     shadows: &mut bool,
     smooth_normals: &mut bool,
+    selected_preset: &mut Preset,
 ) {
     let info = state.gpu.adapter_info();
     let dt = state.last_frame.elapsed().as_secs_f32();
@@ -576,6 +626,14 @@ fn draw_debug_panel(
         .default_width(240.0)
         .collapsible(true)
         .show(ctx, |ui| {
+            egui::ComboBox::from_label("Scene")
+                .selected_text(selected_preset.label())
+                .show_ui(ui, |ui| {
+                    for &p in Preset::ALL {
+                        ui.selectable_value(selected_preset, p, p.label());
+                    }
+                });
+            ui.separator();
             ui.label(format!("Adapter: {} — {:?}", info.name, info.backend));
             ui.label(format!("Driver: {}", info.driver));
             ui.separator();
@@ -784,129 +842,4 @@ fn legend_dot(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 2.0, color);
     ui.label(egui::RichText::new(label).size(10.0));
-}
-
-// ---------------------------------------------------------------------------
-// World generation
-// ---------------------------------------------------------------------------
-
-fn generate_world(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut BrickIndex) {
-    let start = Instant::now();
-    let wg = WorldGenerator::new(42);
-    let dims = index.dims();
-    let world_min = index.world_min();
-
-    let mut allocated = 0u32;
-    for gz in 0..dims[2] {
-        for gy in 0..dims[1] {
-            for gx in 0..dims[0] {
-                if let Some(data) = wg.generate_brick([gx, gy, gz], world_min) {
-                    let handle = pool.alloc().expect("brick pool exhausted");
-                    pool.write_voxels(queue, handle, &data.voxels);
-                    pool.write_palette(queue, handle, data.palette);
-                    index.set([gx, gy, gz], handle);
-                    allocated += 1;
-                }
-            }
-        }
-    }
-    index.upload(queue);
-    let elapsed = start.elapsed();
-    log::info!(
-        "worldgen: {allocated} bricks in {:.1} ms (seed 42)",
-        elapsed.as_secs_f64() * 1000.0
-    );
-}
-
-fn populate_scene(
-    queue: &wgpu::Queue,
-    pool: &mut BrickPool,
-    scene: &mut Scene,
-    terrain: &BrickIndex,
-) {
-    let start = Instant::now();
-
-    let tree_model = model_gen::generate_tree(pool, queue, 42);
-    let rock_model = model_gen::generate_rock(pool, queue, 99);
-    let pebble_model = model_gen::generate_pebble(pool, queue, 77);
-    let tree_id = scene.add_model(tree_model);
-    let rock_id = scene.add_model(rock_model);
-    let pebble_id = scene.add_model(pebble_model);
-
-    let wg = WorldGenerator::new(42);
-    let spacing = 4.0_f32;
-    let world_min = terrain.world_min();
-    let dims = terrain.dims();
-    let world_max = world_min
-        + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * terrain.brick_size();
-
-    let tree_ext = scene.models()[tree_id].world_extent();
-    let rock_ext = scene.models()[rock_id].world_extent();
-    let pebble_ext = scene.models()[pebble_id].world_extent();
-
-    let mut tree_count = 0u32;
-    let mut rock_count = 0u32;
-    let mut pebble_count = 0u32;
-
-    // Trees and rocks at 4m spacing
-    let mut x = world_min.x + spacing;
-    while x < world_max.x - spacing {
-        let mut z = world_min.z + spacing;
-        while z < world_max.z - spacing {
-            let h = worldgen::hash_for_placement(x, z, 42);
-            if let Some(surface_y) = wg.find_surface_y(x, z)
-                && surface_y > 0.0
-                && surface_y < world_max.y - 3.0
-            {
-                if h.is_multiple_of(5) && tree_count < 100 {
-                    scene.add_instance(VoxelInstance {
-                        model_id: tree_id,
-                        position: glam::Vec3::new(x, surface_y + tree_ext.y * 0.5, z),
-                        rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
-                    });
-                    tree_count += 1;
-                } else if h.is_multiple_of(11) && rock_count < 50 {
-                    scene.add_instance(VoxelInstance {
-                        model_id: rock_id,
-                        position: glam::Vec3::new(x, surface_y + rock_ext.y * 0.5, z),
-                        rotation: glam::Quat::from_rotation_y((h % 314) as f32 / 100.0),
-                    });
-                    rock_count += 1;
-                }
-            }
-            z += spacing;
-        }
-        x += spacing;
-    }
-
-    // Pebbles at 1.5m spacing — many more
-    let pebble_spacing = 1.5_f32;
-    let mut px = world_min.x + 1.0;
-    while px < world_max.x - 1.0 {
-        let mut pz = world_min.z + 1.0;
-        while pz < world_max.z - 1.0 {
-            let h = worldgen::hash_for_placement(px, pz, 9999);
-            if h.is_multiple_of(3)
-                && let Some(sy) = wg.find_surface_y(px, pz)
-                && sy > 0.0
-                && sy < world_max.y - 1.0
-                && pebble_count < 500
-            {
-                scene.add_instance(VoxelInstance {
-                    model_id: pebble_id,
-                    position: glam::Vec3::new(px, sy + pebble_ext.y * 0.5, pz),
-                    rotation: glam::Quat::from_rotation_y((h % 628) as f32 / 100.0),
-                });
-                pebble_count += 1;
-            }
-            pz += pebble_spacing;
-        }
-        px += pebble_spacing;
-    }
-
-    let elapsed = start.elapsed();
-    log::info!(
-        "scene: {tree_count} trees + {rock_count} rocks + {pebble_count} pebbles in {:.1} ms",
-        elapsed.as_secs_f64() * 1000.0
-    );
 }
