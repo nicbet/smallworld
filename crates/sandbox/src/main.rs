@@ -16,7 +16,6 @@ use smallworld_engine::brick_index::BrickIndex;
 use smallworld_engine::brick_pager::{BrickPager, PagerStats};
 use smallworld_engine::brick_pool::BrickPool;
 use smallworld_engine::camera::FreeCamera;
-use smallworld_engine::coarse_mip_grid::CoarseMipGrid;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
 use smallworld_engine::raymarcher::Raymarcher;
@@ -137,7 +136,6 @@ struct RunState {
     egui_renderer: egui_wgpu::Renderer,
     brick_pool: BrickPool,
     brick_index: BrickIndex,
-    coarse_mip_grid: CoarseMipGrid,
     scene: Scene,
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
@@ -170,14 +168,12 @@ impl RunState {
         self.brick_pool = BrickPool::new(&self.gpu.device, preset.pool_capacity());
         self.brick_index =
             BrickIndex::new(&self.gpu.device, preset.grid_dims(), preset.world_min());
-        self.coarse_mip_grid = CoarseMipGrid::new(&self.gpu.device, preset.grid_dims());
         self.scene = Scene::new();
         self.pager = preset.setup(
             &self.gpu.device,
             &self.gpu.queue,
             &mut self.brick_pool,
             &mut self.brick_index,
-            &mut self.coarse_mip_grid,
             &mut self.scene,
         );
         self.pager_stats = PagerStats::default();
@@ -193,7 +189,6 @@ impl RunState {
             &self.brick_pool,
             &self.brick_index,
             &self.scene,
-            &self.coarse_mip_grid,
         );
 
         let (pos, yaw, pitch) = preset.camera_start();
@@ -259,14 +254,12 @@ impl ApplicationHandler for App {
             .unwrap_or(Preset::Default);
         let mut brick_pool = BrickPool::new(&gpu.device, preset.pool_capacity());
         let mut brick_index = BrickIndex::new(&gpu.device, preset.grid_dims(), preset.world_min());
-        let mut coarse_mip_grid = CoarseMipGrid::new(&gpu.device, preset.grid_dims());
         let mut scene = Scene::new();
         let pager = preset.setup(
             &gpu.device,
             &gpu.queue,
             &mut brick_pool,
             &mut brick_index,
-            &mut coarse_mip_grid,
             &mut scene,
         );
         scene.upload(&gpu.device);
@@ -287,7 +280,6 @@ impl ApplicationHandler for App {
             &brick_pool,
             &brick_index,
             &scene,
-            &coarse_mip_grid,
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -313,7 +305,6 @@ impl ApplicationHandler for App {
             egui_renderer,
             brick_pool,
             brick_index,
-            coarse_mip_grid,
             scene,
             raymarcher,
             timestamps,
@@ -363,7 +354,6 @@ impl ApplicationHandler for App {
                     &state.brick_pool,
                     &state.brick_index,
                     &state.scene,
-                    &state.coarse_mip_grid,
                 );
                 state.camera.aspect = w as f32 / h as f32;
             }
@@ -453,7 +443,6 @@ impl ApplicationHandler for App {
                         state.sse_threshold,
                         &mut state.brick_index,
                         &mut state.brick_pool,
-                        &mut state.coarse_mip_grid,
                         &state.gpu.queue,
                     );
                 }
@@ -494,7 +483,6 @@ impl ApplicationHandler for App {
                         &state.brick_pool,
                         &state.brick_index,
                         &state.scene,
-                        &state.coarse_mip_grid,
                     );
                 }
                 state

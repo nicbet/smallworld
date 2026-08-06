@@ -3,7 +3,6 @@
 use crate::brick_index::BrickIndex;
 use crate::brick_pool::BrickPool;
 use crate::camera::FreeCamera;
-use crate::coarse_mip_grid::CoarseMipGrid;
 use crate::gpu::GpuContext;
 use crate::scene::Scene;
 use crate::shaders::{self, Shader};
@@ -57,7 +56,6 @@ impl Raymarcher {
         pool: &BrickPool,
         index: &BrickIndex,
         scene: &Scene,
-        coarse: &CoarseMipGrid,
     ) -> Self {
         let compute_source = shaders::compose(&[Shader::Common, Shader::Raymarch]);
         let compute_module = gpu
@@ -97,8 +95,6 @@ impl Raymarcher {
                         bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                         bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                         bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(8, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(9, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
                     ],
                 });
 
@@ -218,8 +214,6 @@ impl Raymarcher {
             instance_buf,
             grid_buf,
             bvh_buf,
-            pool.mip_buffer(),
-            coarse.buffer(),
         );
         let blit_bind_group =
             create_blit_bind_group(&gpu.device, &blit_bind_group_layout, &output_view, &sampler);
@@ -251,7 +245,6 @@ impl Raymarcher {
         pool: &BrickPool,
         index: &BrickIndex,
         scene: &Scene,
-        coarse: &CoarseMipGrid,
     ) {
         if width == self.width && height == self.height {
             return;
@@ -277,8 +270,6 @@ impl Raymarcher {
             instance_buf,
             grid_buf,
             bvh_buf,
-            pool.mip_buffer(),
-            coarse.buffer(),
         );
         self.blit_bind_group = create_blit_bind_group(
             &gpu.device,
@@ -436,8 +427,6 @@ fn create_compute_bind_group(
     instance_buf: &wgpu::Buffer,
     object_grid_buf: &wgpu::Buffer,
     bvh_buf: &wgpu::Buffer,
-    mip_buf: &wgpu::Buffer,
-    coarse_mip_buf: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
@@ -474,14 +463,6 @@ fn create_compute_bind_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: bvh_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 8,
-                resource: mip_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 9,
-                resource: coarse_mip_buf.as_entire_binding(),
             },
         ],
     })

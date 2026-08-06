@@ -13,11 +13,6 @@ const BRICK_VOLUME: u32 = BRICK_EDGE * BRICK_EDGE * BRICK_EDGE;
 // Edge length of one voxel in metres at base scale (docs/DESIGN.md D3).
 const VOXEL_SCALE: f32 = 0.1;
 
-// u32 words per brick in the mip buffer (8³ + 4³ + 2³ + 1³ = 585).
-const MIP_WORDS_PER_BRICK: u32 = 585u;
-
-// u32 words per cell in the coarse mip grid (4³ + 2³ + 1³ = 73).
-const COARSE_MIP_WORDS: u32 = 73u;
 
 // Flattens a voxel coordinate within a brick to its index in the brick payload.
 // x is the fastest-varying axis, matching the CPU-side layout.

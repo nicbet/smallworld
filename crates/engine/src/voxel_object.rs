@@ -99,8 +99,6 @@ impl VoxelModel {
         let handle = pool.alloc().expect("brick pool exhausted");
         pool.write_voxels(queue, handle, voxels);
         pool.write_palette(queue, handle, palette);
-        let mips = crate::mip::compute_brick_mips(voxels, palette);
-        pool.write_mips(queue, handle, &mips);
         self.set(pos, handle);
         true
     }

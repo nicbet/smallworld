@@ -6,7 +6,6 @@ use std::time::Instant;
 use smallworld_engine::brick_index::BrickIndex;
 use smallworld_engine::brick_pager::{BrickPager, PagerConfig};
 use smallworld_engine::brick_pool::{BRICK_EDGE, BRICK_VOLUME, BrickPool, VOXEL_SCALE};
-use smallworld_engine::coarse_mip_grid::CoarseMipGrid;
 use smallworld_engine::scene::Scene;
 use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
@@ -21,7 +20,6 @@ use crate::worldgen::{self, WorldGenerator};
 pub enum Preset {
     Default,
     TerrainOnly,
-    LargeWorld,
     ObjectsOnly,
     Stress,
     SingleBrick,
@@ -32,7 +30,6 @@ impl Preset {
     pub const ALL: &[Self] = &[
         Self::Default,
         Self::TerrainOnly,
-        Self::LargeWorld,
         Self::ObjectsOnly,
         Self::Stress,
         Self::SingleBrick,
@@ -43,7 +40,6 @@ impl Preset {
         match self {
             Self::Default => "Default",
             Self::TerrainOnly => "Terrain Only",
-            Self::LargeWorld => "Large World",
             Self::ObjectsOnly => "Objects Only",
             Self::Stress => "Stress",
             Self::SingleBrick => "Single Brick",
@@ -54,7 +50,6 @@ impl Preset {
     pub fn grid_dims(self) -> [u32; 3] {
         match self {
             Self::Default | Self::TerrainOnly => [32, 12, 32],
-            Self::LargeWorld => [128, 16, 128],
             Self::ObjectsOnly | Self::Stress => [4, 2, 4],
             Self::SingleBrick | Self::Empty => [2, 2, 2],
         }
@@ -71,7 +66,6 @@ impl Preset {
     pub fn pool_capacity(self) -> u32 {
         match self {
             Self::Default | Self::TerrainOnly => 32768,
-            Self::LargeWorld => 131072,
             Self::Stress => 16384,
             Self::ObjectsOnly => 8192,
             Self::SingleBrick | Self::Empty => 256,
@@ -83,11 +77,6 @@ impl Preset {
             Self::Default | Self::TerrainOnly => {
                 (glam::Vec3::new(0.0, 8.0, 14.0), 0.0, -20.0_f32.to_radians())
             }
-            Self::LargeWorld => (
-                glam::Vec3::new(0.0, 12.0, 20.0),
-                0.0,
-                -15.0_f32.to_radians(),
-            ),
             Self::ObjectsOnly => (glam::Vec3::new(0.0, 4.0, 10.0), 0.0, -15.0_f32.to_radians()),
             Self::Stress => (
                 glam::Vec3::new(0.0, 20.0, 40.0),
@@ -123,19 +112,6 @@ impl Preset {
                 let x = r * angle.cos();
                 let z = r * angle.sin();
                 let pitch = (-height).atan2(r);
-                (
-                    glam::Vec3::new(x, height, z),
-                    angle + std::f32::consts::PI,
-                    pitch,
-                )
-            }
-            Self::LargeWorld => {
-                let angle = t * TAU;
-                let r = 60.0 + 30.0 * (t * TAU * 2.0).sin();
-                let height = 8.0 + 6.0 * (t * TAU * 3.0).sin();
-                let x = r * angle.cos();
-                let z = r * angle.sin();
-                let pitch = (-height * 0.5).atan2(r);
                 (
                     glam::Vec3::new(x, height, z),
                     angle + std::f32::consts::PI,
@@ -192,25 +168,18 @@ impl Preset {
         queue: &wgpu::Queue,
         pool: &mut BrickPool,
         index: &mut BrickIndex,
-        coarse: &mut CoarseMipGrid,
         scene: &mut Scene,
     ) -> Option<BrickPager> {
         match self {
             Self::Default => {
-                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), coarse);
-                pager.preload_all(index, pool, coarse, queue);
+                let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
+                pager.preload_all(index, pool, queue);
                 populate_default_objects(queue, pool, scene, index);
                 Some(pager)
             }
             Self::TerrainOnly => {
-                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), coarse);
-                pager.preload_all(index, pool, coarse, queue);
-                Some(pager)
-            }
-            Self::LargeWorld => {
-                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), coarse);
-                let (cam_pos, _, _) = self.camera_start();
-                pager.preload_radius(cam_pos, 80.0, index, pool, coarse, queue);
+                let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
+                pager.preload_all(index, pool, queue);
                 Some(pager)
             }
             Self::ObjectsOnly => {
@@ -235,20 +204,12 @@ fn create_terrain_pager(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pool_capacity: u32,
-    coarse: &mut CoarseMipGrid,
 ) -> BrickPager {
     let dims = preset.grid_dims();
     let world_min = preset.world_min();
 
     let mut gpu_gen = GpuWorldGenerator::new(device, 42, world_min);
-
-    if preset == Preset::LargeWorld {
-        gpu_gen.generate_coarse(dims, device, queue, coarse);
-        let (cam_pos, _, _) = preset.camera_start();
-        gpu_gen.generate_near(cam_pos, 80.0, dims, device, queue);
-    } else {
-        gpu_gen.generate_near(glam::Vec3::ZERO, 1000.0, dims, device, queue);
-    }
+    gpu_gen.generate_near(glam::Vec3::ZERO, 1000.0, dims, device, queue);
 
     let cache_label = preset.label().to_lowercase().replace(' ', "_");
     let cache_dir = cached_source::cache_dir_for_preset(&cache_label);
@@ -479,8 +440,6 @@ fn setup_single_brick(queue: &wgpu::Queue, pool: &mut BrickPool, index: &mut Bri
 
     pool.write_voxels(queue, handle, &voxels);
     pool.write_palette(queue, handle, palette);
-    let mips = smallworld_engine::mip::compute_brick_mips(&voxels, palette);
-    pool.write_mips(queue, handle, &mips);
     index.set([1, 1, 1], handle);
     index.upload(queue);
 

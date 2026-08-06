@@ -13,8 +13,6 @@ use crate::brick_data::BrickData;
 use crate::brick_index::{BRICK_SIZE, BrickIndex};
 use crate::brick_pool::BrickPool;
 use crate::brick_source::BrickSource;
-use crate::coarse_mip_grid::CoarseMipGrid;
-use crate::mip;
 
 const REQUEST_CHANNEL_CAP: usize = 4096;
 
@@ -71,7 +69,6 @@ pub struct PagerStats {
 struct LoadResult {
     grid_pos: [u32; 3],
     data: Option<BrickData>,
-    mips: [u32; mip::MIP_WORDS_PER_BRICK as usize],
 }
 
 /// Async brick pager: manages residency, background loading, and LRU eviction.
@@ -152,7 +149,7 @@ impl BrickPager {
         &mut self,
         index: &mut BrickIndex,
         pool: &mut BrickPool,
-        coarse: &mut CoarseMipGrid,
+
         queue: &wgpu::Queue,
     ) {
         let start = Instant::now();
@@ -191,8 +188,7 @@ impl BrickPager {
                     let handle = pool.alloc().expect("pool exhausted during preload");
                     pool.write_voxels(queue, handle, &data.voxels);
                     pool.write_palette(queue, handle, &data.palette);
-                    pool.write_mips(queue, handle, &result.mips);
-                    coarse.write_cell(result.grid_pos, &result.mips);
+
                     index.set(result.grid_pos, handle);
 
                     let slot = handle.gpu_index();
@@ -205,7 +201,6 @@ impl BrickPager {
         }
 
         index.upload(queue);
-        coarse.upload(queue);
 
         let elapsed = start.elapsed();
         log::info!(
@@ -223,7 +218,7 @@ impl BrickPager {
         radius: f32,
         index: &mut BrickIndex,
         pool: &mut BrickPool,
-        coarse: &mut CoarseMipGrid,
+
         queue: &wgpu::Queue,
     ) {
         let start = Instant::now();
@@ -273,8 +268,7 @@ impl BrickPager {
                     let handle = pool.alloc().expect("pool exhausted during preload_radius");
                     pool.write_voxels(queue, handle, &data.voxels);
                     pool.write_palette(queue, handle, &data.palette);
-                    pool.write_mips(queue, handle, &result.mips);
-                    coarse.write_cell(result.grid_pos, &result.mips);
+
                     index.set(result.grid_pos, handle);
 
                     let slot = handle.gpu_index();
@@ -287,7 +281,6 @@ impl BrickPager {
         }
 
         index.upload(queue);
-        coarse.upload(queue);
 
         let elapsed = start.elapsed();
         log::info!(
@@ -311,12 +304,12 @@ impl BrickPager {
         sse_threshold: f32,
         index: &mut BrickIndex,
         pool: &mut BrickPool,
-        coarse: &mut CoarseMipGrid,
+
         queue: &wgpu::Queue,
     ) -> PagerStats {
         self.frame += 1;
 
-        let (uploaded, evicted) = self.drain_results(index, pool, coarse, queue);
+        let (uploaded, evicted) = self.drain_results(index, pool, queue);
 
         self.compute_demand(camera_pos, focal_length, sse_threshold);
 
@@ -343,7 +336,7 @@ impl BrickPager {
         &mut self,
         index: &mut BrickIndex,
         pool: &mut BrickPool,
-        coarse: &mut CoarseMipGrid,
+
         queue: &wgpu::Queue,
     ) -> (u32, u32) {
         let mut uploaded = 0u32;
@@ -418,9 +411,7 @@ impl BrickPager {
 
             pool.write_voxels(queue, handle, &data.voxels);
             pool.write_palette(queue, handle, &data.palette);
-            pool.write_mips(queue, handle, &result.mips);
-            coarse.write_cell(result.grid_pos, &result.mips);
-            coarse.upload_cell(queue, result.grid_pos);
+
             index.set(result.grid_pos, handle);
             index_dirty = true;
 
@@ -552,18 +543,7 @@ impl BrickPager {
                         .spawn(move || {
                             while let Ok(grid_pos) = rx.recv() {
                                 let data = source.generate(grid_pos, world_min);
-                                let mips = match &data {
-                                    Some(d) => mip::compute_brick_mips(&d.voxels, &d.palette),
-                                    None => [0u32; mip::MIP_WORDS_PER_BRICK as usize],
-                                };
-                                if tx
-                                    .send(LoadResult {
-                                        grid_pos,
-                                        data,
-                                        mips,
-                                    })
-                                    .is_err()
-                                {
+                                if tx.send(LoadResult { grid_pos, data }).is_err() {
                                     break;
                                 }
                             }

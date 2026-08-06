@@ -42,7 +42,6 @@ struct ObjectInstance {
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var<storage, read> instances: array<ObjectInstance>;
 @group(0) @binding(6) var<storage, read> object_grids: array<u32>;
-@group(0) @binding(8) var<storage, read> mips: array<u32>;
 
 struct BvhNode {
     aabb_min: vec3<f32>,
@@ -52,7 +51,6 @@ struct BvhNode {
 }
 
 @group(0) @binding(7) var<storage, read> bvh_nodes: array<BvhNode>;
-@group(0) @binding(9) var<storage, read> coarse_mips: array<u32>;
 
 // ---- helpers ----
 
@@ -192,47 +190,6 @@ fn trace_brick(
     return no_hit();
 }
 
-fn sample_brick_mip(handle: u32, local_uv: vec3<f32>, lod: u32) -> vec4<f32> {
-    let offsets = array<u32, 4>(0u, 512u, 576u, 584u);
-    let edges = array<u32, 4>(8u, 4u, 2u, 1u);
-    let lvl = clamp(lod, 1u, 4u) - 1u;
-    let edge = edges[lvl];
-    let mip_pos = clamp(
-        vec3<i32>(floor(local_uv * f32(edge))),
-        vec3<i32>(0),
-        vec3<i32>(i32(edge) - 1),
-    );
-    let flat = u32(mip_pos.x) + edge * (u32(mip_pos.y) + edge * u32(mip_pos.z));
-    let packed = mips[handle * MIP_WORDS_PER_BRICK + offsets[lvl] + flat];
-    return vec4<f32>(
-        f32(packed & 0xFFu),
-        f32((packed >> 8u) & 0xFFu),
-        f32((packed >> 16u) & 0xFFu),
-        f32((packed >> 24u) & 0xFFu),
-    ) / 255.0;
-}
-
-fn sample_coarse_mip(cell_flat: u32, local_uv: vec3<f32>, lod: u32) -> vec4<f32> {
-    let base = cell_flat * COARSE_MIP_WORDS;
-    let offsets = array<u32, 3>(0u, 64u, 72u);
-    let edges = array<u32, 3>(4u, 2u, 1u);
-    let lvl = clamp(lod, 2u, 4u) - 2u;
-    let edge = edges[lvl];
-    let mip_pos = clamp(
-        vec3<i32>(floor(local_uv * f32(edge))),
-        vec3<i32>(0),
-        vec3<i32>(i32(edge) - 1),
-    );
-    let flat = u32(mip_pos.x) + edge * (u32(mip_pos.y) + edge * u32(mip_pos.z));
-    let packed = coarse_mips[base + offsets[lvl] + flat];
-    return vec4<f32>(
-        f32(packed & 0xFFu),
-        f32((packed >> 8u) & 0xFFu),
-        f32((packed >> 16u) & 0xFFu),
-        f32((packed >> 24u) & 0xFFu),
-    ) / 255.0;
-}
-
 // ---- dense grid traversal ----
 
 fn trace_grid(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
@@ -287,44 +244,9 @@ fn trace_grid(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
             let brick_t = max(brick_hit.x, 0.0);
 
             if brick_t < max_t {
-                let dist = max(brick_t, 0.001);
-                let sse = grid_vs * u.focal_length / dist;
-                if sse < u.sse_threshold {
-                    let ratio = u.sse_threshold / max(sse, 0.001);
-                    let lod = clamp(u32(ceil(log2(ratio))), 1u, 4u);
-                    let entry = (ro + rd * (brick_t + grid_vs * 0.005) - brick_min) / u.brick_size;
-                    let local_uv = clamp(entry, vec3(0.001), vec3(0.999));
-                    let mip_color = sample_brick_mip(handle, local_uv, lod);
-                    if mip_color.a > 0.0 {
-                        let wp = ro + rd * brick_t;
-                        return HitResult(true, mip_color.rgb, coarse_normal, vec3<i32>(0), handle, wp, brick_t);
-                    }
-                }
                 let result = trace_brick(ro, rd, brick_t, handle, brick_min, coarse_normal, grid_vs);
                 if result.hit {
                     return result;
-                }
-            }
-        } else {
-            let brick_min = u.world_min + vec3<f32>(grid_pos) * u.brick_size;
-            let brick_max = brick_min + vec3<f32>(u.brick_size);
-            let brick_hit = ray_aabb(ro, inv_rd, brick_min, brick_max);
-            let brick_t = max(brick_hit.x, 0.0);
-
-            if brick_t < max_t {
-                let top_mip = coarse_mips[flat * COARSE_MIP_WORDS + 72u];
-                if top_mip != 0u {
-                    let dist = max(brick_t, 0.001);
-                    let sse = grid_vs * u.focal_length / dist;
-                    let ratio = u.sse_threshold / max(sse, 0.001);
-                    let lod = clamp(u32(ceil(log2(ratio))), 2u, 4u);
-                    let entry = (ro + rd * (brick_t + grid_vs * 0.005) - brick_min) / u.brick_size;
-                    let local_uv = clamp(entry, vec3(0.001), vec3(0.999));
-                    let mip_color = sample_coarse_mip(flat, local_uv, lod);
-                    if mip_color.a > 0.0 {
-                        let wp = ro + rd * brick_t;
-                        return HitResult(true, mip_color.rgb, coarse_normal, vec3<i32>(0), 0u, wp, brick_t);
-                    }
                 }
             }
         }
@@ -422,21 +344,6 @@ fn trace_instance(obj: ObjectInstance, ro: vec3<f32>, rd: vec3<f32>, max_t: f32)
             let brick_t = max(brick_hit.x, 0.0);
 
             let world_brick_t = brick_t / rd_scale;
-            let world_dist = max(world_brick_t, 0.001);
-            let sse = obj_vs * u.focal_length / world_dist;
-            if sse < u.sse_threshold {
-                let ratio = u.sse_threshold / max(sse, 0.001);
-                let lod = clamp(u32(ceil(log2(ratio))), 1u, 4u);
-                let entry = (obj_ro + obj_rd * (brick_t + obj_vs * 0.005) - brick_min) / obj_brick_size;
-                let local_uv = clamp(entry, vec3(0.001), vec3(0.999));
-                let mip_color = sample_brick_mip(handle, local_uv, lod);
-                if mip_color.a > 0.0 {
-                    let obj_wp = obj_ro + obj_rd * brick_t;
-                    let world_pos = (obj.transform * vec4<f32>(obj_wp, 1.0)).xyz;
-                    let world_normal = normalize((obj.transform * vec4<f32>(coarse_normal, 0.0)).xyz);
-                    return HitResult(true, mip_color.rgb, world_normal, vec3<i32>(0), handle, world_pos, world_brick_t);
-                }
-            }
             let result = trace_brick(obj_ro, obj_rd, brick_t, handle, brick_min, coarse_normal, obj_vs);
             if result.hit {
                 let world_pos = (obj.transform * vec4<f32>(result.world_pos, 1.0)).xyz;
