@@ -1,5 +1,3 @@
-use glam::Vec3Swizzles;
-
 use crate::scenes::Preset;
 
 pub struct BenchConfig {
@@ -11,10 +9,6 @@ pub struct BenchState {
     pub config: BenchConfig,
     pub start: std::time::Instant,
     pub samples: Vec<BenchSample>,
-    pub orbit_angle: f32,
-    pub orbit_radius: f32,
-    pub orbit_height: f32,
-    pub orbit_center: glam::Vec3,
 }
 
 #[derive(Clone, Copy)]
@@ -27,27 +21,11 @@ pub struct BenchSample {
 }
 
 impl BenchState {
-    pub fn new(config: BenchConfig, preset: Preset) -> Self {
-        let grid_dims = preset.grid_dims();
-        let world_min = preset.world_min();
-        let extent = glam::Vec3::new(
-            grid_dims[0] as f32,
-            grid_dims[1] as f32,
-            grid_dims[2] as f32,
-        ) * smallworld_engine::brick_pool::VOXEL_SCALE
-            * smallworld_engine::brick_pool::BRICK_EDGE as f32;
-        let center = world_min + extent * 0.5;
-        let radius = extent.x.max(extent.z) * 0.6;
-        let height = center.y + extent.y * 0.6;
-
+    pub fn new(config: BenchConfig) -> Self {
         Self {
             config,
             start: std::time::Instant::now(),
             samples: Vec::with_capacity(2000),
-            orbit_angle: 0.0,
-            orbit_radius: radius.max(5.0),
-            orbit_height: height.max(3.0),
-            orbit_center: glam::Vec3::new(center.x, 0.0, center.z),
         }
     }
 
@@ -59,17 +37,12 @@ impl BenchState {
         self.elapsed_secs() >= self.config.duration_secs
     }
 
-    pub fn advance_orbit(&mut self, dt: f32, camera: &mut smallworld_engine::camera::FreeCamera) {
-        let rate = std::f32::consts::TAU / self.config.duration_secs;
-        self.orbit_angle += rate * dt;
-
-        let x = self.orbit_center.x + self.orbit_radius * self.orbit_angle.cos();
-        let z = self.orbit_center.z + self.orbit_radius * self.orbit_angle.sin();
-        camera.position = glam::Vec3::new(x, self.orbit_height, z);
-
-        let to_center = self.orbit_center - camera.position;
-        camera.yaw = to_center.z.atan2(to_center.x);
-        camera.pitch = (-to_center.y).atan2(to_center.xz().length());
+    pub fn advance_camera(&self, camera: &mut smallworld_engine::camera::FreeCamera) {
+        let t = self.elapsed_secs() / self.config.duration_secs;
+        let (pos, yaw, pitch) = self.config.preset.camera_path(t);
+        camera.position = pos;
+        camera.yaw = yaw;
+        camera.pitch = pitch;
     }
 
     pub fn push_sample(&mut self, sample: BenchSample) {

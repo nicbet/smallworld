@@ -280,8 +280,8 @@ impl ApplicationHandler for App {
         camera.pitch = cam_pitch;
 
         let bench_state = self.bench_config.take().map(|config| {
-            let mut bs = bench::BenchState::new(config, preset);
-            bs.advance_orbit(0.0, &mut camera);
+            let bs = bench::BenchState::new(config);
+            bs.advance_camera(&mut camera);
             bs
         });
 
@@ -388,8 +388,8 @@ impl ApplicationHandler for App {
                 state.last_frame = now;
 
                 // Camera movement
-                if let Some(bs) = &mut state.bench {
-                    bs.advance_orbit(dt, &mut state.camera);
+                if let Some(bs) = &state.bench {
+                    bs.advance_camera(&mut state.camera);
                 } else {
                     let speed = FreeCamera::BASE_SPEED
                         * if state.input.sprint {

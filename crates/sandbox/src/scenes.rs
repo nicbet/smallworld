@@ -81,6 +81,79 @@ impl Preset {
         }
     }
 
+    pub fn camera_path(self, t: f32) -> (glam::Vec3, f32, f32) {
+        use std::f32::consts::TAU;
+        let t = t.fract();
+        match self {
+            Self::Default => {
+                let angle = t * TAU;
+                let r = 18.0;
+                let height = 6.0 + 4.0 * (t * TAU * 2.0).sin();
+                let x = r * angle.cos();
+                let z = r * angle.sin();
+                let pitch = (-height).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::TerrainOnly => {
+                let angle = t * TAU;
+                let r = 20.0;
+                let height = 4.0 + 3.0 * (t * TAU * 3.0).sin();
+                let x = r * angle.cos();
+                let z = r * angle.sin();
+                let pitch = (-height).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::ObjectsOnly => {
+                let angle = t * TAU;
+                let r = 8.0 + 4.0 * (t * TAU * 2.0).sin();
+                let height = 2.5 + 1.5 * (t * TAU * 3.0).cos();
+                let x = r * angle.cos();
+                let z = r * angle.sin();
+                let pitch = (-height).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::Stress => {
+                let angle = t * TAU;
+                let r = 30.0 - 15.0 * (t * TAU).sin().abs();
+                let height = 10.0 + 10.0 * (t * TAU * 2.0).cos();
+                let x = r * angle.cos();
+                let z = r * angle.sin();
+                let pitch = (-height).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::SingleBrick => {
+                let angle = t * TAU;
+                let r = 2.5;
+                let height = 1.0 + 0.5 * (t * TAU * 2.0).sin();
+                let x = 0.8 + r * angle.cos();
+                let z = 0.8 + r * angle.sin();
+                let pitch = (-(height - 0.8)).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::Empty => (glam::Vec3::new(0.0, 2.0, 5.0), 0.0, 0.0),
+        }
+    }
+
     pub fn setup(
         self,
         _device: &wgpu::Device,
