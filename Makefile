@@ -48,6 +48,20 @@ run: ## Run the viewer
 smoke: ## Run headless smoke test (adapter probe)
 	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG) -- --info
 
+screenshot: ## Run viewer, capture window screenshot (DEST=path)
+	@DEST=$${DEST:-/tmp/smallworld-screenshot.png}; \
+	$(CARGO) run -p $(VIEWER) $(PROFILE_FLAG) & \
+	PID=$$!; \
+	sleep $${DELAY:-6}; \
+	WID=$$(osascript -e "tell application \"System Events\" to get id of first window of (first process whose unix id is $$PID)" 2>/dev/null); \
+	if [ -n "$$WID" ]; then \
+		screencapture -x -l "$$WID" "$$DEST"; \
+		echo "captured $$DEST"; \
+	else \
+		echo "window not found"; \
+	fi; \
+	kill $$PID 2>/dev/null; wait $$PID 2>/dev/null
+
 ci: lint test build smoke ## Everything ci.yml runs, in the same order
 
 clean: ## Remove build artifacts

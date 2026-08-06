@@ -9,6 +9,7 @@ pub mod gpu;
 pub mod gpu_timing;
 pub mod raymarcher;
 pub mod shaders;
+pub mod worldgen;
 
 /// Re-export wgpu so the viewer (and future crates) share one version.
 pub use wgpu;
