@@ -13,6 +13,12 @@ const SHADOW_BIAS: f32 = 0.01;
 const FLAG_SHADOWS: u32 = 1u;
 const FLAG_SMOOTH_NORMALS: u32 = 2u;
 
+// Shadow rays accept SSE-coarse nodes this much earlier than primary rays.
+// Occlusion is far more tolerant of coarse geometry than direct visibility:
+// a slightly chunky distant shadow silhouette is invisible, a chunky distant
+// hill is not. Near-field descent is unaffected (small t keeps SSE high).
+const SHADOW_SSE_MULT: f32 = 8.0;
+
 struct Uniforms {
     inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
@@ -20,7 +26,10 @@ struct Uniforms {
     _pad0: vec2<f32>,
     world_min: vec3<f32>,
     world_size: f32,
-    grid_dims: vec3<u32>,
+    // World-space Y above which the terrain SVO holds no solid content.
+    terrain_top_y: f32,
+    _pad1: f32,
+    _pad2: f32,
     flags: u32,
     instance_count: u32,
     focal_length: f32,
@@ -59,6 +68,35 @@ struct BvhNode {
 }
 
 @group(0) @binding(7) var<storage, read> bvh_nodes: array<BvhNode>;
+
+// Per-brick occupancy: bit c set when 4³-voxel chunk c contains any solid
+// voxel (c = x4 | (y4 << 2) | (z4 << 4), where x4 = voxel.x / 4 etc.).
+@group(0) @binding(8) var<storage, read> brick_masks: array<vec2<u32>>;
+
+// G-buffer between the three passes. Shadow rays are traced in a separate
+// half-resolution pass (cs_shadow) so they pack warp-dense: sharing shadow
+// rays inside the full-res pass saves work but not wall time — every
+// simdgroup still stalls on its tracing lanes' dependent fetches.
+//
+// pos.w carries ndotl for hits and -1 for misses (hit flag + exact-precision
+// shading term in one f32); albedo.rgb is base color for hits, final sky
+// color for misses.
+@group(0) @binding(9) var gbuf_pos_w: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(10) var gbuf_albedo_w: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(11) var gbuf_norm_w: texture_storage_2d<rgba8snorm, write>;
+@group(0) @binding(12) var gbuf_pos_r: texture_2d<f32>;
+@group(0) @binding(13) var gbuf_albedo_r: texture_2d<f32>;
+@group(0) @binding(14) var gbuf_norm_r: texture_2d<f32>;
+@group(0) @binding(15) var shadow_w: texture_storage_2d<r32float, write>;
+@group(0) @binding(16) var shadow_r: texture_2d<f32>;
+
+// True when the 4³ chunk containing `voxel` has any solid voxel. `m` is the
+// brick's mask, fetched once at brick entry — the test itself is pure ALU,
+// so empty-space DDA steps issue no memory reads at all.
+fn chunk_occupied(m: vec2<u32>, voxel: vec3<i32>) -> bool {
+    let c = u32(voxel.x >> 2) | (u32(voxel.y >> 2) << 2u) | (u32(voxel.z >> 2) << 4u);
+    return ((select(m.x, m.y, c >= 32u) >> (c & 31u)) & 1u) != 0u;
+}
 
 // ---- helpers ----
 
@@ -161,12 +199,17 @@ fn trace_brick(
     // t of the current voxel's entry, measured from p_entry along rd.
     var t_local = 0.0;
 
+    let cmask = brick_masks[handle];
+
     for (var i = 0u; i < MAX_FINE_STEPS; i++) {
         if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(i32(BRICK_EDGE))) {
             break;
         }
 
-        let mat = read_voxel(handle, voxel_idx(voxel));
+        var mat = 0u;
+        if chunk_occupied(cmask, voxel) {
+            mat = read_voxel(handle, voxel_idx(voxel));
+        }
 
         if mat != 0u {
             let base = read_palette_color(handle, mat);
@@ -233,10 +276,32 @@ fn aabb_normal(ro: vec3<f32>, inv_rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32
 // Traversal stack holds one frame per tree level (cursor-based descent), so
 // its size bounds tree depth — not fan-out. A push-all-children stack needs
 // up to 7 × depth live entries and silently drops subtrees when it overflows.
+//
+// The frame caches the parent's children base and child mask instead of its
+// index: traversal is latency-bound on dependent reads into the node buffer,
+// so each node must be fetched exactly once per ray — never re-read on
+// sibling advance or pop.
+//
+// Node position lives outside the stack as integer cell coords (one shift
+// per descend/pop), keeping the frame at 8 bytes — 128 B of stack per thread
+// instead of 320 B of spill pressure.
 struct SvoFrame {
-    node_idx: u32,
-    node_min: vec3<f32>,
-    cursor: u32,
+    // Children base index of the parent node.
+    children: u32,
+    // Unvisited children as a flip-permuted mask (see permute_mask): bit i
+    // set = the child visited i-th in front-to-back order remains untried.
+    state: u32,
+}
+
+// Reorders a child mask so bit i corresponds to octant i ^ flip. Front-to-
+// back child selection then becomes firstTrailingBit + clear — no 8-slot
+// scan loop with a divergent branch per slot.
+fn permute_mask(m: u32, flip: u32) -> u32 {
+    var r = m;
+    if (flip & 1u) != 0u { r = ((r & 0xAAu) >> 1u) | ((r & 0x55u) << 1u); }
+    if (flip & 2u) != 0u { r = ((r & 0xCCu) >> 2u) | ((r & 0x33u) << 2u); }
+    if (flip & 4u) != 0u { r = ((r & 0xF0u) >> 4u) | ((r & 0x0Fu) << 4u); }
+    return r;
 }
 
 fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
@@ -257,25 +322,38 @@ fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
     var sp = 0u;
 
     var node_idx = u.svo_root;
-    var node_min = u.world_min;
+    // Integer cell coords of the current node at its depth — exact under
+    // descend/pop (an accumulated float min cannot be exactly undone).
+    var cell = vec3<u32>(0u);
     var node_size = u.world_size;
-    // Next child slot (0-7) to try in the current node; 0 = first visit.
-    var cursor = 0u;
+    // True when the current node has not been classified yet.
+    var fresh = true;
+    // Cached fields of the current node, set at classify time. `rem` holds
+    // the flip-permuted mask of children not yet visited.
+    var kids = 0u;
+    var rem = 0u;
 
     loop {
-        if cursor == 0u {
-            // First visit: classify this node.
+        if fresh {
+            // First visit: the sole fetch of this node.
             let node = svo_nodes[node_idx];
+            kids = node.children;
+            rem = permute_mask(node.node_flags & 0xFFu, flip);
+            let node_min = u.world_min + vec3<f32>(cell) * node_size;
             let node_max = node_min + vec3<f32>(node_size);
-            let eps = node_size * 0.001;
+            // Absolute pad, sized to absorb ray/AABB f32 rounding (~0.1 mm at
+            // km scale) with margin. A node-relative pad (0.1% of node_size)
+            // costs ~15% of the frame in double-descents at interior levels:
+            // integer-cell node mins make parent/child planes coincide
+            // exactly, so only arithmetic rounding needs absorbing.
+            let eps = VOXEL_SCALE * 0.02;
             let hit = ray_aabb(ro, inv_rd, node_min - vec3(eps), node_max + vec3(eps));
             let t_near = max(hit.x, 0.0);
 
             var terminal = true;
             if t_near < hit.y && t_near < best.t && t_near < max_t {
-                let child_mask = node.node_flags & 0xFFu;
                 let has_brick = (node.node_flags & (1u << 8u)) != 0u;
-                let has_children = node.children != 0u && child_mask != 0u;
+                let has_children = kids != 0u && rem != 0u;
                 let sse = node_size * u.focal_length / max(t_near, 0.001);
 
                 if has_brick {
@@ -296,51 +374,38 @@ fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
                 }
             }
 
+            fresh = false;
             if terminal {
                 if sp == 0u {
                     break;
                 }
                 sp -= 1u;
-                node_idx = stack[sp].node_idx;
-                node_min = stack[sp].node_min;
-                cursor = stack[sp].cursor;
+                kids = stack[sp].children;
+                rem = stack[sp].state;
+                cell = cell >> vec3<u32>(1u);
                 node_size = node_size * 2.0;
                 continue;
             }
         }
 
-        // Advance to the next existing child, front-to-back (cursor ^ flip).
-        let node = svo_nodes[node_idx];
-        let child_mask = node.node_flags & 0xFFu;
-        let half = node_size * 0.5;
-        var descended = false;
-        while cursor < 8u && sp < MAX_SVO_DEPTH {
-            let octant = cursor ^ flip;
-            cursor += 1u;
-            if (child_mask & (1u << octant)) != 0u {
-                stack[sp] = SvoFrame(node_idx, node_min, cursor);
-                sp += 1u;
-                node_idx = node.children + octant;
-                node_min = node_min + vec3<f32>(
-                    select(0.0, half, (octant & 1u) != 0u),
-                    select(0.0, half, (octant & 2u) != 0u),
-                    select(0.0, half, (octant & 4u) != 0u),
-                );
-                node_size = half;
-                cursor = 0u;
-                descended = true;
-                break;
-            }
-        }
-
-        if !descended {
+        // Advance to the next existing child, front-to-back.
+        if rem != 0u && sp < MAX_SVO_DEPTH {
+            let octant = firstTrailingBit(rem) ^ flip;
+            rem &= rem - 1u;
+            stack[sp] = SvoFrame(kids, rem);
+            sp += 1u;
+            node_idx = kids + octant;
+            cell = (cell << vec3<u32>(1u)) | vec3<u32>(octant & 1u, (octant >> 1u) & 1u, (octant >> 2u) & 1u);
+            node_size = node_size * 0.5;
+            fresh = true;
+        } else {
             if sp == 0u {
                 break;
             }
             sp -= 1u;
-            node_idx = stack[sp].node_idx;
-            node_min = stack[sp].node_min;
-            cursor = stack[sp].cursor;
+            kids = stack[sp].children;
+            rem = stack[sp].state;
+            cell = cell >> vec3<u32>(1u);
             node_size = node_size * 2.0;
         }
     }
@@ -467,9 +532,11 @@ fn any_hit_brick(ro: vec3<f32>, rd: vec3<f32>, t_enter: f32, handle: u32, brick_
     if rd.y > 0.0 { t_max_f.y = (1.0 - frac.y) * abs_inv.y; } else { t_max_f.y = frac.y * abs_inv.y; }
     if rd.z > 0.0 { t_max_f.z = (1.0 - frac.z) * abs_inv.z; } else { t_max_f.z = frac.z * abs_inv.z; }
 
+    let cmask = brick_masks[handle];
+
     for (var i = 0u; i < MAX_FINE_STEPS; i++) {
         if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(i32(BRICK_EDGE))) { break; }
-        if read_voxel(handle, voxel_idx(voxel)) != 0u { return true; }
+        if chunk_occupied(cmask, voxel) && read_voxel(handle, voxel_idx(voxel)) != 0u { return true; }
         if t_max_f.x < t_max_f.y {
             if t_max_f.x < t_max_f.z { voxel.x += step.x; t_max_f.x += abs_inv.x; }
             else { voxel.z += step.z; t_max_f.z += abs_inv.z; }
@@ -493,6 +560,14 @@ fn trace_svo_any(ro: vec3<f32>, rd: vec3<f32>) -> bool {
         return false;
     }
 
+    // Terrain occupies only the slab below terrain_top_y: nothing in the SVO
+    // can occlude past the ray's exit from it. (Instanced objects above the
+    // slab shadow via their own BVH path.)
+    var slab_t = 1e20;
+    if rd.y > 0.0 {
+        slab_t = max((u.terrain_top_y - ro.y) * inv_rd.y, 0.0);
+    }
+
     let dir_mask = select(vec3<u32>(0u), vec3<u32>(1u, 2u, 4u), rd < vec3<f32>(0.0));
     let flip = dir_mask.x | dir_mask.y | dir_mask.z;
 
@@ -500,23 +575,33 @@ fn trace_svo_any(ro: vec3<f32>, rd: vec3<f32>) -> bool {
     var sp = 0u;
 
     var node_idx = u.svo_root;
-    var node_min = u.world_min;
+    var cell = vec3<u32>(0u);
     var node_size = u.world_size;
-    var cursor = 0u;
+    var fresh = true;
+    var kids = 0u;
+    var rem = 0u;
 
     loop {
-        if cursor == 0u {
+        if fresh {
+            // First visit: the sole fetch of this node.
             let node = svo_nodes[node_idx];
+            kids = node.children;
+            rem = permute_mask(node.node_flags & 0xFFu, flip);
+            let node_min = u.world_min + vec3<f32>(cell) * node_size;
             let node_max = node_min + vec3<f32>(node_size);
-            let eps = node_size * 0.001;
+            // Absolute pad, sized to absorb ray/AABB f32 rounding (~0.1 mm at
+            // km scale) with margin. A node-relative pad (0.1% of node_size)
+            // costs ~15% of the frame in double-descents at interior levels:
+            // integer-cell node mins make parent/child planes coincide
+            // exactly, so only arithmetic rounding needs absorbing.
+            let eps = VOXEL_SCALE * 0.02;
             let hit = ray_aabb(ro, inv_rd, node_min - vec3(eps), node_max + vec3(eps));
             let t_near = max(hit.x, 0.0);
 
             var terminal = true;
-            if t_near < hit.y {
-                let child_mask = node.node_flags & 0xFFu;
+            if t_near < hit.y && t_near < slab_t {
                 let has_brick = (node.node_flags & (1u << 8u)) != 0u;
-                let has_children = node.children != 0u && child_mask != 0u;
+                let has_children = kids != 0u && rem != 0u;
                 let sse = node_size * u.focal_length / max(t_near, 0.001);
 
                 if has_brick {
@@ -524,7 +609,7 @@ fn trace_svo_any(ro: vec3<f32>, rd: vec3<f32>) -> bool {
                     if any_hit_brick(ro, rd, t_near, node.brick, node_min, brick_vs) {
                         return true;
                     }
-                } else if !has_children || sse < u.sse_threshold {
+                } else if !has_children || sse < u.sse_threshold * SHADOW_SSE_MULT {
                     if unpack_alpha(node.color) > 0.0 {
                         return true;
                     }
@@ -533,50 +618,37 @@ fn trace_svo_any(ro: vec3<f32>, rd: vec3<f32>) -> bool {
                 }
             }
 
+            fresh = false;
             if terminal {
                 if sp == 0u {
                     break;
                 }
                 sp -= 1u;
-                node_idx = stack[sp].node_idx;
-                node_min = stack[sp].node_min;
-                cursor = stack[sp].cursor;
+                kids = stack[sp].children;
+                rem = stack[sp].state;
+                cell = cell >> vec3<u32>(1u);
                 node_size = node_size * 2.0;
                 continue;
             }
         }
 
-        let node = svo_nodes[node_idx];
-        let child_mask = node.node_flags & 0xFFu;
-        let half = node_size * 0.5;
-        var descended = false;
-        while cursor < 8u && sp < MAX_SVO_DEPTH {
-            let octant = cursor ^ flip;
-            cursor += 1u;
-            if (child_mask & (1u << octant)) != 0u {
-                stack[sp] = SvoFrame(node_idx, node_min, cursor);
-                sp += 1u;
-                node_idx = node.children + octant;
-                node_min = node_min + vec3<f32>(
-                    select(0.0, half, (octant & 1u) != 0u),
-                    select(0.0, half, (octant & 2u) != 0u),
-                    select(0.0, half, (octant & 4u) != 0u),
-                );
-                node_size = half;
-                cursor = 0u;
-                descended = true;
-                break;
-            }
-        }
-
-        if !descended {
+        if rem != 0u && sp < MAX_SVO_DEPTH {
+            let octant = firstTrailingBit(rem) ^ flip;
+            rem &= rem - 1u;
+            stack[sp] = SvoFrame(kids, rem);
+            sp += 1u;
+            node_idx = kids + octant;
+            cell = (cell << vec3<u32>(1u)) | vec3<u32>(octant & 1u, (octant >> 1u) & 1u, (octant >> 2u) & 1u);
+            node_size = node_size * 0.5;
+            fresh = true;
+        } else {
             if sp == 0u {
                 break;
             }
             sp -= 1u;
-            node_idx = stack[sp].node_idx;
-            node_min = stack[sp].node_min;
-            cursor = stack[sp].cursor;
+            kids = stack[sp].children;
+            rem = stack[sp].state;
+            cell = cell >> vec3<u32>(1u);
             node_size = node_size * 2.0;
         }
     }
@@ -667,18 +739,17 @@ fn trace_shadow(ro: vec3<f32>, rd: vec3<f32>) -> bool {
     return false;
 }
 
-// ---- main entry point ----
+// ---- pass 1: primary trace, writes the G-buffer ----
 
 @compute @workgroup_size(8, 8, 1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cs_primary(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.xy;
     let res = vec2<u32>(u.resolution);
     if px.x >= res.x || px.y >= res.y {
         return;
     }
 
-    let shadows_on = (u.flags & FLAG_SHADOWS) != 0u;
-    let smooth_on  = (u.flags & FLAG_SMOOTH_NORMALS) != 0u;
+    let smooth_on = (u.flags & FLAG_SMOOTH_NORMALS) != 0u;
 
     let uv = (vec2<f32>(px) + 0.5) / u.resolution;
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -726,24 +797,73 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Shade
     if best.hit {
         var normal = best.normal;
         if smooth_on {
             normal = smooth_normal(best.handle, best.voxel, normal);
         }
         let ndotl = max(dot(normal, SUN_DIR), 0.0);
-        var shadow = 1.0;
-        if shadows_on {
-            let vs_for_bias = VOXEL_SCALE; // approximate, fine for bias
-            let shadow_origin = best.world_pos + normal * (vs_for_bias * 0.5 + SHADOW_BIAS);
-            if trace_shadow(shadow_origin, SUN_DIR) {
-                shadow = 0.0;
-            }
-        }
-        let color = best.base_color * (AMBIENT + (1.0 - AMBIENT) * ndotl * shadow);
-        textureStore(output, px, vec4<f32>(color, 1.0));
+        textureStore(gbuf_pos_w, px, vec4<f32>(best.world_pos, ndotl));
+        textureStore(gbuf_albedo_w, px, vec4<f32>(best.base_color, 1.0));
+        textureStore(gbuf_norm_w, px, vec4<f32>(normal, 0.0));
     } else {
-        textureStore(output, px, vec4<f32>(sky(rd), 1.0));
+        textureStore(gbuf_pos_w, px, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        textureStore(gbuf_albedo_w, px, vec4<f32>(sky(rd), 1.0));
+        textureStore(gbuf_norm_w, px, vec4<f32>(0.0));
     }
+}
+
+// ---- pass 2: shadow visibility at half resolution ----
+//
+// One shadow ray per 2×2 full-res quad, from the quad's top-left G-buffer
+// sample. Dispatched at half res so shadow rays fill whole simdgroups —
+// the actual 4× on wall time that in-pass quad sharing cannot deliver.
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let hpx = gid.xy;
+    let res = vec2<u32>(u.resolution);
+    let hres = (res + vec2<u32>(1u)) / 2u;
+    if hpx.x >= hres.x || hpx.y >= hres.y {
+        return;
+    }
+
+    let px = min(hpx * 2u, res - vec2<u32>(1u));
+    let pos = textureLoad(gbuf_pos_r, vec2<i32>(px), 0);
+
+    var s = 1.0;
+    if pos.w >= 0.0 {
+        let n = textureLoad(gbuf_norm_r, vec2<i32>(px), 0).xyz;
+        let origin = pos.xyz + n * (VOXEL_SCALE * 0.5 + SHADOW_BIAS);
+        if trace_shadow(origin, SUN_DIR) {
+            s = 0.0;
+        }
+    }
+    textureStore(shadow_w, hpx, vec4<f32>(s, 0.0, 0.0, 0.0));
+}
+
+// ---- pass 3: full-res shade + composite ----
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let px = gid.xy;
+    let res = vec2<u32>(u.resolution);
+    if px.x >= res.x || px.y >= res.y {
+        return;
+    }
+
+    let pos = textureLoad(gbuf_pos_r, vec2<i32>(px), 0);
+    let albedo = textureLoad(gbuf_albedo_r, vec2<i32>(px), 0).rgb;
+
+    if pos.w < 0.0 {
+        textureStore(output, px, vec4<f32>(albedo, 1.0));
+        return;
+    }
+
+    var shadow = 1.0;
+    if (u.flags & FLAG_SHADOWS) != 0u {
+        shadow = textureLoad(shadow_r, vec2<i32>(px / 2u), 0).r;
+    }
+    let color = albedo * (AMBIENT + (1.0 - AMBIENT) * pos.w * shadow);
+    textureStore(output, px, vec4<f32>(color, 1.0));
 }

@@ -200,6 +200,9 @@ impl RunState {
             &self.svo,
             &self.scene,
         );
+        self.raymarcher.set_terrain_top_y(
+            preset.world_min().y + dims[1] as f32 * BRICK_EDGE as f32 * VOXEL_SCALE,
+        );
 
         let (pos, yaw, pitch) = preset.camera_start();
         self.camera.position = pos;
@@ -292,7 +295,7 @@ impl ApplicationHandler for App {
         let render_w = ((size.width.max(1) as f32) * render_scale) as u32;
         let render_h = ((size.height.max(1) as f32) * render_scale) as u32;
 
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             &gpu,
             render_w.max(1),
             render_h.max(1),
@@ -300,6 +303,9 @@ impl ApplicationHandler for App {
             &brick_pool,
             &svo,
             &scene,
+        );
+        raymarcher.set_terrain_top_y(
+            preset.world_min().y + dims[1] as f32 * BRICK_EDGE as f32 * VOXEL_SCALE,
         );
 
         let aspect = size.width as f32 / size.height.max(1) as f32;

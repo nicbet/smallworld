@@ -9,23 +9,60 @@ use crate::svo::Svo;
 
 const WORKGROUP_SIZE: u32 = 8;
 
-/// GPU-resident raymarcher: compute pass writes to a storage texture, blit pass
-/// copies the result to the surface.
+/// GPU-resident raymarcher, split into three compute passes so shadow rays
+/// run warp-dense at half resolution:
+///
+/// 1. `cs_primary` (full res): trace, write G-buffer (position+ndotl, albedo,
+///    normal).
+/// 2. `cs_shadow` (half res): one shadow ray per 2×2 quad from the G-buffer.
+///    Skipped entirely when shadows are off.
+/// 3. `cs_shade` (full res): combine G-buffer and shadow into the output.
+///
+/// A blit pass then copies the output to the surface.
 pub struct Raymarcher {
-    compute_pipeline: wgpu::ComputePipeline,
-    compute_bind_group_layout: wgpu::BindGroupLayout,
+    primary_pipeline: wgpu::ComputePipeline,
+    shadow_pipeline: wgpu::ComputePipeline,
+    shade_pipeline: wgpu::ComputePipeline,
+    primary_bgl: wgpu::BindGroupLayout,
+    shadow_bgl: wgpu::BindGroupLayout,
+    shade_bgl: wgpu::BindGroupLayout,
+    primary_bg: wgpu::BindGroup,
+    shadow_bg: wgpu::BindGroup,
+    shade_bg: wgpu::BindGroup,
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group_layout: wgpu::BindGroupLayout,
-    compute_bind_group: wgpu::BindGroup,
     blit_bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
     dummy_buf: wgpu::Buffer,
-    #[allow(dead_code)]
-    output_texture: wgpu::Texture,
-    output_view: wgpu::TextureView,
+    targets: RenderTargets,
     sampler: wgpu::Sampler,
     width: u32,
     height: u32,
+    /// World-space Y above which the terrain SVO holds no solid content.
+    /// Shadow rays prune traversal past their exit from this slab. Defaults
+    /// to the world-cube top (no pruning) until the world builder calls
+    /// [`set_terrain_top_y`](Self::set_terrain_top_y).
+    terrain_top_y: f32,
+}
+
+/// Output, G-buffer and shadow textures — recreated together on resize.
+/// Textures are kept alive alongside their views.
+struct RenderTargets {
+    #[allow(dead_code)]
+    output_texture: wgpu::Texture,
+    output_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    gbuf_pos_tex: wgpu::Texture,
+    gbuf_pos_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    gbuf_albedo_tex: wgpu::Texture,
+    gbuf_albedo_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    gbuf_norm_tex: wgpu::Texture,
+    gbuf_norm_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    shadow_tex: wgpu::Texture,
+    shadow_view: wgpu::TextureView,
 }
 
 #[repr(C)]
@@ -37,7 +74,8 @@ struct Uniforms {
     _pad0: [f32; 2],
     world_min: [f32; 3],
     world_size: f32,
-    grid_dims: [u32; 3],
+    terrain_top_y: f32,
+    _pad1: [f32; 2],
     flags: u32,
     instance_count: u32,
     focal_length: f32,
@@ -73,49 +111,98 @@ impl Raymarcher {
                 source: wgpu::ShaderSource::Wgsl(blit_source),
             });
 
-        // --- Compute bind group layout (9 bindings) ---
-        let compute_bind_group_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("raymarch"),
-                    entries: &[
-                        bgl_entry(0, wgpu::ShaderStages::COMPUTE, uniform_binding()),
-                        bgl_entry(1, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(2, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(3, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(
-                            4,
-                            wgpu::ShaderStages::COMPUTE,
-                            wgpu::BindingType::StorageTexture {
-                                access: wgpu::StorageTextureAccess::WriteOnly,
-                                format: wgpu::TextureFormat::Rgba8Unorm,
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                            },
-                        ),
-                        bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                        bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
-                    ],
-                });
+        // --- Compute bind group layouts, one per pass ---
+        let primary_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raymarch_primary"),
+                entries: &[
+                    bgl_entry(0, wgpu::ShaderStages::COMPUTE, uniform_binding()),
+                    bgl_entry(1, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(2, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(3, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(8, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(
+                        9,
+                        wgpu::ShaderStages::COMPUTE,
+                        storage_tex_binding(wgpu::TextureFormat::Rgba32Float),
+                    ),
+                    bgl_entry(
+                        10,
+                        wgpu::ShaderStages::COMPUTE,
+                        storage_tex_binding(wgpu::TextureFormat::Rgba8Unorm),
+                    ),
+                    bgl_entry(
+                        11,
+                        wgpu::ShaderStages::COMPUTE,
+                        storage_tex_binding(wgpu::TextureFormat::Rgba8Snorm),
+                    ),
+                ],
+            });
 
-        let compute_pipeline_layout =
-            gpu.device
+        let shadow_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raymarch_shadow"),
+                entries: &[
+                    bgl_entry(0, wgpu::ShaderStages::COMPUTE, uniform_binding()),
+                    bgl_entry(1, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(2, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(5, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(6, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(7, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(8, wgpu::ShaderStages::COMPUTE, storage_ro_binding()),
+                    bgl_entry(12, wgpu::ShaderStages::COMPUTE, texture_ro_binding()),
+                    bgl_entry(14, wgpu::ShaderStages::COMPUTE, texture_ro_binding()),
+                    bgl_entry(
+                        15,
+                        wgpu::ShaderStages::COMPUTE,
+                        storage_tex_binding(wgpu::TextureFormat::R32Float),
+                    ),
+                ],
+            });
+
+        let shade_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raymarch_shade"),
+                entries: &[
+                    bgl_entry(0, wgpu::ShaderStages::COMPUTE, uniform_binding()),
+                    bgl_entry(
+                        4,
+                        wgpu::ShaderStages::COMPUTE,
+                        storage_tex_binding(wgpu::TextureFormat::Rgba8Unorm),
+                    ),
+                    bgl_entry(12, wgpu::ShaderStages::COMPUTE, texture_ro_binding()),
+                    bgl_entry(13, wgpu::ShaderStages::COMPUTE, texture_ro_binding()),
+                    bgl_entry(16, wgpu::ShaderStages::COMPUTE, texture_ro_binding()),
+                ],
+            });
+
+        let make_pipeline = |label: &str, bgl: &wgpu::BindGroupLayout, entry: &str| {
+            let layout = gpu
+                .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("raymarch"),
-                    bind_group_layouts: &[Some(&compute_bind_group_layout)],
+                    label: Some(label),
+                    bind_group_layouts: &[Some(bgl)],
                     immediate_size: 0,
                 });
-
-        let compute_pipeline =
             gpu.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("raymarch"),
-                    layout: Some(&compute_pipeline_layout),
+                    label: Some(label),
+                    layout: Some(&layout),
                     module: &compute_module,
-                    entry_point: Some("cs_main"),
+                    entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     cache: None,
-                });
+                })
+        };
+        let primary_pipeline = make_pipeline("raymarch_primary", &primary_bgl, "cs_primary");
+        let shadow_pipeline = make_pipeline("raymarch_shadow", &shadow_bgl, "cs_shadow");
+        let shade_pipeline = make_pipeline("raymarch_shade", &shade_bgl, "cs_shade");
 
         // --- Blit pipeline (unchanged) ---
         let blit_bind_group_layout =
@@ -198,41 +285,60 @@ impl Raymarcher {
             ..Default::default()
         });
 
-        // --- Output texture + bind groups ---
-        let (output_texture, output_view) = create_output_texture(&gpu.device, width, height);
+        // --- Render targets + bind groups ---
+        let targets = create_render_targets(&gpu.device, width, height);
         let instance_buf = scene.instance_buffer().unwrap_or(&dummy_buf);
         let grid_buf = scene.grid_buffer().unwrap_or(&dummy_buf);
         let bvh_buf = scene.bvh_buffer().unwrap_or(&dummy_buf);
-        let compute_bind_group = create_compute_bind_group(
+        let (primary_bg, shadow_bg, shade_bg) = create_pass_bind_groups(
             &gpu.device,
-            &compute_bind_group_layout,
+            [&primary_bgl, &shadow_bgl, &shade_bgl],
             &uniform_buf,
             svo.buffer(),
             pool.voxel_buffer(),
             pool.palette_buffer(),
-            &output_view,
             instance_buf,
             grid_buf,
             bvh_buf,
+            pool.mask_buffer(),
+            &targets,
         );
-        let blit_bind_group =
-            create_blit_bind_group(&gpu.device, &blit_bind_group_layout, &output_view, &sampler);
+        let blit_bind_group = create_blit_bind_group(
+            &gpu.device,
+            &blit_bind_group_layout,
+            &targets.output_view,
+            &sampler,
+        );
 
         Self {
-            compute_pipeline,
-            compute_bind_group_layout,
+            primary_pipeline,
+            shadow_pipeline,
+            shade_pipeline,
+            primary_bgl,
+            shadow_bgl,
+            shade_bgl,
+            primary_bg,
+            shadow_bg,
+            shade_bg,
             blit_pipeline,
             blit_bind_group_layout,
-            compute_bind_group,
             blit_bind_group,
             uniform_buf,
             dummy_buf,
-            output_texture,
-            output_view,
+            targets,
             sampler,
             width,
             height,
+            terrain_top_y: svo.world_min().y + svo.world_size(),
         }
+    }
+
+    /// Declares the world-space Y above which the terrain SVO is guaranteed
+    /// empty (top of the terrain brick grid). Shadow rays stop traversing
+    /// once they exit this slab — exact, because terrain content cannot
+    /// exist above it. Instanced objects are unaffected (separate BVH path).
+    pub fn set_terrain_top_y(&mut self, y: f32) {
+        self.terrain_top_y = y;
     }
 
     /// Recreates the output texture and bind groups at a new resolution.
@@ -252,29 +358,31 @@ impl Raymarcher {
         self.width = width;
         self.height = height;
 
-        let (tex, view) = create_output_texture(&gpu.device, width, height);
-        self.output_texture = tex;
-        self.output_view = view;
+        self.targets = create_render_targets(&gpu.device, width, height);
 
         let instance_buf = scene.instance_buffer().unwrap_or(&self.dummy_buf);
         let grid_buf = scene.grid_buffer().unwrap_or(&self.dummy_buf);
         let bvh_buf = scene.bvh_buffer().unwrap_or(&self.dummy_buf);
-        self.compute_bind_group = create_compute_bind_group(
+        let (primary_bg, shadow_bg, shade_bg) = create_pass_bind_groups(
             &gpu.device,
-            &self.compute_bind_group_layout,
+            [&self.primary_bgl, &self.shadow_bgl, &self.shade_bgl],
             &self.uniform_buf,
             svo.buffer(),
             pool.voxel_buffer(),
             pool.palette_buffer(),
-            &self.output_view,
             instance_buf,
             grid_buf,
             bvh_buf,
+            pool.mask_buffer(),
+            &self.targets,
         );
+        self.primary_bg = primary_bg;
+        self.shadow_bg = shadow_bg;
+        self.shade_bg = shade_bg;
         self.blit_bind_group = create_blit_bind_group(
             &gpu.device,
             &self.blit_bind_group_layout,
-            &self.output_view,
+            &self.targets.output_view,
             &self.sampler,
         );
     }
@@ -342,7 +450,8 @@ impl Raymarcher {
             _pad0: [0.0; 2],
             world_min: [wmin.x, wmin.y, wmin.z],
             world_size: svo.world_size(),
-            grid_dims: [0, 0, 0],
+            terrain_top_y: self.terrain_top_y,
+            _pad1: [0.0; 2],
             flags,
             instance_count: scene.instance_count(),
             focal_length: self.height as f32 / (2.0 * (camera.fov_y * 0.5).tan()),
@@ -352,19 +461,60 @@ impl Raymarcher {
         gpu.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        // Compute pass
+        // Three passes must be separate: a storage-texture write and its
+        // texture read cannot share one usage scope. The caller's timestamp
+        // pair is split so it still brackets the whole compute workload.
+        let (ts_begin, ts_end) = match &compute_timestamps {
+            Some(ts) => (
+                Some(wgpu::ComputePassTimestampWrites {
+                    query_set: ts.query_set,
+                    beginning_of_pass_write_index: ts.beginning_of_pass_write_index,
+                    end_of_pass_write_index: None,
+                }),
+                Some(wgpu::ComputePassTimestampWrites {
+                    query_set: ts.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: ts.end_of_pass_write_index,
+                }),
+            ),
+            None => (None, None),
+        };
+
+        let full_x = self.width.div_ceil(WORKGROUP_SIZE);
+        let full_y = self.height.div_ceil(WORKGROUP_SIZE);
+
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("raymarch"),
-                timestamp_writes: compute_timestamps,
+                label: Some("raymarch_primary"),
+                timestamp_writes: ts_begin,
             });
-            cpass.set_pipeline(&self.compute_pipeline);
-            cpass.set_bind_group(0, &self.compute_bind_group, &[]);
+            cpass.set_pipeline(&self.primary_pipeline);
+            cpass.set_bind_group(0, &self.primary_bg, &[]);
+            cpass.dispatch_workgroups(full_x, full_y, 1);
+        }
+
+        if flags & Self::FLAG_SHADOWS != 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raymarch_shadow"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.shadow_pipeline);
+            cpass.set_bind_group(0, &self.shadow_bg, &[]);
             cpass.dispatch_workgroups(
-                self.width.div_ceil(WORKGROUP_SIZE),
-                self.height.div_ceil(WORKGROUP_SIZE),
+                self.width.div_ceil(2).div_ceil(WORKGROUP_SIZE),
+                self.height.div_ceil(2).div_ceil(WORKGROUP_SIZE),
                 1,
             );
+        }
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raymarch_shade"),
+                timestamp_writes: ts_end,
+            });
+            cpass.set_pipeline(&self.shade_pipeline);
+            cpass.set_bind_group(0, &self.shade_bg, &[]);
+            cpass.dispatch_workgroups(full_x, full_y, 1);
         }
     }
 
@@ -431,13 +581,31 @@ fn storage_ro_binding() -> wgpu::BindingType {
     }
 }
 
-fn create_output_texture(
+fn storage_tex_binding(format: wgpu::TextureFormat) -> wgpu::BindingType {
+    wgpu::BindingType::StorageTexture {
+        access: wgpu::StorageTextureAccess::WriteOnly,
+        format,
+        view_dimension: wgpu::TextureViewDimension::D2,
+    }
+}
+
+fn texture_ro_binding() -> wgpu::BindingType {
+    wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    }
+}
+
+fn create_target(
     device: &wgpu::Device,
+    label: &str,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("raymarch_output"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width,
             height,
@@ -446,7 +614,7 @@ fn create_output_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -454,57 +622,112 @@ fn create_output_texture(
     (texture, view)
 }
 
+fn create_render_targets(device: &wgpu::Device, width: u32, height: u32) -> RenderTargets {
+    let (output_texture, output_view) =
+        create_target(device, "raymarch_output", width, height, wgpu::TextureFormat::Rgba8Unorm);
+    let (gbuf_pos_tex, gbuf_pos_view) =
+        create_target(device, "gbuf_pos", width, height, wgpu::TextureFormat::Rgba32Float);
+    let (gbuf_albedo_tex, gbuf_albedo_view) =
+        create_target(device, "gbuf_albedo", width, height, wgpu::TextureFormat::Rgba8Unorm);
+    let (gbuf_norm_tex, gbuf_norm_view) =
+        create_target(device, "gbuf_norm", width, height, wgpu::TextureFormat::Rgba8Snorm);
+    let (shadow_tex, shadow_view) = create_target(
+        device,
+        "shadow_half",
+        width.div_ceil(2).max(1),
+        height.div_ceil(2).max(1),
+        wgpu::TextureFormat::R32Float,
+    );
+    RenderTargets {
+        output_texture,
+        output_view,
+        gbuf_pos_tex,
+        gbuf_pos_view,
+        gbuf_albedo_tex,
+        gbuf_albedo_view,
+        gbuf_norm_tex,
+        gbuf_norm_view,
+        shadow_tex,
+        shadow_view,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn create_compute_bind_group(
+#[allow(clippy::too_many_arguments)]
+fn create_pass_bind_groups(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
+    layouts: [&wgpu::BindGroupLayout; 3],
     uniform_buf: &wgpu::Buffer,
     index_buf: &wgpu::Buffer,
     voxel_buf: &wgpu::Buffer,
     palette_buf: &wgpu::Buffer,
-    output_view: &wgpu::TextureView,
     instance_buf: &wgpu::Buffer,
     object_grid_buf: &wgpu::Buffer,
     bvh_buf: &wgpu::Buffer,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("raymarch"),
-        layout,
+    mask_buf: &wgpu::Buffer,
+    targets: &RenderTargets,
+) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup) {
+    fn buf(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: b.as_entire_binding(),
+        }
+    }
+    fn tex(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(v),
+        }
+    }
+
+    let primary = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raymarch_primary"),
+        layout: layouts[0],
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: index_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: voxel_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: palette_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(output_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: instance_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: object_grid_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: bvh_buf.as_entire_binding(),
-            },
+            buf(0, uniform_buf),
+            buf(1, index_buf),
+            buf(2, voxel_buf),
+            buf(3, palette_buf),
+            buf(5, instance_buf),
+            buf(6, object_grid_buf),
+            buf(7, bvh_buf),
+            buf(8, mask_buf),
+            tex(9, &targets.gbuf_pos_view),
+            tex(10, &targets.gbuf_albedo_view),
+            tex(11, &targets.gbuf_norm_view),
         ],
-    })
+    });
+
+    let shadow = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raymarch_shadow"),
+        layout: layouts[1],
+        entries: &[
+            buf(0, uniform_buf),
+            buf(1, index_buf),
+            buf(2, voxel_buf),
+            buf(5, instance_buf),
+            buf(6, object_grid_buf),
+            buf(7, bvh_buf),
+            buf(8, mask_buf),
+            tex(12, &targets.gbuf_pos_view),
+            tex(14, &targets.gbuf_norm_view),
+            tex(15, &targets.shadow_view),
+        ],
+    });
+
+    let shade = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raymarch_shade"),
+        layout: layouts[2],
+        entries: &[
+            buf(0, uniform_buf),
+            tex(4, &targets.output_view),
+            tex(12, &targets.gbuf_pos_view),
+            tex(13, &targets.gbuf_albedo_view),
+            tex(16, &targets.shadow_view),
+        ],
+    });
+
+    (primary, shadow, shade)
 }
 
 fn create_blit_bind_group(

@@ -59,6 +59,10 @@ impl BrickHandle {
 pub struct BrickPool {
     voxel_buf: wgpu::Buffer,
     palette_buf: wgpu::Buffer,
+    /// Per-brick occupancy: one bit per 4³-voxel chunk (64 bits as 2×u32).
+    /// Lets the raymarcher's fine DDA skip the voxel fetch through empty
+    /// space — the dominant cost of brick traversal is dependent reads.
+    mask_buf: wgpu::Buffer,
     generations: Vec<u32>,
     free_list: Vec<u32>,
     capacity: u32,
@@ -86,6 +90,13 @@ impl BrickPool {
             mapped_at_creation: false,
         });
 
+        let mask_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brick_masks"),
+            size: u64::from(capacity) * 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let generations = vec![0u32; capacity as usize];
         let free_list: Vec<u32> = (0..capacity).rev().collect();
 
@@ -98,6 +109,7 @@ impl BrickPool {
         Self {
             voxel_buf,
             palette_buf,
+            mask_buf,
             generations,
             free_list,
             capacity,
@@ -169,8 +181,23 @@ impl BrickPool {
                 | (u32::from(chunk[3]) << 24);
         }
 
+        // Occupancy mask: word w covers voxels x=4(w%4)..+3, y=(w/4)%16,
+        // z=w/64 — exactly one 4³ chunk, so a nonzero word marks its chunk.
+        let mut mask = [0u32; 2];
+        for (w, &word) in packed.iter().enumerate() {
+            if word != 0 {
+                let chunk = (w & 3) | ((((w >> 2) & 15) >> 2) << 2) | (((w >> 6) >> 2) << 4);
+                mask[chunk >> 5] |= 1 << (chunk & 31);
+            }
+        }
+
         let offset = u64::from(handle.slot) * u64::from(WORDS_PER_BRICK) * 4;
         queue.write_buffer(&self.voxel_buf, offset, bytemuck::cast_slice(&packed));
+        queue.write_buffer(
+            &self.mask_buf,
+            u64::from(handle.slot) * 8,
+            bytemuck::cast_slice(&mask),
+        );
     }
 
     /// Uploads palette entries (RGBA, 4 bytes each) for the given brick.
@@ -209,6 +236,12 @@ impl BrickPool {
     #[must_use]
     pub fn palette_buffer(&self) -> &wgpu::Buffer {
         &self.palette_buf
+    }
+
+    /// The GPU occupancy-mask storage buffer, for shader bind group creation.
+    #[must_use]
+    pub fn mask_buffer(&self) -> &wgpu::Buffer {
+        &self.mask_buf
     }
 
     /// Maximum number of bricks this pool can hold.
@@ -288,6 +321,10 @@ mod tests {
         assert!(!pool.is_valid(a));
     }
 
+    /// The double-free guard is a `debug_assert`, so it only exists in
+    /// profiles with debug assertions — release builds skip this test
+    /// rather than fail expecting a panic that compiled out (sw-031260).
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "stale brick handle")]
     fn double_free_panics() {

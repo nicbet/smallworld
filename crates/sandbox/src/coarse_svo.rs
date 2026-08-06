@@ -548,17 +548,24 @@ mod render_probe {
 
     /// Diagnostic: renders the Default world headlessly with the exact
     /// camera from the user's screenshot and writes a PPM for inspection.
+    /// `BENCH_WORLD=large` renders the 1 km world at the bench viewpoint
+    /// instead — the same setup as `bench_raymarch`, for A/B image compares.
     /// Run: cargo test -p smallworld-sandbox render_default_headless -- --ignored --nocapture
     #[test]
     #[ignore]
     fn render_default_headless() {
+        let large = std::env::var("BENCH_WORLD").as_deref() == Ok("large");
         let instance = GpuContext::create_instance();
         let ctx = pollster::block_on(GpuContext::headless(instance));
-        let dims = [32u32, 12, 32];
-        let world_size = 32.0 * BRICK_SIZE;
+        let (dims, cells, capacity) = if large {
+            ([1024u32, 16, 1024], 1024u32, 8_000_000u32)
+        } else {
+            ([32u32, 12, 32], 32, 1_000_000)
+        };
+        let world_size = cells as f32 * BRICK_SIZE;
         let half = Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * BRICK_SIZE * 0.5;
         let world_min = -half;
-        let mut svo = Svo::new(&ctx.device, 1_000_000, world_min, world_size);
+        let mut svo = Svo::new(&ctx.device, capacity, world_min, world_size);
         let generator = WorldGenerator::new(42);
         let coarse = build_coarse(&mut svo, &generator, dims);
 
@@ -569,15 +576,27 @@ mod render_probe {
             world_min,
             coarse.column_range,
             32768,
-            PagerConfig::default(),
+            PagerConfig {
+                worker_threads: 8,
+                ..PagerConfig::default()
+            },
         );
-        pager.preload_all(&mut svo, &mut pool, &ctx.queue);
+        let camera_pos = if large {
+            Vec3::new(-2.0, 20.1, 16.8)
+        } else {
+            Vec3::new(-4.0, 5.0, 9.6)
+        };
+        if large {
+            pager.preload_radius(camera_pos, 60.0, &mut svo, &mut pool, &ctx.queue);
+        } else {
+            pager.preload_all(&mut svo, &mut pool, &ctx.queue);
+        }
 
         let mut scene = Scene::new();
         scene.upload(&ctx.device);
 
         let (w, h) = (1280u32, 720u32);
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             &ctx,
             w,
             h,
@@ -586,6 +605,7 @@ mod render_probe {
             &svo,
             &scene,
         );
+        raymarcher.set_terrain_top_y(world_min.y + dims[1] as f32 * BRICK_SIZE);
 
         let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("probe_target"),
@@ -604,9 +624,14 @@ mod render_probe {
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut camera = FreeCamera::new(w as f32 / h as f32);
-        camera.position = Vec3::new(-4.0, 5.0, 9.6);
-        camera.yaw = (-6.0_f32).to_radians();
-        camera.pitch = (-30.3_f32).to_radians();
+        camera.position = camera_pos;
+        if large {
+            camera.yaw = (4.1_f32).to_radians();
+            camera.pitch = (-32.7_f32).to_radians();
+        } else {
+            camera.yaw = (-6.0_f32).to_radians();
+            camera.pitch = (-30.3_f32).to_radians();
+        }
 
         let mut encoder = ctx
             .device
@@ -752,7 +777,7 @@ mod gpu_bench {
         scene.upload(&ctx.device);
 
         let (w, h) = (1280u32, 720u32);
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             &ctx,
             w,
             h,
@@ -761,6 +786,7 @@ mod gpu_bench {
             &svo,
             &scene,
         );
+        raymarcher.set_terrain_top_y(world_min.y + dims[1] as f32 * BRICK_SIZE);
 
         let mut camera = FreeCamera::new(w as f32 / h as f32);
         camera.position = camera_pos;
