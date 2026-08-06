@@ -60,6 +60,17 @@ impl CoarseMipGrid {
         self.data[dst_base + 72] = full_mips[LEVEL4_SRC_OFFSET];
     }
 
+    /// Writes pre-packed coarse mip data (73 u32) directly for a grid cell.
+    pub fn write_cell_raw(
+        &mut self,
+        pos: [u32; 3],
+        coarse_mips: &[u32; COARSE_MIP_WORDS as usize],
+    ) {
+        let flat = self.flat_index(pos);
+        let dst_base = flat * COARSE_MIP_WORDS as usize;
+        self.data[dst_base..dst_base + COARSE_MIP_WORDS as usize].copy_from_slice(coarse_mips);
+    }
+
     /// Uploads the full CPU mirror to the GPU buffer.
     pub fn upload(&self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.data));

@@ -6,14 +6,15 @@ use std::sync::{Arc, Mutex};
 use smallworld_engine::brick_data::BrickData;
 use smallworld_engine::brick_pool::{BRICK_EDGE, VOXEL_SCALE};
 use smallworld_engine::coarse_mip_grid::CoarseMipGrid;
-use smallworld_engine::mip;
 use smallworld_engine::wgpu;
 
 use crate::worldgen::PALETTE;
 
 const BATCH_SIZE: u32 = 256;
 const WORDS_PER_BRICK: u32 = 1024;
+const COARSE_MIP_WORDS: u32 = 73;
 const SHADER_SOURCE: &str = include_str!("../shaders/worldgen.wgsl");
+const COARSE_SHADER_SOURCE: &str = include_str!("../shaders/worldgen_coarse.wgsl");
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -38,11 +39,14 @@ struct GenParams {
 /// polls from worker threads.
 pub struct GpuWorldGenerator {
     pipeline: wgpu::ComputePipeline,
+    coarse_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     param_buf: wgpu::Buffer,
     request_buf: wgpu::Buffer,
     output_buf: wgpu::Buffer,
     staging_buf: wgpu::Buffer,
+    coarse_output_buf: wgpu::Buffer,
+    coarse_staging_buf: wgpu::Buffer,
     cache: Arc<Mutex<HashMap<[u32; 3], Option<BrickData>>>>,
     world_min: glam::Vec3,
     seed: u32,
@@ -136,13 +140,45 @@ impl GpuWorldGenerator {
             mapped_at_creation: false,
         });
 
+        let coarse_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("worldgen_coarse"),
+            source: wgpu::ShaderSource::Wgsl(COARSE_SHADER_SOURCE.into()),
+        });
+
+        let coarse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("worldgen_coarse"),
+            layout: Some(&pipeline_layout),
+            module: &coarse_module,
+            entry_point: Some("cs_generate_coarse"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let coarse_output_size = u64::from(BATCH_SIZE) * u64::from(COARSE_MIP_WORDS) * 4;
+        let coarse_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("worldgen_coarse_output"),
+            size: coarse_output_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let coarse_staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("worldgen_coarse_staging"),
+            size: coarse_output_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
+            coarse_pipeline,
             bind_group_layout,
             param_buf,
             request_buf,
             output_buf,
             staging_buf,
+            coarse_output_buf,
+            coarse_staging_buf,
             cache: Arc::new(Mutex::new(HashMap::new())),
             world_min,
             seed,
@@ -155,7 +191,60 @@ impl GpuWorldGenerator {
     }
 
     /// Generates all grid cells synchronously (blocks until done).
-    pub fn generate_all(&mut self, dims: [u32; 3], device: &wgpu::Device, queue: &wgpu::Queue) {
+    /// Generates full 16³ voxel data for cells within `radius` of `center`.
+    /// Results go into the GPU cache for the pager's workers to pull from.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_near(
+        &mut self,
+        center: glam::Vec3,
+        radius: f32,
+        dims: [u32; 3],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        let start = std::time::Instant::now();
+        let r2 = radius * radius;
+        let brick_size = BRICK_EDGE as f32 * VOXEL_SCALE;
+
+        let mut positions: Vec<[u32; 3]> = Vec::new();
+        for gz in 0..dims[2] {
+            for gy in 0..dims[1] {
+                for gx in 0..dims[0] {
+                    let cell_center = self.world_min
+                        + glam::Vec3::new(
+                            (gx as f32 + 0.5) * brick_size,
+                            (gy as f32 + 0.5) * brick_size,
+                            (gz as f32 + 0.5) * brick_size,
+                        );
+                    if cell_center.distance_squared(center) <= r2 {
+                        positions.push([gx, gy, gz]);
+                    }
+                }
+            }
+        }
+
+        let total = positions.len();
+        for chunk in positions.chunks(BATCH_SIZE as usize) {
+            self.dispatch_and_read(chunk, device, queue);
+        }
+
+        let elapsed = start.elapsed();
+        log::info!(
+            "GPU near gen({radius:.0}m): {total} cells in {:.0} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+
+    /// Generates coarse mip data (levels 2–4) directly from noise, without
+    /// full 16³ voxel generation. Much faster than `generate_all()` +
+    /// `populate_coarse_mips()`.
+    pub fn generate_coarse(
+        &self,
+        dims: [u32; 3],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        coarse: &mut CoarseMipGrid,
+    ) {
         let start = std::time::Instant::now();
 
         let mut positions: Vec<[u32; 3]> = Vec::new();
@@ -168,40 +257,117 @@ impl GpuWorldGenerator {
         }
 
         let total = positions.len();
-        let mut generated = 0usize;
-
         for chunk in positions.chunks(BATCH_SIZE as usize) {
-            self.dispatch_and_read(chunk, device, queue);
-            generated += chunk.len();
+            self.dispatch_coarse_batch(chunk, device, queue, coarse);
         }
+
+        coarse.upload(queue);
 
         let elapsed = start.elapsed();
         log::info!(
-            "GPU worldgen: {generated} cells in {:.0} ms ({total} total)",
+            "GPU coarse gen: {total} cells in {:.0} ms",
             elapsed.as_secs_f64() * 1000.0
         );
     }
 
-    /// Populates a coarse mip grid from all non-air entries in the cache.
-    /// Call after `generate_all()` so distant terrain renders at low resolution.
-    pub fn populate_coarse_mips(&self, coarse: &mut CoarseMipGrid, queue: &wgpu::Queue) {
-        let start = std::time::Instant::now();
-        let cache = self.cache.lock().unwrap();
-        let mut count = 0u32;
-        for (&pos, entry) in cache.iter() {
-            if let Some(data) = entry {
-                let full_mips = mip::compute_brick_mips(&data.voxels, &data.palette);
-                coarse.write_cell(pos, &full_mips);
-                count += 1;
+    fn dispatch_coarse_batch(
+        &self,
+        positions: &[[u32; 3]],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        coarse: &mut CoarseMipGrid,
+    ) {
+        let count = positions.len() as u32;
+
+        let params = GenParams {
+            seed: self.seed,
+            terrain_base: 2.0,
+            terrain_amp: 8.0,
+            cave_threshold: 0.48,
+            water_level: -1.0,
+            brick_size: BRICK_EDGE as f32 * VOXEL_SCALE,
+            _pad0: 0,
+            _pad1: 0,
+            world_min: self.world_min.into(),
+            _pad2: 0,
+        };
+        queue.write_buffer(&self.param_buf, 0, bytemuck::bytes_of(&params));
+
+        let mut request_data = vec![[0u32; 4]; BATCH_SIZE as usize];
+        for (i, pos) in positions.iter().enumerate() {
+            request_data[i] = [pos[0], pos[1], pos[2], 0];
+        }
+        queue.write_buffer(&self.request_buf, 0, bytemuck::cast_slice(&request_data));
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("worldgen_coarse"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.param_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.request_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.coarse_output_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("worldgen_coarse"),
+        });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("worldgen_coarse"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.coarse_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(count, 1, 1);
+        }
+
+        let copy_size = u64::from(count) * u64::from(COARSE_MIP_WORDS) * 4;
+        encoder.copy_buffer_to_buffer(
+            &self.coarse_output_buf,
+            0,
+            &self.coarse_staging_buf,
+            0,
+            copy_size,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.coarse_staging_buf
+            .slice(..copy_size)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().unwrap().unwrap();
+
+        {
+            let view = self
+                .coarse_staging_buf
+                .slice(..copy_size)
+                .get_mapped_range()
+                .expect("coarse staging mapped");
+            let words: &[u32] = bytemuck::cast_slice(&view);
+
+            for (i, pos) in positions.iter().enumerate() {
+                let offset = i * COARSE_MIP_WORDS as usize;
+                let cell_words = &words[offset..offset + COARSE_MIP_WORDS as usize];
+                let mut mip_data = [0u32; COARSE_MIP_WORDS as usize];
+                mip_data.copy_from_slice(cell_words);
+                coarse.write_cell_raw(*pos, &mip_data);
             }
         }
-        drop(cache);
-        coarse.upload(queue);
-        let elapsed = start.elapsed();
-        log::info!(
-            "coarse mips: {count} cells in {:.0} ms",
-            elapsed.as_secs_f64() * 1000.0
-        );
+        self.coarse_staging_buf.unmap();
     }
 
     fn dispatch_and_read(

@@ -241,8 +241,14 @@ fn create_terrain_pager(
     let world_min = preset.world_min();
 
     let mut gpu_gen = GpuWorldGenerator::new(device, 42, world_min);
-    gpu_gen.generate_all(dims, device, queue);
-    gpu_gen.populate_coarse_mips(coarse, queue);
+
+    if preset == Preset::LargeWorld {
+        gpu_gen.generate_coarse(dims, device, queue, coarse);
+        let (cam_pos, _, _) = preset.camera_start();
+        gpu_gen.generate_near(cam_pos, 80.0, dims, device, queue);
+    } else {
+        gpu_gen.generate_near(glam::Vec3::ZERO, 1000.0, dims, device, queue);
+    }
 
     let cache_label = preset.label().to_lowercase().replace(' ', "_");
     let cache_dir = cached_source::cache_dir_for_preset(&cache_label);
