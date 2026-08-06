@@ -136,7 +136,9 @@ impl WorldGenerator {
         }
     }
 
-    fn approx_surface_y(&self, wx: f32, wz: f32) -> f32 {
+    /// Approximate terrain surface height at (wx, wz).
+    #[must_use]
+    pub fn approx_surface_y(&self, wx: f32, wz: f32) -> f32 {
         let noise = fbm3d(wx * 0.012, 0.0, wz * 0.012, 3, self.seed) - 0.5;
         self.terrain_base + noise * self.terrain_amp
     }
@@ -194,6 +196,12 @@ impl WorldGenerator {
         None
     }
 
+}
+
+/// Deterministic hash for object placement at a world (x, z) coordinate.
+#[must_use]
+pub fn hash_for_placement(x: f32, z: f32, seed: u32) -> u32 {
+    hash((x * 100.0) as i32, 0, (z * 100.0) as i32, seed.wrapping_add(55555))
 }
 
 // ---------------------------------------------------------------------------

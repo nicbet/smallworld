@@ -8,7 +8,10 @@ use smallworld_engine::brick_pool::BrickPool;
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::gpu::GpuContext;
 use smallworld_engine::gpu_timing::GpuTimestamps;
+use smallworld_engine::model_gen;
 use smallworld_engine::raymarcher::Raymarcher;
+use smallworld_engine::scene::Scene;
+use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
 use smallworld_engine::worldgen::WorldGenerator;
 use winit::application::ApplicationHandler;
@@ -121,6 +124,7 @@ struct RunState {
     egui_renderer: egui_wgpu::Renderer,
     brick_pool: BrickPool,
     brick_index: BrickIndex,
+    scene: Scene,
     raymarcher: Raymarcher,
     timestamps: Option<GpuTimestamps>,
     camera: FreeCamera,
@@ -187,9 +191,13 @@ impl ApplicationHandler for App {
         let grid_dims = [32u32, 12, 32];
         let world_min = glam::Vec3::new(-25.6, -9.6, -25.6);
 
-        let mut brick_pool = BrickPool::new(&gpu.device, 16384);
+        let mut brick_pool = BrickPool::new(&gpu.device, 32768);
         let mut brick_index = BrickIndex::new(&gpu.device, grid_dims, world_min);
         generate_world(&gpu.queue, &mut brick_pool, &mut brick_index);
+
+        let mut scene = Scene::new();
+        populate_scene(&gpu.queue, &mut brick_pool, &mut scene, &brick_index);
+        scene.upload(&gpu.device);
 
         let render_scale = if window.scale_factor() > 1.0 { 0.5 } else { 1.0 };
         let render_w = ((size.width.max(1) as f32) * render_scale) as u32;
@@ -219,6 +227,7 @@ impl ApplicationHandler for App {
             egui_renderer,
             brick_pool,
             brick_index,
+            scene,
             raymarcher,
             timestamps,
             camera,
@@ -582,9 +591,10 @@ fn draw_debug_panel(
             }
             ui.separator();
             ui.label(format!(
-                "Bricks: {} / {}",
+                "Bricks: {} / {}  Objects: {}",
                 state.brick_pool.live_count(),
                 state.brick_pool.capacity(),
+                state.scene.instance_count(),
             ));
             ui.separator();
             if let Some(ts) = &state.timestamps {
@@ -778,6 +788,69 @@ fn generate_world(
     let elapsed = start.elapsed();
     log::info!(
         "worldgen: {allocated} bricks in {:.1} ms (seed 42)",
+        elapsed.as_secs_f64() * 1000.0
+    );
+}
+
+fn populate_scene(
+    queue: &wgpu::Queue,
+    pool: &mut BrickPool,
+    scene: &mut Scene,
+    terrain: &BrickIndex,
+) {
+    let start = Instant::now();
+
+    let tree_model = model_gen::generate_tree(pool, queue, 42);
+    let rock_model = model_gen::generate_rock(pool, queue, 99);
+    let tree_id = scene.add_model(tree_model);
+    let rock_id = scene.add_model(rock_model);
+
+    let wg = WorldGenerator::new(42);
+    let spacing = 4.0_f32;
+    let world_min = terrain.world_min();
+    let dims = terrain.dims();
+    let world_max = world_min
+        + glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32)
+            * terrain.brick_size();
+
+    let mut tree_count = 0u32;
+    let mut rock_count = 0u32;
+    let mut x = world_min.x + spacing;
+    while x < world_max.x - spacing {
+        let mut z = world_min.z + spacing;
+        while z < world_max.z - spacing {
+            let h = smallworld_engine::worldgen::hash_for_placement(x, z, 42);
+            let surface_y = wg.approx_surface_y(x, z);
+
+            if surface_y > -0.5 && surface_y < world_max.y - 3.0 {
+                if h.is_multiple_of(5) && tree_count < 100 {
+                    scene.add_instance(VoxelInstance {
+                        model_id: tree_id,
+                        position: glam::Vec3::new(x, surface_y, z),
+                        rotation: glam::Quat::from_rotation_y(
+                            (h % 628) as f32 / 100.0,
+                        ),
+                    });
+                    tree_count += 1;
+                } else if h.is_multiple_of(11) && rock_count < 50 {
+                    scene.add_instance(VoxelInstance {
+                        model_id: rock_id,
+                        position: glam::Vec3::new(x, surface_y, z),
+                        rotation: glam::Quat::from_rotation_y(
+                            (h % 314) as f32 / 100.0,
+                        ),
+                    });
+                    rock_count += 1;
+                }
+            }
+            z += spacing;
+        }
+        x += spacing;
+    }
+
+    let elapsed = start.elapsed();
+    log::info!(
+        "scene: {tree_count} trees + {rock_count} rocks in {:.1} ms",
         elapsed.as_secs_f64() * 1000.0
     );
 }
