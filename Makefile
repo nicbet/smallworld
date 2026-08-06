@@ -16,7 +16,7 @@ PROFILE_FLAG := --release
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt lint test build sandbox ci clean
+.PHONY: help fmt lint test build sandbox bench ci clean
 
 # Targets share one cargo target directory; serialise them even under `make -j`.
 .NOTPARALLEL:
@@ -44,6 +44,9 @@ build: ## Build every crate in the workspace
 
 sandbox: ## Run the sandbox
 	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG)
+
+bench: ## Run 20s benchmark on Default preset (PRESET=name DURATION=secs)
+	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG) -- --bench $${PRESET:-} $${DURATION:+--duration $$DURATION}
 
 smoke: ## Run headless smoke test (adapter probe)
 	$(CARGO) run -p $(SANDBOX) $(PROFILE_FLAG) -- --info

@@ -1,5 +1,6 @@
 //! Sandbox: dev/test harness for the smallworld engine.
 
+mod bench;
 mod model_gen;
 mod scenes;
 mod worldgen;
@@ -31,8 +32,10 @@ fn main() {
         return;
     }
 
+    let bench_config = bench::parse_args();
+
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    let mut app = App::new();
+    let mut app = App::new(bench_config);
     event_loop.run_app(&mut app).expect("event loop error");
 }
 
@@ -115,6 +118,7 @@ impl FrameHistory {
 
 struct App {
     state: Option<RunState>,
+    bench_config: Option<bench::BenchConfig>,
 }
 
 struct RunState {
@@ -138,11 +142,15 @@ struct RunState {
     smooth_normals: bool,
     last_frame: Instant,
     frame_history: FrameHistory,
+    bench: Option<bench::BenchState>,
 }
 
 impl App {
-    fn new() -> Self {
-        Self { state: None }
+    fn new(bench_config: Option<bench::BenchConfig>) -> Self {
+        Self {
+            state: None,
+            bench_config,
+        }
     }
 }
 
@@ -229,7 +237,11 @@ impl ApplicationHandler for App {
             None
         };
 
-        let preset = Preset::Default;
+        let preset = self
+            .bench_config
+            .as_ref()
+            .map(|b| b.preset)
+            .unwrap_or(Preset::Default);
         let mut brick_pool = BrickPool::new(&gpu.device, preset.pool_capacity());
         let mut brick_index = BrickIndex::new(&gpu.device, preset.grid_dims(), preset.world_min());
         let mut scene = Scene::new();
@@ -267,6 +279,12 @@ impl ApplicationHandler for App {
         camera.yaw = cam_yaw;
         camera.pitch = cam_pitch;
 
+        let bench_state = self.bench_config.take().map(|config| {
+            let mut bs = bench::BenchState::new(config, preset);
+            bs.advance_orbit(0.0, &mut camera);
+            bs
+        });
+
         self.state = Some(RunState {
             window,
             gpu,
@@ -288,6 +306,7 @@ impl ApplicationHandler for App {
             smooth_normals: false,
             last_frame: Instant::now(),
             frame_history: FrameHistory::new(),
+            bench: bench_state,
         });
     }
 
@@ -369,33 +388,37 @@ impl ApplicationHandler for App {
                 state.last_frame = now;
 
                 // Camera movement
-                let speed = FreeCamera::BASE_SPEED
-                    * if state.input.sprint {
-                        FreeCamera::SPRINT_MULTIPLIER
-                    } else {
-                        1.0
+                if let Some(bs) = &mut state.bench {
+                    bs.advance_orbit(dt, &mut state.camera);
+                } else {
+                    let speed = FreeCamera::BASE_SPEED
+                        * if state.input.sprint {
+                            FreeCamera::SPRINT_MULTIPLIER
+                        } else {
+                            1.0
+                        }
+                        * dt;
+                    let mut delta = glam::Vec3::ZERO;
+                    if state.input.forward {
+                        delta.z += speed;
                     }
-                    * dt;
-                let mut delta = glam::Vec3::ZERO;
-                if state.input.forward {
-                    delta.z += speed;
+                    if state.input.backward {
+                        delta.z -= speed;
+                    }
+                    if state.input.right {
+                        delta.x += speed;
+                    }
+                    if state.input.left {
+                        delta.x -= speed;
+                    }
+                    if state.input.up {
+                        delta.y += speed;
+                    }
+                    if state.input.down {
+                        delta.y -= speed;
+                    }
+                    state.camera.translate(delta);
                 }
-                if state.input.backward {
-                    delta.z -= speed;
-                }
-                if state.input.right {
-                    delta.x += speed;
-                }
-                if state.input.left {
-                    delta.x -= speed;
-                }
-                if state.input.up {
-                    delta.y += speed;
-                }
-                if state.input.down {
-                    delta.y -= speed;
-                }
-                state.camera.translate(delta);
 
                 // Run egui every frame so texture deltas are always consumed.
                 let raw_input = state.egui_state.take_egui_input(&state.window);
@@ -564,16 +587,38 @@ impl ApplicationHandler for App {
 
                 // Record frame sample
                 let cpu_ms = (Instant::now() - frame_start).as_secs_f32() * 1000.0;
-                let gpu_ms = state
+                let gpu_averages = state
                     .timestamps
                     .as_ref()
-                    .map(|ts| ts.averages().iter().sum::<f64>() as f32)
-                    .unwrap_or(0.0);
+                    .map(|ts| {
+                        let a = ts.averages();
+                        [a[0], a[1], a[2]]
+                    })
+                    .unwrap_or([0.0; 3]);
+                let gpu_ms = gpu_averages.iter().sum::<f64>() as f32;
                 state.frame_history.push(FrameSample {
                     dt_ms: dt * 1000.0,
                     cpu_ms,
                     gpu_ms,
                 });
+
+                if let Some(bs) = &mut state.bench {
+                    bs.push_sample(bench::BenchSample {
+                        dt_ms: dt * 1000.0,
+                        cpu_ms,
+                        gpu_compute_ms: gpu_averages[0],
+                        gpu_blit_ms: gpu_averages[1],
+                        gpu_egui_ms: gpu_averages[2],
+                    });
+                    if bs.is_done() {
+                        bs.print_report(
+                            state.brick_pool.live_count(),
+                            state.brick_pool.capacity(),
+                            state.scene.instance_count(),
+                        );
+                        event_loop.exit();
+                    }
+                }
             }
 
             _ => {}
@@ -589,6 +634,9 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        if state.bench.is_some() {
+            return;
+        }
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
             && state.input.right_mouse
         {
