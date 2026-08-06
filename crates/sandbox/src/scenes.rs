@@ -11,6 +11,7 @@ use smallworld_engine::voxel_object::VoxelInstance;
 use smallworld_engine::wgpu;
 
 use crate::cached_source;
+use crate::coarse_svo;
 use crate::gpu_cached_source::GpuCachedSource;
 use crate::gpu_worldgen::GpuWorldGenerator;
 use crate::model_gen;
@@ -20,6 +21,7 @@ use crate::worldgen::{self, WorldGenerator};
 pub enum Preset {
     Default,
     TerrainOnly,
+    LargeWorld,
     ObjectsOnly,
     Stress,
     SingleBrick,
@@ -30,6 +32,7 @@ impl Preset {
     pub const ALL: &[Self] = &[
         Self::Default,
         Self::TerrainOnly,
+        Self::LargeWorld,
         Self::ObjectsOnly,
         Self::Stress,
         Self::SingleBrick,
@@ -40,6 +43,7 @@ impl Preset {
         match self {
             Self::Default => "Default",
             Self::TerrainOnly => "Terrain Only",
+            Self::LargeWorld => "Large World",
             Self::ObjectsOnly => "Objects Only",
             Self::Stress => "Stress",
             Self::SingleBrick => "Single Brick",
@@ -50,8 +54,18 @@ impl Preset {
     pub fn grid_dims(self) -> [u32; 3] {
         match self {
             Self::Default | Self::TerrainOnly => [32, 12, 32],
+            Self::LargeWorld => [1024, 16, 1024],
             Self::ObjectsOnly | Self::Stress => [4, 2, 4],
             Self::SingleBrick | Self::Empty => [2, 2, 2],
+        }
+    }
+
+    /// SVO node pool size. The large world needs room for the full coarse
+    /// tree (~3-4M nodes estimated); small presets stay lean.
+    pub fn svo_capacity(self) -> u32 {
+        match self {
+            Self::LargeWorld => 8_000_000,
+            _ => 1_000_000,
         }
     }
 
@@ -65,7 +79,7 @@ impl Preset {
 
     pub fn pool_capacity(self) -> u32 {
         match self {
-            Self::Default | Self::TerrainOnly => 32768,
+            Self::Default | Self::TerrainOnly | Self::LargeWorld => 32768,
             Self::Stress => 16384,
             Self::ObjectsOnly => 8192,
             Self::SingleBrick | Self::Empty => 256,
@@ -77,6 +91,11 @@ impl Preset {
             Self::Default | Self::TerrainOnly => {
                 (glam::Vec3::new(0.0, 8.0, 14.0), 0.0, -20.0_f32.to_radians())
             }
+            Self::LargeWorld => (
+                glam::Vec3::new(0.0, 30.0, 40.0),
+                0.0,
+                -20.0_f32.to_radians(),
+            ),
             Self::ObjectsOnly => (glam::Vec3::new(0.0, 4.0, 10.0), 0.0, -15.0_f32.to_radians()),
             Self::Stress => (
                 glam::Vec3::new(0.0, 20.0, 40.0),
@@ -99,6 +118,21 @@ impl Preset {
                 let x = r * angle.cos();
                 let z = r * angle.sin();
                 let pitch = (-height).atan2(r);
+                (
+                    glam::Vec3::new(x, height, z),
+                    angle + std::f32::consts::PI,
+                    pitch,
+                )
+            }
+            Self::LargeWorld => {
+                // Long low sweep across the world: crosses hundreds of
+                // meters so streaming + eviction actually cycle.
+                let angle = t * TAU;
+                let r = 250.0 + 150.0 * (t * TAU).sin();
+                let height = 15.0 + 20.0 * (t * TAU * 2.0).cos().abs();
+                let x = r * angle.cos();
+                let z = r * angle.sin();
+                let pitch = (-height * 0.3).atan2(60.0);
                 (
                     glam::Vec3::new(x, height, z),
                     angle + std::f32::consts::PI,
@@ -161,6 +195,14 @@ impl Preset {
         }
     }
 
+    /// World radius preloaded synchronously at startup for streaming presets.
+    fn preload_radius(self) -> f32 {
+        match self {
+            Self::LargeWorld => 60.0,
+            _ => f32::INFINITY,
+        }
+    }
+
     /// Sets up the scene. Returns a `BrickPager` for presets that stream terrain.
     pub fn setup(
         self,
@@ -172,14 +214,20 @@ impl Preset {
     ) -> Option<BrickPager> {
         match self {
             Self::Default => {
-                let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
+                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), svo);
                 pager.preload_all(svo, pool, queue);
                 populate_default_objects(queue, pool, scene, svo);
                 Some(pager)
             }
             Self::TerrainOnly => {
-                let mut pager = create_terrain_pager(self, device, queue, pool.capacity());
+                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), svo);
                 pager.preload_all(svo, pool, queue);
+                Some(pager)
+            }
+            Self::LargeWorld => {
+                let mut pager = create_terrain_pager(self, device, queue, pool.capacity(), svo);
+                let (cam, _, _) = self.camera_start();
+                pager.preload_radius(cam, self.preload_radius(), svo, pool, queue);
                 Some(pager)
             }
             Self::ObjectsOnly => {
@@ -199,28 +247,64 @@ impl Preset {
     }
 }
 
+/// Builds the coarse SVO for the whole world, primes the GPU worldgen cache
+/// for the cells that will be preloaded, and constructs the streaming pager
+/// over the coarse pass's candidate set.
 fn create_terrain_pager(
     preset: Preset,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pool_capacity: u32,
+    svo: &mut Svo,
 ) -> BrickPager {
     let dims = preset.grid_dims();
     let world_min = preset.world_min();
+    let generator = WorldGenerator::new(42);
 
+    let coarse = coarse_svo::build_coarse(svo, &generator, dims);
+
+    // Prime the GPU worldgen cache with exactly the cells the preload will
+    // request: candidates within the preload radius of the camera start.
+    let brick_size = BRICK_EDGE as f32 * VOXEL_SCALE;
+    let (cam, _, _) = preset.camera_start();
+    let radius = preset.preload_radius();
+    let r2 = radius * radius;
+    let mut prime: Vec<[u32; 3]> = Vec::new();
+    for gz in 0..dims[2] {
+        for gx in 0..dims[0] {
+            let (lo, hi) = coarse.column_range[(gx + dims[0] * gz) as usize];
+            if lo > hi {
+                continue;
+            }
+            for gy in u32::from(lo)..=u32::from(hi) {
+                let center = world_min
+                    + glam::Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, gz as f32 + 0.5)
+                        * brick_size;
+                if radius.is_infinite() || center.distance_squared(cam) <= r2 {
+                    prime.push([gx, gy, gz]);
+                }
+            }
+        }
+    }
     let mut gpu_gen = GpuWorldGenerator::new(device, 42, world_min);
-    gpu_gen.generate_near(glam::Vec3::ZERO, 1000.0, dims, device, queue);
+    gpu_gen.generate_cells(&prime, device, queue);
 
     let cache_label = preset.label().to_lowercase().replace(' ', "_");
     let cache_dir = cached_source::cache_dir_for_preset(&cache_label);
     let source = GpuCachedSource::new(gpu_gen.cache(), WorldGenerator::new(42), cache_dir);
 
+    let config = PagerConfig {
+        worker_threads: if preset == Preset::LargeWorld { 8 } else { 4 },
+        ..PagerConfig::default()
+    };
+
     BrickPager::new(
         Arc::new(source),
         dims,
         world_min,
+        coarse.column_range,
         pool_capacity,
-        PagerConfig::default(),
+        config,
     )
 }
 

@@ -7,7 +7,7 @@ const SKY_BOT: vec3<f32> = vec3<f32>(0.7, 0.8, 0.95);
 const AMBIENT: f32 = 0.25;
 const MAX_COARSE_STEPS: u32 = 512u;
 const MAX_FINE_STEPS: u32 = 64u;
-const MAX_SVO_STACK: u32 = 24u;
+const MAX_SVO_DEPTH: u32 = 16u;
 const SHADOW_BIAS: f32 = 0.01;
 
 const FLAG_SHADOWS: u32 = 1u;
@@ -230,10 +230,13 @@ fn aabb_normal(ro: vec3<f32>, inv_rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32
     return vec3<f32>(0.0, 0.0, -sign(inv_rd.z));
 }
 
-struct SvoStackEntry {
+// Traversal stack holds one frame per tree level (cursor-based descent), so
+// its size bounds tree depth — not fan-out. A push-all-children stack needs
+// up to 7 × depth live entries and silently drops subtrees when it overflows.
+struct SvoFrame {
     node_idx: u32,
     node_min: vec3<f32>,
-    node_size: f32,
+    cursor: u32,
 }
 
 fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
@@ -245,85 +248,100 @@ fn trace_svo(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> HitResult {
         return no_hit();
     }
 
-    var stack: array<SvoStackEntry, MAX_SVO_STACK>;
-    var sp = 1u;
-    stack[0] = SvoStackEntry(u.svo_root, u.world_min, u.world_size);
-
     var best = no_hit();
 
     let dir_mask = select(vec3<u32>(0u), vec3<u32>(1u, 2u, 4u), rd < vec3<f32>(0.0));
     let flip = dir_mask.x | dir_mask.y | dir_mask.z;
 
-    while sp > 0u {
-        sp -= 1u;
-        let entry = stack[sp];
-        let node = svo_nodes[entry.node_idx];
+    var stack: array<SvoFrame, MAX_SVO_DEPTH>;
+    var sp = 0u;
 
-        let node_max = entry.node_min + vec3<f32>(entry.node_size);
-        let eps = entry.node_size * 0.001;
-        let hit = ray_aabb(ro, inv_rd, entry.node_min - vec3(eps), node_max + vec3(eps));
-        let t_near = max(hit.x, 0.0);
-        if t_near >= hit.y || t_near >= best.t {
-            continue;
-        }
+    var node_idx = u.svo_root;
+    var node_min = u.world_min;
+    var node_size = u.world_size;
+    // Next child slot (0-7) to try in the current node; 0 = first visit.
+    var cursor = 0u;
 
-        let child_mask = node.node_flags & 0xFFu;
-        let has_brick = (node.node_flags & (1u << 8u)) != 0u;
-        let has_children = node.children != 0u && child_mask != 0u;
+    loop {
+        if cursor == 0u {
+            // First visit: classify this node.
+            let node = svo_nodes[node_idx];
+            let node_max = node_min + vec3<f32>(node_size);
+            let eps = node_size * 0.001;
+            let hit = ray_aabb(ro, inv_rd, node_min - vec3(eps), node_max + vec3(eps));
+            let t_near = max(hit.x, 0.0);
 
-        if has_brick {
-            let brick_vs = entry.node_size / f32(BRICK_EDGE);
-            let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
-            let result = trace_brick(ro, rd, t_near, node.brick, entry.node_min, normal, brick_vs);
-            if result.hit && result.t < best.t {
-                best = result;
-            }
-            continue;
-        }
+            var terminal = true;
+            if t_near < hit.y && t_near < best.t && t_near < max_t {
+                let child_mask = node.node_flags & 0xFFu;
+                let has_brick = (node.node_flags & (1u << 8u)) != 0u;
+                let has_children = node.children != 0u && child_mask != 0u;
+                let sse = node_size * u.focal_length / max(t_near, 0.001);
 
-        if !has_children {
-            if unpack_alpha(node.color) > 0.0 {
-                let wp = ro + rd * t_near;
-                let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
-                let color = unpack_color(node.color);
-                let t_hit = t_near;
-                if t_hit < best.t {
-                    best = HitResult(true, color, normal, vec3<i32>(0), 0u, wp, t_hit);
+                if has_brick {
+                    let brick_vs = node_size / f32(BRICK_EDGE);
+                    let normal = aabb_normal(ro, inv_rd, node_min, node_max);
+                    let result = trace_brick(ro, rd, t_near, node.brick, node_min, normal, brick_vs);
+                    if result.hit && result.t < best.t {
+                        best = result;
+                    }
+                } else if !has_children || sse < u.sse_threshold {
+                    if unpack_alpha(node.color) > 0.0 && t_near < best.t {
+                        let wp = ro + rd * t_near;
+                        let normal = aabb_normal(ro, inv_rd, node_min, node_max);
+                        best = HitResult(true, unpack_color(node.color), normal, vec3<i32>(0), 0u, wp, t_near);
+                    }
+                } else {
+                    terminal = false;
                 }
             }
-            continue;
-        }
 
-        let dist = max(t_near, 0.001);
-        let sse = entry.node_size * u.focal_length / dist;
-        if sse < u.sse_threshold {
-            if unpack_alpha(node.color) > 0.0 {
-                let wp = ro + rd * t_near;
-                let normal = aabb_normal(ro, inv_rd, entry.node_min, node_max);
-                let color = unpack_color(node.color);
-                if t_near < best.t {
-                    best = HitResult(true, color, normal, vec3<i32>(0), 0u, wp, t_near);
+            if terminal {
+                if sp == 0u {
+                    break;
                 }
-            }
-            continue;
-        }
-
-        let half = entry.node_size * 0.5;
-        for (var i = 0u; i < 8u; i++) {
-            let octant = (7u - i) ^ flip;
-            if (child_mask & (1u << octant)) == 0u {
+                sp -= 1u;
+                node_idx = stack[sp].node_idx;
+                node_min = stack[sp].node_min;
+                cursor = stack[sp].cursor;
+                node_size = node_size * 2.0;
                 continue;
             }
-            if sp >= MAX_SVO_STACK {
+        }
+
+        // Advance to the next existing child, front-to-back (cursor ^ flip).
+        let node = svo_nodes[node_idx];
+        let child_mask = node.node_flags & 0xFFu;
+        let half = node_size * 0.5;
+        var descended = false;
+        while cursor < 8u && sp < MAX_SVO_DEPTH {
+            let octant = cursor ^ flip;
+            cursor += 1u;
+            if (child_mask & (1u << octant)) != 0u {
+                stack[sp] = SvoFrame(node_idx, node_min, cursor);
+                sp += 1u;
+                node_idx = node.children + octant;
+                node_min = node_min + vec3<f32>(
+                    select(0.0, half, (octant & 1u) != 0u),
+                    select(0.0, half, (octant & 2u) != 0u),
+                    select(0.0, half, (octant & 4u) != 0u),
+                );
+                node_size = half;
+                cursor = 0u;
+                descended = true;
                 break;
             }
-            let child_min = entry.node_min + vec3<f32>(
-                select(0.0, half, (octant & 1u) != 0u),
-                select(0.0, half, (octant & 2u) != 0u),
-                select(0.0, half, (octant & 4u) != 0u),
-            );
-            stack[sp] = SvoStackEntry(node.children + octant, child_min, half);
-            sp += 1u;
+        }
+
+        if !descended {
+            if sp == 0u {
+                break;
+            }
+            sp -= 1u;
+            node_idx = stack[sp].node_idx;
+            node_min = stack[sp].node_min;
+            cursor = stack[sp].cursor;
+            node_size = node_size * 2.0;
         }
     }
 

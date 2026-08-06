@@ -151,6 +151,12 @@ impl WorldGenerator {
         }
     }
 
+    /// World-space height below which air becomes water.
+    #[must_use]
+    pub fn water_level(&self) -> f32 {
+        self.water_level
+    }
+
     /// Approximate terrain surface height at (wx, wz).
     #[must_use]
     pub fn approx_surface_y(&self, wx: f32, wz: f32) -> f32 {

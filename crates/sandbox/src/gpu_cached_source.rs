@@ -37,6 +37,10 @@ impl GpuCachedSource {
 impl BrickSource for GpuCachedSource {
     fn generate(&self, grid_pos: [u32; 3], world_min: Vec3) -> Option<BrickData> {
         if let Some(entry) = self.gpu_cache.lock().unwrap().remove(&grid_pos) {
+            // Persist GPU results: the GPU and CPU generators are not
+            // bit-identical (sw-c9d281), so the first-generated
+            // content must win durably or the world changes between runs.
+            self.disk_source.store(grid_pos, entry.as_ref());
             return entry;
         }
         self.disk_source.generate(grid_pos, world_min)

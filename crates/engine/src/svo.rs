@@ -54,6 +54,9 @@ pub struct Svo {
     world_size: f32,
     buffer: wgpu::Buffer,
     capacity: u32,
+    /// Node indices modified since the last upload; drained by
+    /// [`upload_dirty`](Self::upload_dirty).
+    dirty: Vec<u32>,
 }
 
 impl Svo {
@@ -89,7 +92,60 @@ impl Svo {
             world_size,
             buffer,
             capacity,
+            dirty: Vec::new(),
         }
+    }
+
+    /// Snaps a world position to integer leaf-cell coordinates and returns
+    /// them with the tree depth for that leaf size. Min corners sit exactly
+    /// on octree split planes, so classification must round in f64 and then
+    /// descend on integers — accumulated f32 center comparisons mis-sort
+    /// bricks whose rounding error crosses a plane.
+    fn quantize_cell(&self, world_pos: Vec3, leaf_size: f32) -> ([u32; 3], u32) {
+        let depth = (self.world_size / leaf_size).log2().round() as u32;
+        let cells = 1i64 << depth;
+        let scale = f64::from(cells as u32) / f64::from(self.world_size);
+        let rel = world_pos - self.world_min;
+        let q = |v: f32| ((f64::from(v) * scale).round() as i64).clamp(0, cells - 1) as u32;
+        ([q(rel.x), q(rel.y), q(rel.z)], depth)
+    }
+
+    fn octant_at(cell: [u32; 3], level: u32) -> u32 {
+        ((cell[0] >> level) & 1) | (((cell[1] >> level) & 1) << 1) | (((cell[2] >> level) & 1) << 2)
+    }
+
+    /// Returns the child of `parent` at `octant`, allocating the child block
+    /// and setting the valid bit if needed. This is the building block for
+    /// direct tree construction (coarse worldgen builds subtrees top-down
+    /// without re-descending from the root per node).
+    pub fn alloc_child(&mut self, parent: u32, octant: u8) -> u32 {
+        if self.nodes[parent as usize].children == 0 {
+            let block = self.alloc_children();
+            let p = self.nodes[parent as usize];
+            // Subdividing a coarse solid leaf (colored, brickless, childless):
+            // materialize all 8 children with the parent's color first, or the
+            // octants not on the descent path turn from solid volume into air.
+            if p.flags & (1 << 8) == 0 && (p.color >> 24) & 0xFF > 0 {
+                for i in 0..CHILD_BLOCK {
+                    self.nodes[(block + i) as usize].color = p.color;
+                }
+                self.nodes[parent as usize].flags |= 0xFF;
+                self.dirty.push(parent);
+            }
+            self.nodes[parent as usize].children = block;
+        }
+        let bit = 1u32 << octant;
+        if self.nodes[parent as usize].flags & bit == 0 {
+            self.nodes[parent as usize].flags |= bit;
+            self.dirty.push(parent);
+        }
+        self.nodes[parent as usize].children + u32::from(octant)
+    }
+
+    /// Sets a node's color directly (coarse construction path).
+    pub fn set_color(&mut self, node_idx: u32, color: [u8; 4]) {
+        self.nodes[node_idx as usize].color = pack_rgba(color);
+        self.dirty.push(node_idx);
     }
 
     /// Inserts a brick whose minimum corner is at `world_pos`, creating
@@ -108,93 +164,244 @@ impl Svo {
         handle: BrickHandle,
         color: [u8; 4],
     ) {
-        let depth = (self.world_size / leaf_size).log2().round() as u32;
-        let cells = 1i64 << depth;
-        let scale = f64::from(cells as u32) / f64::from(self.world_size);
-        let rel = world_pos - self.world_min;
-        let quant = |v: f32| ((f64::from(v) * scale).round() as i64).clamp(0, cells - 1) as u32;
-        let (cx, cy, cz) = (quant(rel.x), quant(rel.y), quant(rel.z));
+        let (cell, depth) = self.quantize_cell(world_pos, leaf_size);
 
-        let packed_color = pack_rgba(color);
+        let mut node_idx = self.root;
+        for level in (0..depth).rev() {
+            let octant = Self::octant_at(cell, level) as u8;
+            node_idx = self.alloc_child(node_idx, octant);
+        }
+
+        let node = &mut self.nodes[node_idx as usize];
+        node.brick = handle.gpu_index();
+        node.color = pack_rgba(color);
+        node.flags |= 1 << 8;
+        self.dirty.push(node_idx);
+
+        self.refresh_path_colors(cell, depth);
+    }
+
+    /// Detaches the brick from the leaf at `world_pos`, keeping the leaf's
+    /// averaged color as the LOD fallback. Called on pager eviction — leaving
+    /// the handle set would render whatever brick the pool slot is reassigned
+    /// to at this location.
+    pub fn remove_brick(&mut self, world_pos: Vec3, leaf_size: f32) {
+        let (cell, depth) = self.quantize_cell(world_pos, leaf_size);
+
+        let mut node_idx = self.root;
+        for level in (0..depth).rev() {
+            let node = self.nodes[node_idx as usize];
+            let octant = Self::octant_at(cell, level);
+            if node.children == 0 || node.flags & (1 << octant) == 0 {
+                return;
+            }
+            node_idx = node.children + octant;
+        }
+
+        let node = &mut self.nodes[node_idx as usize];
+        if node.flags & (1 << 8) != 0 {
+            node.brick = u32::MAX;
+            node.flags &= !(1 << 8);
+            self.dirty.push(node_idx);
+        }
+    }
+
+    /// Clears the leaf at `world_pos` entirely — color, brick, everything.
+    /// Called when streaming discovers a coarsely-solid cell is actually air
+    /// (e.g. a cave breach the heightfield estimate could not see): the
+    /// coarse color must go, or an opaque box floats over the real terrain.
+    /// Descends with allocation so a cell inside a coarse solid node
+    /// subdivides it (materializing its siblings) before clearing.
+    pub fn clear_leaf(&mut self, world_pos: Vec3, leaf_size: f32) {
+        let (cell, depth) = self.quantize_cell(world_pos, leaf_size);
+
+        let mut node_idx = self.root;
+        for level in (0..depth).rev() {
+            let octant = Self::octant_at(cell, level) as u8;
+            node_idx = self.alloc_child(node_idx, octant);
+        }
+
+        let node = &mut self.nodes[node_idx as usize];
+        node.color = 0;
+        node.brick = u32::MAX;
+        node.flags &= !(1 << 8);
+        self.dirty.push(node_idx);
+
+        self.refresh_path_colors(cell, depth);
+    }
+
+    /// Returns `(packed_color, has_brick)` of the leaf at `world_pos`, or
+    /// `None` if no node exists along the path. Read-only query for tests
+    /// and tooling.
+    #[must_use]
+    pub fn leaf_info(&self, world_pos: Vec3, leaf_size: f32) -> Option<(u32, bool)> {
+        let (cell, depth) = self.quantize_cell(world_pos, leaf_size);
+
+        let mut node_idx = self.root;
+        for level in (0..depth).rev() {
+            let node = self.nodes[node_idx as usize];
+            let octant = Self::octant_at(cell, level);
+            if node.children == 0 || node.flags & (1 << octant) == 0 {
+                // A childless colored ancestor covers this cell (coarse solid).
+                if node.children == 0 && (node.color >> 24) & 0xFF > 0 {
+                    return Some((node.color, false));
+                }
+                return None;
+            }
+            node_idx = node.children + octant;
+        }
+        let node = self.nodes[node_idx as usize];
+        Some((node.color, node.flags & (1 << 8) != 0))
+    }
+
+    /// Raw node fields along the root→leaf path of a cell, for debugging.
+    /// Stops early where the path leaves the built tree.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_path(&self, world_pos: Vec3, leaf_size: f32) -> Vec<(u32, u32, u32, u32)> {
+        let (cell, depth) = self.quantize_cell(world_pos, leaf_size);
+        let mut out = Vec::new();
+        let mut node_idx = self.root;
+        for level in (0..depth).rev() {
+            let node = self.nodes[node_idx as usize];
+            out.push((node_idx, node.children, node.color, node.flags));
+            let octant = Self::octant_at(cell, level);
+            if node.children == 0 || node.flags & (1 << octant) == 0 {
+                return out;
+            }
+            node_idx = node.children + octant;
+        }
+        let node = self.nodes[node_idx as usize];
+        out.push((node_idx, node.children, node.color, node.flags));
+        out
+    }
+
+    /// Recomputes interior colors bottom-up along the root→leaf path of one
+    /// cell. O(depth × 8) — the streaming-time replacement for the full-tree
+    /// [`update_colors`](Self::update_colors) pass.
+    fn refresh_path_colors(&mut self, cell: [u32; 3], depth: u32) {
+        let mut path = [0u32; 32];
+        let mut len = 0usize;
         let mut node_idx = self.root;
 
         for level in (0..depth).rev() {
-            let octant =
-                ((cx >> level) & 1) | (((cy >> level) & 1) << 1) | (((cz >> level) & 1) << 2);
-
-            if self.nodes[node_idx as usize].children == 0 {
-                let block = self.alloc_children();
-                self.nodes[node_idx as usize].children = block;
+            path[len] = node_idx;
+            len += 1;
+            let node = self.nodes[node_idx as usize];
+            let octant = Self::octant_at(cell, level);
+            if node.children == 0 || node.flags & (1 << octant) == 0 {
+                len -= 1;
+                break;
             }
-
-            self.nodes[node_idx as usize].flags |= 1u32 << octant;
-            node_idx = self.nodes[node_idx as usize].children + octant;
+            node_idx = node.children + octant;
         }
 
-        self.nodes[node_idx as usize].brick = handle.gpu_index();
-        self.nodes[node_idx as usize].color = packed_color;
-        self.nodes[node_idx as usize].flags |= 1 << 8;
+        for i in (0..len).rev() {
+            self.recompute_color(path[i]);
+        }
     }
 
-    /// Recomputes interior node colors bottom-up from leaves.
-    pub fn update_colors(&mut self) {
-        self.update_colors_recursive(self.root);
-    }
-
-    #[allow(clippy::manual_checked_ops)]
-    fn update_colors_recursive(&mut self, idx: u32) -> (u32, u32, u32, u32, u32) {
+    /// Recomputes one interior node's color as the unweighted average of its
+    /// direct children's colors (children with zero alpha are skipped).
+    fn recompute_color(&mut self, idx: u32) {
         let node = self.nodes[idx as usize];
         if !node.has_children() {
-            let r = node.color & 0xFF;
-            let g = (node.color >> 8) & 0xFF;
-            let b = (node.color >> 16) & 0xFF;
-            let a = (node.color >> 24) & 0xFF;
-            return (r, g, b, a, if a > 0 { 1 } else { 0 });
+            return;
         }
 
-        let children_base = node.children;
-        let mask = node.child_mask();
-        let mut r_sum = 0u32;
-        let mut g_sum = 0u32;
-        let mut b_sum = 0u32;
-        let mut a_sum = 0u32;
-        let mut count = 0u32;
-
+        let mut r = 0u32;
+        let mut g = 0u32;
+        let mut b = 0u32;
+        let mut a = 0u32;
+        let mut n = 0u32;
         for i in 0..8u32 {
-            if mask & (1 << i) != 0 {
-                let (cr, cg, cb, ca, cc) = self.update_colors_recursive(children_base + i);
-                if cc > 0 {
-                    r_sum += cr * cc;
-                    g_sum += cg * cc;
-                    b_sum += cb * cc;
-                    a_sum += ca * cc;
-                    count += cc;
+            if node.child_mask() & (1 << i) != 0 {
+                let c = self.nodes[(node.children + i) as usize].color;
+                let ca = (c >> 24) & 0xFF;
+                if ca > 0 {
+                    r += c & 0xFF;
+                    g += (c >> 8) & 0xFF;
+                    b += (c >> 16) & 0xFF;
+                    a += ca;
+                    n += 1;
                 }
             }
         }
 
-        if count > 0 {
-            let color = pack_rgba([
-                (r_sum / count) as u8,
-                (g_sum / count) as u8,
-                (b_sum / count) as u8,
-                (a_sum / count) as u8,
-            ]);
+        // n == 0 (all children invisible) must zero the color: a stale
+        // opaque color would keep rendering at SSE-coarse distances.
+        let avg = |sum: u32| sum.checked_div(n).unwrap_or(0) as u8;
+        let color = pack_rgba([avg(r), avg(g), avg(b), avg(a)]);
+        if self.nodes[idx as usize].color != color {
             self.nodes[idx as usize].color = color;
+            self.dirty.push(idx);
         }
-
-        (
-            r_sum.checked_div(count).unwrap_or(0),
-            g_sum.checked_div(count).unwrap_or(0),
-            b_sum.checked_div(count).unwrap_or(0),
-            a_sum.checked_div(count).unwrap_or(0),
-            count,
-        )
     }
 
-    /// Uploads the CPU node array to the GPU buffer.
-    pub fn upload(&self, queue: &wgpu::Queue) {
+    /// Recomputes all interior node colors bottom-up from leaves.
+    /// Full-tree pass — use once after bulk construction; streaming updates
+    /// go through the path-local refresh inside `insert_brick`.
+    pub fn update_colors(&mut self) {
+        self.update_colors_recursive(self.root);
+    }
+
+    fn update_colors_recursive(&mut self, idx: u32) {
+        let node = self.nodes[idx as usize];
+        if !node.has_children() {
+            return;
+        }
+        for i in 0..8u32 {
+            if node.child_mask() & (1 << i) != 0 {
+                self.update_colors_recursive(node.children + i);
+            }
+        }
+        self.recompute_color(idx);
+    }
+
+    /// Uploads the entire CPU node array to the GPU buffer and clears the
+    /// dirty set. Use after bulk construction; per-frame streaming uses
+    /// [`upload_dirty`](Self::upload_dirty).
+    pub fn upload(&mut self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.nodes));
+        self.dirty.clear();
+    }
+
+    /// Uploads only nodes modified since the last upload, coalescing nearby
+    /// indices into ranged writes. Per-frame cost is proportional to the
+    /// number of touched nodes, not tree size.
+    pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        self.dirty.sort_unstable();
+        self.dirty.dedup();
+
+        // Merge ranges separated by small gaps: one larger write beats many
+        // tiny ones (each write_buffer is a staging alloc + copy).
+        const MERGE_GAP: u32 = 64;
+        let node_size = size_of::<SvoNode>() as u64;
+        let dirty = std::mem::take(&mut self.dirty);
+
+        let mut start = dirty[0];
+        let mut end = start + 1;
+        for &idx in &dirty[1..] {
+            if idx < end + MERGE_GAP {
+                end = idx + 1;
+            } else {
+                queue.write_buffer(
+                    &self.buffer,
+                    u64::from(start) * node_size,
+                    bytemuck::cast_slice(&self.nodes[start as usize..end as usize]),
+                );
+                start = idx;
+                end = idx + 1;
+            }
+        }
+        queue.write_buffer(
+            &self.buffer,
+            u64::from(start) * node_size,
+            bytemuck::cast_slice(&self.nodes[start as usize..end as usize]),
+        );
     }
 
     /// The GPU storage buffer for shader binding.
@@ -228,9 +435,15 @@ impl Svo {
     }
 
     fn alloc_children(&mut self) -> u32 {
-        let block = self.free_blocks.pop().expect("SVO node pool exhausted");
+        let block = self.free_blocks.pop().unwrap_or_else(|| {
+            panic!(
+                "SVO node pool exhausted at capacity {} — increase the preset's svo_capacity",
+                self.capacity
+            )
+        });
         for i in 0..CHILD_BLOCK {
             self.nodes[(block + i) as usize] = SvoNode::EMPTY;
+            self.dirty.push(block + i);
         }
         block
     }
@@ -285,6 +498,30 @@ mod tests {
         let g = (root_color >> 8) & 0xFF;
         assert_eq!(r, 100);
         assert_eq!(g, 100);
+    }
+
+    /// Regression test for sw-fcea39: eviction must detach the brick handle
+    /// (or the reassigned pool slot's new contents render at the old
+    /// location) while keeping the averaged color as LOD fallback.
+    #[test]
+    fn remove_brick_keeps_color_clears_handle() {
+        let mut svo = test_svo();
+        let pos = Vec3::new(1.0, 1.0, 1.0);
+        svo.insert_brick(pos, 1.0, BrickHandle::NONE, [10, 20, 30, 255]);
+        svo.remove_brick(pos, 1.0);
+
+        let (cell, depth) = svo.quantize_cell(pos, 1.0);
+        let mut idx = svo.root;
+        for level in (0..depth).rev() {
+            let node = svo.nodes[idx as usize];
+            let octant = Svo::octant_at(cell, level);
+            assert!(node.children != 0 && node.flags & (1 << octant) != 0);
+            idx = node.children + octant;
+        }
+        let leaf = svo.nodes[idx as usize];
+        assert_eq!(leaf.flags & (1 << 8), 0, "brick flag must be cleared");
+        assert_eq!(leaf.brick, u32::MAX, "handle must be detached");
+        assert_eq!(leaf.color & 0xFF, 10, "color must survive as LOD fallback");
     }
 
     /// Regression test for grid-shaped chasms: brick min corners sit exactly

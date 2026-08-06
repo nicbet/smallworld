@@ -158,4 +158,23 @@ mod tests {
     fn compose_of_nothing_is_empty() {
         assert!(compose(&[]).is_empty());
     }
+
+    /// Validates the composed raymarch module on a real device so WGSL
+    /// errors fail `cargo test` instead of surfacing at first app launch.
+    #[test]
+    fn raymarch_shader_validates() {
+        let instance = crate::gpu::GpuContext::create_instance();
+        let ctx = pollster::block_on(crate::gpu::GpuContext::headless(instance));
+        let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raymarch_validation"),
+                source: wgpu::ShaderSource::Wgsl(
+                    compose(&[Shader::Common, Shader::Raymarch]).into(),
+                ),
+            });
+        let err = pollster::block_on(scope.pop());
+        assert!(err.is_none(), "raymarch shader failed validation: {err:?}");
+    }
 }

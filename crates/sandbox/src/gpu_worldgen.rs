@@ -152,47 +152,25 @@ impl GpuWorldGenerator {
         Arc::clone(&self.cache)
     }
 
-    /// Generates all grid cells synchronously (blocks until done).
-    /// Generates full 16³ voxel data for cells within `radius` of `center`.
+    /// Generates full 16³ voxel data for the given grid cells synchronously.
     /// Results go into the GPU cache for the pager's workers to pull from.
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_near(
+    /// Callers pass exactly the cells they intend to stream (the coarse
+    /// pass's candidate set, optionally radius-filtered) — priming by
+    /// world-box scan would generate millions of invisible cells at 1 km.
+    pub fn generate_cells(
         &mut self,
-        center: glam::Vec3,
-        radius: f32,
-        dims: [u32; 3],
+        positions: &[[u32; 3]],
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
         let start = std::time::Instant::now();
-        let r2 = radius * radius;
-        let brick_size = BRICK_EDGE as f32 * VOXEL_SCALE;
-
-        let mut positions: Vec<[u32; 3]> = Vec::new();
-        for gz in 0..dims[2] {
-            for gy in 0..dims[1] {
-                for gx in 0..dims[0] {
-                    let cell_center = self.world_min
-                        + glam::Vec3::new(
-                            (gx as f32 + 0.5) * brick_size,
-                            (gy as f32 + 0.5) * brick_size,
-                            (gz as f32 + 0.5) * brick_size,
-                        );
-                    if cell_center.distance_squared(center) <= r2 {
-                        positions.push([gx, gy, gz]);
-                    }
-                }
-            }
-        }
-
-        let total = positions.len();
         for chunk in positions.chunks(BATCH_SIZE as usize) {
             self.dispatch_and_read(chunk, device, queue);
         }
-
         let elapsed = start.elapsed();
         log::info!(
-            "GPU near gen({radius:.0}m): {total} cells in {:.0} ms",
+            "GPU gen: {} cells in {:.0} ms",
+            positions.len(),
             elapsed.as_secs_f64() * 1000.0
         );
     }
@@ -307,5 +285,87 @@ impl GpuWorldGenerator {
             }
         }
         self.staging_buf.unmap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worldgen::WorldGenerator;
+    use smallworld_engine::gpu::GpuContext;
+
+    /// The GPU worldgen shader and the CPU generator must agree bit-exactly:
+    /// the pager mixes both sources in one run (GPU prime + CPU fallback),
+    /// so any divergence writes a self-inconsistent world.
+    ///
+    /// KNOWN FAILING (sw-c9d281): 7/12288 cells diverge, likely FMA
+    /// contraction in the GPU fbm. Ignored until the shader is bit-exact;
+    /// run with `cargo test gpu_matches_cpu -- --ignored`.
+    #[test]
+    #[ignore]
+    fn gpu_matches_cpu_worldgen() {
+        let instance = GpuContext::create_instance();
+        let ctx = pollster::block_on(GpuContext::headless(instance));
+        let dims = [32u32, 12, 32];
+        let brick = BRICK_EDGE as f32 * VOXEL_SCALE;
+        let half = glam::Vec3::new(dims[0] as f32, dims[1] as f32, dims[2] as f32) * brick * 0.5;
+        let world_min = -half;
+
+        let mut cells = Vec::new();
+        for z in 0..dims[2] {
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    cells.push([x, y, z]);
+                }
+            }
+        }
+
+        let mut gpu = GpuWorldGenerator::new(&ctx.device, 42, world_min);
+        gpu.generate_cells(&cells, &ctx.device, &ctx.queue);
+        let gpu_cache = gpu.cache();
+        let gpu_results = gpu_cache.lock().unwrap();
+
+        // CPU ground truth, threaded.
+        let n = cells.len();
+        let mut cpu_results: Vec<Option<[u8; 4096]>> = vec![None; n];
+        let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let per = n.div_ceil(threads);
+        std::thread::scope(|scope| {
+            for (i, chunk) in cpu_results.chunks_mut(per).enumerate() {
+                let cells = &cells;
+                scope.spawn(move || {
+                    let generator = WorldGenerator::new(42);
+                    for (j, out) in chunk.iter_mut().enumerate() {
+                        *out = generator
+                            .generate_brick(cells[i * per + j], world_min)
+                            .map(|g| g.voxels);
+                    }
+                });
+            }
+        });
+
+        let mut mismatches = 0u32;
+        let mut example = None;
+        for (idx, cell) in cells.iter().enumerate() {
+            let cpu_brick = &cpu_results[idx];
+            let gpu_brick = gpu_results.get(cell).and_then(|o| o.as_ref());
+            let same = match (cpu_brick, gpu_brick) {
+                (None, None) => true,
+                (Some(c), Some(g)) => c[..] == g.voxels[..],
+                _ => false,
+            };
+            if !same {
+                mismatches += 1;
+                if example.is_none() {
+                    example = Some((*cell, cpu_brick.is_some(), gpu_brick.is_some()));
+                }
+            }
+        }
+        assert_eq!(
+            mismatches,
+            0,
+            "GPU/CPU worldgen diverge on {mismatches}/{} cells; first (cell, cpu_solid, gpu_solid): {example:?}",
+            cells.len()
+        );
     }
 }

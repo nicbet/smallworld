@@ -2,6 +2,7 @@
 
 mod bench;
 mod cached_source;
+mod coarse_svo;
 mod gpu_cached_source;
 mod gpu_worldgen;
 mod model_gen;
@@ -171,7 +172,12 @@ impl RunState {
             * BRICK_EDGE as f32
             * VOXEL_SCALE;
         let world_size = max_edge;
-        self.svo = Svo::new(&self.gpu.device, 1_000_000, preset.world_min(), world_size);
+        self.svo = Svo::new(
+            &self.gpu.device,
+            preset.svo_capacity(),
+            preset.world_min(),
+            world_size,
+        );
         self.scene = Scene::new();
         self.pager = preset.setup(
             &self.gpu.device,
@@ -262,7 +268,12 @@ impl ApplicationHandler for App {
             * BRICK_EDGE as f32
             * VOXEL_SCALE;
         let world_size = max_edge;
-        let mut svo = Svo::new(&gpu.device, 1_000_000, preset.world_min(), world_size);
+        let mut svo = Svo::new(
+            &gpu.device,
+            preset.svo_capacity(),
+            preset.world_min(),
+            world_size,
+        );
         let mut scene = Scene::new();
         let pager = preset.setup(
             &gpu.device,
