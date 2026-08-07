@@ -12,8 +12,7 @@ struct Game {
 
 impl App for Game {
     fn update(&mut self, engine: &mut Engine, _world: &mut World, dt: f32) {
-        self.camera.update(engine.input(), dt);
-        self.camera.apply(engine);
+        self.camera.update(engine, dt);
     }
 }
 

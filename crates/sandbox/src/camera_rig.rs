@@ -2,7 +2,7 @@
 
 use smallworld_engine::camera::FreeCamera;
 use smallworld_engine::engine::Engine;
-use smallworld_engine::input::{Input, KeyCode, MouseButton};
+use smallworld_engine::input::{KeyCode, MouseButton};
 
 pub struct CameraRig {
     camera: FreeCamera,
@@ -15,7 +15,9 @@ impl CameraRig {
         Self { camera }
     }
 
-    pub fn update(&mut self, input: &Input, dt: f32) {
+    pub fn update(&mut self, engine: &mut Engine, dt: f32) {
+        let input = engine.input();
+
         let speed = FreeCamera::BASE_SPEED
             * if input.key_held(KeyCode::ShiftLeft) || input.key_held(KeyCode::ShiftRight) {
                 FreeCamera::SPRINT_MULTIPLIER
@@ -50,9 +52,7 @@ impl CameraRig {
             self.camera
                 .rotate(dx * FreeCamera::SENSITIVITY, -dy * FreeCamera::SENSITIVITY);
         }
-    }
 
-    pub fn apply(&self, engine: &mut Engine) {
         engine.set_camera(self.camera.position, self.camera.yaw, self.camera.pitch);
     }
 }
