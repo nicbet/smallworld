@@ -21,6 +21,7 @@ pub(crate) mod jobs;
 pub mod placeholder;
 pub mod raymarcher;
 pub mod shaders;
+pub mod stream;
 pub mod svo;
 pub mod volume;
 pub mod voxel_object;

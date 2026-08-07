@@ -19,6 +19,7 @@ use crate::gpu::GpuContext;
 use crate::input::Input;
 use crate::jobs::JobPool;
 use crate::placeholder::PlaceholderRenderer;
+use crate::stream::{PlaceholderExtractor, StreamStage};
 use crate::world::World;
 
 /// Window mode for engine initialization.
@@ -169,8 +170,8 @@ pub struct Engine {
     input: Input,
     view: ViewState,
     cull_stage: CullStage,
+    stream_stage: StreamStage,
     renderer: Option<PlaceholderRenderer>,
-    #[allow(dead_code)]
     jobs: JobPool,
 }
 
@@ -246,6 +247,7 @@ impl Engine {
             input: Input::default(),
             view: ViewState::default(),
             cull_stage: CullStage::new(),
+            stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
             renderer: Some(renderer),
             jobs,
         }
@@ -263,6 +265,7 @@ impl Engine {
             jobs: JobPool::auto(),
             view: ViewState::default(),
             cull_stage: CullStage::new(),
+            stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
             renderer: None,
         }
     }
@@ -315,7 +318,14 @@ impl Engine {
     /// engine loop — games never call this directly.
     fn render_frame(&mut self, world: &mut World) {
         let _changes = world.drain_changes();
-        let _visibility = self.cull_stage.cull(world, &self.view, None);
+        let visibility = self.cull_stage.cull(world, &self.view, None);
+        let _stream_output = self.stream_stage.stream(
+            world,
+            &visibility,
+            &self.jobs,
+            &self.gpu.device,
+            self.view.position,
+        );
 
         let Some(display) = self.display.as_mut() else {
             return;
