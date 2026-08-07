@@ -1,10 +1,11 @@
 //! Free-fly camera driven by engine input.
 
 use smallworld_engine::camera::FreeCamera;
+use smallworld_engine::engine::Engine;
 use smallworld_engine::input::{Input, KeyCode, MouseButton};
 
 pub struct CameraRig {
-    pub camera: FreeCamera,
+    camera: FreeCamera,
 }
 
 impl CameraRig {
@@ -49,5 +50,9 @@ impl CameraRig {
             self.camera
                 .rotate(dx * FreeCamera::SENSITIVITY, -dy * FreeCamera::SENSITIVITY);
         }
+    }
+
+    pub fn apply(&self, engine: &mut Engine) {
+        engine.set_camera(self.camera.position, self.camera.yaw, self.camera.pitch);
     }
 }

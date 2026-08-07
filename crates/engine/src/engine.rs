@@ -16,6 +16,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::gpu::GpuContext;
 use crate::input::Input;
+use crate::placeholder::PlaceholderRenderer;
 use crate::world::{World, WorldGpuData};
 
 /// Window mode for engine initialization.
@@ -68,30 +69,40 @@ struct DisplaySurface {
     config: wgpu::SurfaceConfiguration,
 }
 
-/// Thin wrapper around a surface texture for the current frame.
-///
-/// Keeps `wgpu::SurfaceTexture` out of game code's vocabulary.
-pub struct FrameContext {
-    surface_texture: wgpu::SurfaceTexture,
-    view: wgpu::TextureView,
+/// View parameters set by the game each frame.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewState {
+    /// Camera world-space position.
+    pub position: glam::Vec3,
+    /// Horizontal rotation in radians.
+    pub yaw: f32,
+    /// Vertical rotation in radians.
+    pub pitch: f32,
+    /// Vertical field of view in radians.
+    pub fov_y: f32,
 }
 
-impl FrameContext {
-    /// The texture view for render pass color attachment.
-    #[must_use]
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            position: glam::Vec3::new(0.0, 2.0, 5.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y: 60.0_f32.to_radians(),
+        }
     }
 }
 
-/// Top-level engine struct. Owns GPU context, display surface, and the
-/// cached World→GPU extraction result.
+/// Top-level engine struct. Owns GPU context, display surface, renderer,
+/// and the cached World→GPU extraction result.
 pub struct Engine {
     window: Option<Arc<Window>>,
     gpu: GpuContext,
     display: Option<DisplaySurface>,
     gpu_data: WorldGpuData,
     input: Input,
+    view: ViewState,
+    renderer: Option<PlaceholderRenderer>,
 }
 
 impl Engine {
@@ -131,6 +142,14 @@ impl Engine {
             surface.configure(&gpu.device, &surface_config);
         }
 
+        let inner = window.inner_size();
+        let renderer = PlaceholderRenderer::new(
+            &gpu.device,
+            surface_config.format,
+            inner.width.max(1),
+            inner.height.max(1),
+        );
+
         Self {
             window: Some(window),
             gpu,
@@ -140,6 +159,8 @@ impl Engine {
             }),
             gpu_data: WorldGpuData::empty(),
             input: Input::default(),
+            view: ViewState::default(),
+            renderer: Some(renderer),
         }
     }
 
@@ -153,6 +174,8 @@ impl Engine {
             display: None,
             gpu_data: WorldGpuData::empty(),
             input: Input::default(),
+            view: ViewState::default(),
+            renderer: None,
         }
     }
 
@@ -166,6 +189,9 @@ impl Engine {
         display.config.width = w;
         display.config.height = h;
         display.surface.configure(&self.gpu.device, &display.config);
+        if let Some(r) = &mut self.renderer {
+            r.resize(&self.gpu.device, w, h);
+        }
     }
 
     /// Changes the vsync mode and reconfigures the surface.
@@ -184,77 +210,79 @@ impl Engine {
         }
     }
 
-    /// Extracts world data if dirty and acquires the next surface frame.
-    ///
-    /// Returns `None` if the frame should be skipped (surface timeout,
-    /// occluded, or headless). The game renders between `begin_frame` and
-    /// [`present`](Self::present).
-    pub fn begin_frame(&mut self, world: &mut World) -> Option<FrameContext> {
+    /// Sets the viewpoint the engine renders from. Call each frame from
+    /// your update function after computing camera position.
+    pub fn set_camera(&mut self, position: glam::Vec3, yaw: f32, pitch: f32) {
+        self.view.position = position;
+        self.view.yaw = yaw;
+        self.view.pitch = pitch;
+    }
+
+    /// Sets the vertical field of view in radians.
+    pub fn set_fov(&mut self, fov_y: f32) {
+        self.view.fov_y = fov_y;
+    }
+
+    /// Extracts world data if dirty, renders, and presents. Called by the
+    /// engine loop — games never call this directly.
+    fn render_frame(&mut self, world: &mut World) {
         if world.is_dirty() {
             self.gpu_data = WorldGpuData::extract(&self.gpu.device, world);
             world.clear_dirty();
         }
 
-        let display = self.display.as_mut()?;
+        let Some(display) = self.display.as_mut() else {
+            return;
+        };
 
-        match display.surface.get_current_texture() {
+        let frame = match display.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => {
-                let view = tex
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                Some(FrameContext {
-                    surface_texture: tex,
-                    view,
-                })
-            }
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 display.surface.configure(&self.gpu.device, &display.config);
-                None
+                return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => None,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
             other => {
                 log::error!("surface error: {other:?}");
-                None
+                return;
             }
+        };
+
+        let surface_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        if let Some(renderer) = &self.renderer {
+            let (w, h) = (display.config.width, display.config.height);
+            let aspect = w as f32 / h.max(1) as f32;
+            let camera = crate::camera::FreeCamera {
+                position: self.view.position,
+                yaw: self.view.yaw,
+                pitch: self.view.pitch,
+                fov_y: self.view.fov_y,
+                aspect,
+                near: 0.1,
+                far: 1000.0,
+            };
+
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("frame"),
+                    });
+            renderer.render(&self.gpu.queue, &mut encoder, &surface_view, &camera);
+            self.gpu.queue.submit(std::iter::once(encoder.finish()));
         }
-    }
 
-    /// Presents a frame acquired from [`begin_frame`](Self::begin_frame).
-    pub fn present(&self, frame: FrameContext) {
-        self.gpu.queue.present(frame.surface_texture);
-    }
-
-    /// The cached World→GPU extraction result. Always valid — empty until
-    /// the first `begin_frame` with a non-empty world.
-    #[must_use]
-    pub fn gpu_data(&self) -> &WorldGpuData {
-        &self.gpu_data
+        self.gpu.queue.present(frame);
     }
 
     /// The current frame's input snapshot. Stable for the entire update call.
     #[must_use]
     pub fn input(&self) -> &Input {
         &self.input
-    }
-
-    /// The GPU context. Transitional — subsystems that take `&GpuContext`
-    /// use this until they move behind Engine.
-    #[must_use]
-    pub fn gpu(&self) -> &GpuContext {
-        &self.gpu
-    }
-
-    /// The logical device.
-    #[must_use]
-    pub fn device(&self) -> &wgpu::Device {
-        &self.gpu.device
-    }
-
-    /// The command submission queue.
-    #[must_use]
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.gpu.queue
     }
 
     /// The surface texture format, or `Rgba8Unorm` for headless.
@@ -321,16 +349,12 @@ impl Engine {
 
 /// Trait for game logic. Implement this on your game state struct.
 ///
-/// The engine calls [`update`](App::update) then [`render`](App::render)
-/// once per frame. Other lifecycle methods have default no-op implementations.
+/// The engine calls [`update`](App::update) once per frame, then renders
+/// automatically from the view set via [`Engine::set_camera`].
 pub trait App {
-    /// Called once per frame. Mutate the world, read input, advance game state.
+    /// Called once per frame. Read input, advance game state, call
+    /// [`Engine::set_camera`] to position the viewpoint.
     fn update(&mut self, engine: &mut Engine, world: &mut World, dt: f32);
-
-    /// Called once per frame with the surface texture view. Submit GPU work here.
-    /// Default: no-op (clears to black).
-    #[allow(unused_variables)]
-    fn render(&mut self, engine: &mut Engine, frame: &FrameContext) {}
 }
 
 struct AppRunnerState {
@@ -417,11 +441,7 @@ impl ApplicationHandler for AppRunner {
                 self.app.update(&mut state.engine, &mut state.world, dt);
 
                 state.engine.input.begin_frame();
-
-                if let Some(frame) = state.engine.begin_frame(&mut state.world) {
-                    self.app.render(&mut state.engine, &frame);
-                    state.engine.present(frame);
-                }
+                state.engine.render_frame(&mut state.world);
             }
             _ => {}
         }
