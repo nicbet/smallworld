@@ -25,6 +25,9 @@ glam = "0.33"
 # Serialisation
 bytemuck = { version = "1", features = ["derive"] }
 
+# Entity storage
+slotmap = "1"
+
 # Channels
 crossbeam-channel = "0.5"
 

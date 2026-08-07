@@ -17,3 +17,30 @@ Issue IDs in this project use the prefix `projects-` (e.g. `projects-a1b2c3`).
 
 Set the `assignee` field to yourself when transitioning an issue to DOING. Use the form
 `<Agent Name> <agent@<host>.local>` — e.g. `Claude Code <agent@macbook.local>`.
+
+## Entity Architecture
+
+The engine uses **SlotMap + side structs** for entity storage. ECS (hecs) is deferred until
+entity heterogeneity justifies it (game layer, material diversity). See sw-cf6350 for the full
+benchmark data behind this decision.
+
+**Current pattern:**
+- `SlotMap<EntityId, Instance>` for instanced voxel objects (stable handles, O(1) insert/remove)
+- GPU singletons (GpuContext, BrickPool, SVO, Raymarcher) as side structs
+- Camera as a standalone struct
+- BVH rebuilt from SlotMap iteration
+
+**When to introduce ECS:**
+ECS subset queries are 4-7× faster than scanning `Vec<Option>` — but only matter when entity
+types diverge (different component sets per entity). Current workloads (culling, LOD, streaming,
+GPU upload) are all dense iteration or spatial traversal where plain arrays win. Introduce hecs
+when we need queries like "all entities with X but not Y" at scale.
+
+**Performance rules (apply to both SlotMap fields and future ECS components):**
+1. **Runtime state → mutable field.** `LodLevel(u8)`, `Visible(bool)`, `StreamingState(enum)`
+   change per-frame. If ECS is adopted later, these must be fields inside components, NOT
+   modeled as component presence/absence. ECS archetype migration is 500-660× slower than
+   field mutation.
+2. **GPU handles → side struct.** `Device`, `Queue`, pipelines, buffer pools stay in `GpuContext`.
+3. **Batch spawns at load time.** Entity insert has overhead. Spawn during preload/streaming,
+   never in the render loop.

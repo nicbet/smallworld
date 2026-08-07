@@ -2,6 +2,8 @@
 
 use glam::Vec3;
 
+use crate::volume::AABB;
+
 /// A BVH node in flat array layout.
 ///
 /// Internal nodes: `count == 0`, children at indices `left_or_first` and
@@ -23,7 +25,7 @@ pub struct BvhNode {
 
 /// Builds a BVH from a list of AABBs. Returns the node array and a
 /// reordered index array mapping leaf entries back to original instances.
-pub fn build(aabbs: &[(Vec3, Vec3)]) -> (Vec<BvhNode>, Vec<u32>) {
+pub fn build(aabbs: &[AABB]) -> (Vec<BvhNode>, Vec<u32>) {
     let n = aabbs.len();
     if n == 0 {
         return (Vec::new(), Vec::new());
@@ -32,10 +34,11 @@ pub fn build(aabbs: &[(Vec3, Vec3)]) -> (Vec<BvhNode>, Vec<u32>) {
     let mut indices: Vec<u32> = (0..n as u32).collect();
     let mut nodes: Vec<BvhNode> = Vec::with_capacity(2 * n);
 
-    // Centroids for sorting
-    let centroids: Vec<Vec3> = aabbs.iter().map(|(lo, hi)| (*lo + *hi) * 0.5).collect();
+    let centroids: Vec<Vec3> = aabbs
+        .iter()
+        .map(|a| (a.min_vec3() + a.max_vec3()) * 0.5)
+        .collect();
 
-    // Root node
     let (root_min, root_max) = aabb_of_range(aabbs, &indices, 0, n);
     nodes.push(BvhNode {
         aabb_min: root_min.into(),
@@ -54,7 +57,7 @@ const MAX_LEAF_SIZE: usize = 4;
 fn subdivide(
     nodes: &mut Vec<BvhNode>,
     indices: &mut [u32],
-    aabbs: &[(Vec3, Vec3)],
+    aabbs: &[AABB],
     centroids: &[Vec3],
     node_idx: usize,
 ) {
@@ -65,7 +68,6 @@ fn subdivide(
         return;
     }
 
-    // Find split axis: longest extent of centroid bounds
     let mut c_min = Vec3::splat(f32::MAX);
     let mut c_max = Vec3::splat(f32::MIN);
     for i in first..first + count {
@@ -84,7 +86,6 @@ fn subdivide(
 
     let mid = (c_min[axis] + c_max[axis]) * 0.5;
 
-    // Partition indices around midpoint
     let mut i = first;
     let mut j = first + count - 1;
     while i <= j {
@@ -101,7 +102,6 @@ fn subdivide(
 
     let left_count = i - first;
     if left_count == 0 || left_count == count {
-        // Degenerate split — force half/half
         let half = count / 2;
         let left_count = half;
         let right_count = count - half;
@@ -157,18 +157,13 @@ fn subdivide(
     subdivide(nodes, indices, aabbs, centroids, left_idx + 1);
 }
 
-fn aabb_of_range(
-    aabbs: &[(Vec3, Vec3)],
-    indices: &[u32],
-    start: usize,
-    count: usize,
-) -> (Vec3, Vec3) {
+fn aabb_of_range(aabbs: &[AABB], indices: &[u32], start: usize, count: usize) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
     for i in start..start + count {
-        let (a, b) = aabbs[indices[i] as usize];
-        lo = lo.min(a);
-        hi = hi.max(b);
+        let a = &aabbs[indices[i] as usize];
+        lo = lo.min(a.min_vec3());
+        hi = hi.max(a.max_vec3());
     }
     (lo, hi)
 }
@@ -186,7 +181,7 @@ mod tests {
 
     #[test]
     fn single_instance() {
-        let aabbs = vec![(Vec3::ZERO, Vec3::ONE)];
+        let aabbs = vec![AABB::new(Vec3::ZERO, Vec3::ONE)];
         let (nodes, indices) = build(&aabbs);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].count, 1);
@@ -195,16 +190,15 @@ mod tests {
 
     #[test]
     fn many_instances_produces_tree() {
-        let aabbs: Vec<(Vec3, Vec3)> = (0..20)
+        let aabbs: Vec<AABB> = (0..20)
             .map(|i| {
                 let x = i as f32;
-                (Vec3::new(x, 0.0, 0.0), Vec3::new(x + 1.0, 1.0, 1.0))
+                AABB::new(Vec3::new(x, 0.0, 0.0), Vec3::new(x + 1.0, 1.0, 1.0))
             })
             .collect();
         let (nodes, indices) = build(&aabbs);
         assert!(nodes.len() > 1);
         assert_eq!(indices.len(), 20);
-        // All original indices present
         let mut sorted = indices.clone();
         sorted.sort();
         assert_eq!(sorted, (0..20).collect::<Vec<u32>>());
@@ -213,8 +207,8 @@ mod tests {
     #[test]
     fn root_aabb_encloses_all() {
         let aabbs = vec![
-            (Vec3::new(-5.0, -5.0, -5.0), Vec3::new(-4.0, -4.0, -4.0)),
-            (Vec3::new(4.0, 4.0, 4.0), Vec3::new(5.0, 5.0, 5.0)),
+            AABB::new(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(-4.0, -4.0, -4.0)),
+            AABB::new(Vec3::new(4.0, 4.0, 4.0), Vec3::new(5.0, 5.0, 5.0)),
         ];
         let (nodes, _) = build(&aabbs);
         let root = &nodes[0];

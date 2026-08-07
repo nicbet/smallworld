@@ -3,9 +3,9 @@
 use crate::brick_pool::BrickPool;
 use crate::camera::FreeCamera;
 use crate::gpu::GpuContext;
-use crate::scene::Scene;
 use crate::shaders::{self, Shader};
 use crate::svo::Svo;
+use crate::world::WorldGpuData;
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -93,7 +93,7 @@ impl Raymarcher {
         surface_format: wgpu::TextureFormat,
         pool: &BrickPool,
         svo: &Svo,
-        scene: &Scene,
+        world_data: &WorldGpuData,
     ) -> Self {
         let compute_source = shaders::compose(&[Shader::Common, Shader::Raymarch]);
         let compute_module = gpu
@@ -287,9 +287,9 @@ impl Raymarcher {
 
         // --- Render targets + bind groups ---
         let targets = create_render_targets(&gpu.device, width, height);
-        let instance_buf = scene.instance_buffer().unwrap_or(&dummy_buf);
-        let grid_buf = scene.grid_buffer().unwrap_or(&dummy_buf);
-        let bvh_buf = scene.bvh_buffer().unwrap_or(&dummy_buf);
+        let instance_buf = world_data.instance_buffer().unwrap_or(&dummy_buf);
+        let grid_buf = world_data.grid_buffer().unwrap_or(&dummy_buf);
+        let bvh_buf = world_data.bvh_buffer().unwrap_or(&dummy_buf);
         let (primary_bg, shadow_bg, shade_bg) = create_pass_bind_groups(
             &gpu.device,
             [&primary_bgl, &shadow_bgl, &shade_bgl],
@@ -350,7 +350,7 @@ impl Raymarcher {
         height: u32,
         pool: &BrickPool,
         svo: &Svo,
-        scene: &Scene,
+        world_data: &WorldGpuData,
     ) {
         if width == self.width && height == self.height {
             return;
@@ -360,9 +360,9 @@ impl Raymarcher {
 
         self.targets = create_render_targets(&gpu.device, width, height);
 
-        let instance_buf = scene.instance_buffer().unwrap_or(&self.dummy_buf);
-        let grid_buf = scene.grid_buffer().unwrap_or(&self.dummy_buf);
-        let bvh_buf = scene.bvh_buffer().unwrap_or(&self.dummy_buf);
+        let instance_buf = world_data.instance_buffer().unwrap_or(&self.dummy_buf);
+        let grid_buf = world_data.grid_buffer().unwrap_or(&self.dummy_buf);
+        let bvh_buf = world_data.bvh_buffer().unwrap_or(&self.dummy_buf);
         let (primary_bg, shadow_bg, shade_bg) = create_pass_bind_groups(
             &gpu.device,
             [&self.primary_bgl, &self.shadow_bgl, &self.shade_bgl],
@@ -408,7 +408,7 @@ impl Raymarcher {
         surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
         svo: &Svo,
-        scene: &Scene,
+        world_data: &WorldGpuData,
         flags: u32,
         sse_threshold: f32,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
@@ -419,7 +419,7 @@ impl Raymarcher {
             encoder,
             camera,
             svo,
-            scene,
+            world_data,
             flags,
             sse_threshold,
             compute_timestamps,
@@ -435,7 +435,7 @@ impl Raymarcher {
         encoder: &mut wgpu::CommandEncoder,
         camera: &FreeCamera,
         svo: &Svo,
-        scene: &Scene,
+        world_data: &WorldGpuData,
         flags: u32,
         sse_threshold: f32,
         compute_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
@@ -453,7 +453,7 @@ impl Raymarcher {
             terrain_top_y: self.terrain_top_y,
             _pad1: [0.0; 2],
             flags,
-            instance_count: scene.instance_count(),
+            instance_count: world_data.instance_count(),
             focal_length: self.height as f32 / (2.0 * (camera.fov_y * 0.5).tan()),
             sse_threshold,
             svo_root: svo.root(),
@@ -623,14 +623,34 @@ fn create_target(
 }
 
 fn create_render_targets(device: &wgpu::Device, width: u32, height: u32) -> RenderTargets {
-    let (output_texture, output_view) =
-        create_target(device, "raymarch_output", width, height, wgpu::TextureFormat::Rgba8Unorm);
-    let (gbuf_pos_tex, gbuf_pos_view) =
-        create_target(device, "gbuf_pos", width, height, wgpu::TextureFormat::Rgba32Float);
-    let (gbuf_albedo_tex, gbuf_albedo_view) =
-        create_target(device, "gbuf_albedo", width, height, wgpu::TextureFormat::Rgba8Unorm);
-    let (gbuf_norm_tex, gbuf_norm_view) =
-        create_target(device, "gbuf_norm", width, height, wgpu::TextureFormat::Rgba8Snorm);
+    let (output_texture, output_view) = create_target(
+        device,
+        "raymarch_output",
+        width,
+        height,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let (gbuf_pos_tex, gbuf_pos_view) = create_target(
+        device,
+        "gbuf_pos",
+        width,
+        height,
+        wgpu::TextureFormat::Rgba32Float,
+    );
+    let (gbuf_albedo_tex, gbuf_albedo_view) = create_target(
+        device,
+        "gbuf_albedo",
+        width,
+        height,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let (gbuf_norm_tex, gbuf_norm_view) = create_target(
+        device,
+        "gbuf_norm",
+        width,
+        height,
+        wgpu::TextureFormat::Rgba8Snorm,
+    );
     let (shadow_tex, shadow_view) = create_target(
         device,
         "shadow_half",
@@ -652,7 +672,6 @@ fn create_render_targets(device: &wgpu::Device, width: u32, height: u32) -> Rend
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn create_pass_bind_groups(
     device: &wgpu::Device,

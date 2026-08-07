@@ -9,13 +9,16 @@ pub mod brick_pool;
 pub mod brick_source;
 pub mod bvh;
 pub mod camera;
+pub mod engine;
 pub mod gpu;
 pub mod gpu_timing;
+pub mod input;
 pub mod raymarcher;
-pub mod scene;
 pub mod shaders;
 pub mod svo;
+pub mod volume;
 pub mod voxel_object;
+pub mod world;
 
 /// Re-export wgpu so the viewer (and future crates) share one version.
 pub use wgpu;

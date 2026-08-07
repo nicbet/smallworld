@@ -1,5 +1,5 @@
 [package]
-name = "smallworld-sandbox"
+name = "smallworld-sandbox-old"
 description = "Dev/test harness for the smallworld engine."
 version.workspace = true
 edition.workspace = true
@@ -8,15 +8,21 @@ authors.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "smallworld"
+name = "smallworld-old"
 path = "src/main.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
 env_logger.workspace = true
 glam.workspace = true
 log.workspace = true
+pollster.workspace = true
 smallworld-engine.workspace = true
 winit.workspace = true
+zstd.workspace = true

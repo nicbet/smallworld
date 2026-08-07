@@ -1,251 +1,464 @@
 # smallworld — Technical Design
 
-**Status:** Draft for review · **Issue:** sw-3a604e · **Date:** 2026-08-05
+A voxel engine built in Rust + WGPU. The architecture is organized around an
+**out-of-core (OOC) rendering pipeline** that runs every frame. Disk is the
+source of truth; RAM and VRAM are caches. The engine streams, culls, and renders
+only what the camera can see.
 
-A micro-voxel engine adopting the load-bearing ideas from Nanite and Lumen — the error
-metric, the watertight LOD hierarchy, GPU-driven culling, and hybrid screen/world-space
-GI — re-expressed on voxel-native data structures, where several of those ideas become
-simpler or free. Target: the technical foundation for a hi-definition-Minecraft-meets-WoW
-game (destructible world, digging, mining, later NPCs/quests/inventory).
+## Per-Frame Pipeline
 
-This document is the canonical definition of terms used across the xpo board (brick pool,
-op log, TLAS, anchors, hot/cold). `notes.md` is background: measured analysis of a prior
-Godot meshing experiment whose conclusions this design inherits.
+Every frame executes four stages in order. Each stage has well-defined inputs and
+outputs, and each is served by one or more engine subsystems.
 
----
+```
+Resolve ──▸ Cull ──▸ Stream ──▸ Execute
+  │                                │
+  └──── depth buffer feedback ◂────┘
+```
 
-## 1. Decisions
+**Stage 1 — Resolve.** Populate the world skeleton with volume data. Thread pool
+workers generate voxels from seed (GPU or CPU worldgen) or load from disk cache.
+Fill `VoxelVolume` implementations and register AABBs into the shared buffer.
 
-| # | Decision | Choice | Rationale | Revisit if |
-|---|----------|--------|-----------|------------|
-| D1 | Engine base | **Custom** (no Godot/Unity/Unreal) | The renderer is ~90% of the engine's value and precisely the part existing engines don't cede: the prior Godot experiment concluded the software-rasterizer/indirect-draw class of techniques "need the render loop we don't own." Nanite itself is a baked triangle pipeline — weakest exactly at our core requirement (real-time volumetric editing). | Goal shifts from building tech to shipping a game fast. |
-| D2 | Language / graphics | **Rust + wgpu** (user decision) | One codebase → native Metal on macOS, Vulkan on Windows/Linux; no MoltenVK. Native extensions cover push constants and 64-bit atomic min/max. Memory safety in the multithreaded streaming core. rapier physics in-ecosystem. | wgpu blocks a required feature (see Risks). |
-| D3 | Base voxel scale | **10 cm** (user decision) | Teardown-class, proven; cheapest memory/streaming; fastest path to playable. Per-instance voxel scale (D5) is the upgrade path to finer props without changing terrain cost. | World reads as too chunky after M2; then finer per-instance scale first, smaller base voxels last. |
-| D4 | Storage | **Brick pool primary, SVDAG as background compression** | Mutable 16³ bricks are editable in O(edit volume); DAG compaction (70–90% reduction) applies only to cold regions and un-merges on edit. Avoids SVDAG's known edit problem (notes.md) without giving up its compression. | — |
-| D5 | Scene model | **Terrain volume + voxel object instances (two-level TLAS/BLAS)** | Makes destruction per-object (bounded connectivity checks), lets debris render through the same raymarcher under a transform, and gives per-instance voxel scale. | — |
-| D6 | Rendering | **GPU raymarching, no meshes** | Crack-free LOD by construction; "never do sub-pixel work" becomes a traversal-termination rule instead of a mesh-swap policy. Eliminates the two measured failure modes of the meshing experiment (LOD cracks, sub-pixel quads). | — |
-| D7 | Persistence | **Procedural base + compressed DAG + per-region op log** | Player edits stored as operations; saves proportional to what changed; lazy full-res replay enables cheap distant edits. | — |
-| D8 | Terrain collapse | **Terrain exempt from structural integrity** (Minecraft rule) | Keeps connectivity per-object and bounded. Cave-ins are a deferred game-design knob, not an engine gap. | Game design wants mining hazards. |
-| D9 | Water | **Fluid-as-material now, sim state later** (review round 1) | Still water is an ordinary voxel material — generated, DAG-compressed, persisted through existing paths, reserved in the M1 data model at near-zero cost. Flowing water promotes bricks into an active-sim set with an auxiliary level/flow channel; simulation is a dedicated late epic. | — |
-| D10 | Atmosphere | **Participating media on the primary march** (review round 1) | Fog and god rays are accumulation along the ray march we already perform — no froxel volumes, no separate system. Global weather state (wind, fog, precipitation, time-of-day) plumbed as uniforms from M0. | — |
+**Stage 2 — Cull.** GPU compute passes determine what's visible. Frustum culling
+tests AABBs against camera planes. The Hierarchical Z-Buffer (HzB) — a mip-chain
+depth pyramid built from the previous frame's depth output — drives occlusion
+culling. SSE evaluation classifies each surviving cell's LOD requirement. Output:
+a visibility set and prioritized stream/eviction lists.
 
-Commodity dependencies: `winit` (window/input), `egui` (debug UI), `rapier3d` (dynamic
-bodies), WGSL shaders. Audio (`kira`) and ECS (possibly `bevy_ecs`) deferred to the game
-layer. Non-goals for v1: networking, any mesh pipeline, mm-scale voxels.
+**Stage 3 — Stream.** Async transfer of resolved data to GPU memory. A ring
+buffer allocator stages CPU-side data; copy queues (Metal blit encoder or Vulkan
+async transfer queue) move it to VRAM. Fences gate segment recycling. A budget
+controller enforces hard VRAM/RAM limits with LRU eviction.
 
----
+**Stage 4 — Execute.** Render what's resident. Two execution paths — raytracing
+and rasterization — can run independently or compose via a compositor for hybrid
+output (e.g., rasterized near terrain + raytraced GI/shadows). Depth buffer
+output feeds back to Stage 2 for next frame's HzB, closing the pipeline loop.
 
-## 2. World model
+## Core Abstractions
 
-Two kinds of things exist:
+### VoxelVolume
 
-- **Terrain** — one large, identity-transform volume. Editable, exempt from collapse.
-- **Voxel object instances** — tree, tower, boulder, debris chunk, ore drop. Each owns a
-  local brick tree, a rigid transform, and a **per-instance voxel scale** (a 10 cm world
-  can hold a 2.5 cm-voxel chair). Objects have **anchors** (§7) and participate in
-  structural integrity.
+Trait representing any spatial voxel data structure. Exposes enough structure for
+shader-level traversal optimization — not fully opaque.
 
-A small BVH (**TLAS**) over instance AABBs is refit per frame. Rays traverse: TLAS →
-transform into object space → the same brick DDA used for terrain. One traversal code
-path renders everything, including falling debris.
+```
+volume_type() → VolumeKind    // enum: SVO, FlatGrid, ChunkedDDA
+traversal_bindings()          // type-specific GPU bind groups
+bounds() → Aabb               // world-space bounding box
+lod_hint() → LodMeta          // LOD metadata for SSE decisions
+```
 
-## 3. Data structures
+Shaders dispatch optimized traversal kernels per `VolumeKind`. The renderer never
+needs to know which volume type it's drawing — the trait absorbs the difference.
 
-**Brick** = 16³ voxels = 1.6 m cube at base scale. Voxel = 8-bit index into a per-brick
-material palette (bricks rarely exceed a handful of materials); 4 KB payload + palette.
-Bricks live in a pooled GPU allocator with stable handles and free-list recycling.
+**Implementations:**
 
-**Top-level index** — maps space → brick handles. At 10 cm, a 4 km world is only
-~2.5k bricks per axis, so a shallow structure (paged grid or 2–3-level tree) suffices;
-no deep octree at the top level.
+- **SvoVolume** — Sparse Voxel Octree backed by a `BrickPool`. Cursor-based
+  front-to-back traversal with occupancy masks. Interior nodes store averaged
+  color for coarse LOD. Best for large-scale terrain and distance rendering.
 
-**Mip chain** — per-region downsampled occupancy + averaged material/color. Serves three
-masters: SSE-terminated rendering (§4), cone-traced GI (§8), and coarse collision. Built at
-generation, re-filtered upward on edit.
+- **ChunkedVolume** — 32³ brick chunks in a spatial grid with BVH macro-level
+  skip and DDA micro-traversal within each brick. The workhorse for near-field
+  destructible terrain.
 
-**Hot/cold:** the SVDAG is a *compression cache for immutable data*, not a separate world
-format. Background compaction deduplicates quiet regions; any edit un-merges just the
-affected root-to-leaf paths (O(depth) new nodes — Careil & Billeter 2020) back into pool
-bricks, which stay resident until quiet again. Editability is governed by *heat*, never
-by distance.
+- **FlatGrid** — Uniform 3D array with simple DDA traversal. For small instanced
+  props (trees, rocks, pebbles) and as a benchmark baseline.
 
-Bricks may carry optional **auxiliary channels**, allocated only where needed — the first
-user is the fluid level/flow channel of the water active-sim set (§10).
+### AABB Buffer
 
-## 4. Rendering
+Dedicated GPU storage buffer for per-chunk and per-meshlet bounding boxes,
+separate from volume data. Packed layout optimized for culling compute passes.
+Any `VoxelVolume` registers its AABBs here.
 
-Fullscreen compute pass. Hierarchical DDA: coarse steps through empty space via the
-index/mips, fine DDA inside bricks. Raymarching is inherently occlusion-culled — rays
-stop at first hit — so Nanite's two-pass occlusion pipeline has no analog to build;
-empty-space skipping is the perf primitive instead. The traversal loop is shaped so a
-hit can continue as a transmission segment (water, §10) and so per-step accumulation
-(fog, god rays) hangs off the same march — implemented later, structured from the start.
+### Depth Buffer
 
-**LOD = traversal termination.** Stop descending when a node's projected footprint is
-below ~1–2 px and shade from the mip. At 1080p (~935 px focal), a 10 cm voxel subtends
-1 px at ~90 m: full resolution is only ever traversed in a ~100 m bubble, mip *n* covering
-roughly twice the distance band of mip *n−1*, horizon at mip 5–6. No seams exist because
-no meshes exist.
+High-performance depth representation decoupled from render targets. The
+execution stage writes it; the culling stage reads the previous frame's version
+for HzB pyramid construction. This separation lets culling run ahead of shading.
 
-Shading v1: face normals from DDA hit axis (crisp voxel look), one sun shadow ray through
-the same traversal. GPU timestamp queries around every pass from day one — every lesson
-in notes.md came from a measurement.
+### Renderer
 
-## 5. Editing
+Trait abstracting over execution paths:
 
-CSG brushes (sphere/box subtract & place, material-aware) through copy-on-write bricks.
-Cost bounded by edit volume: a 5 m blast touches a few hundred bricks (~1–2 MB), whether
-it lands next to the player or 400 m away. Removed-voxel data is capturable by the caller —
-this single hook feeds debris, ore drops, and island extraction.
+```
+prepare()          // per-frame setup
+encode()           // record GPU commands
+resize()           // handle window resize
+output_texture()   // final color output
+```
 
-After leaf edits, the parent mip chain re-filters upward (background thread) so coarse
-LOD views show the hole — without this, distant edits exist in data but not on screen.
-Collision proxies for dirty bricks rebuild on the same thread.
+Two implementations: `Raymarcher` (compute shader, existing) and `Rasterizer`
+(vertex/fragment pipeline with GPU-driven indirect draws from meshlet SSE
+output).
 
-**Distant edits are nearly free:** apply the op to resident coarse mips immediately
-(instant visual feedback at the rendered LOD), append it to the region's op log, and
-replay at full resolution only when the player approaches.
+### MeshExtractor
 
-## 6. Streaming & memory
+Trait abstracting over mesh extraction algorithms:
 
-Demand is driven by camera position + SSE: the streamer pages bricks (generate or load)
-so that every visible region is resident *at the mip the SSE requires* — coarse mips for
-the whole world stay resident (small); full-res bricks only near the player. Hard VRAM
-budget (initial target ≤ 2 GB for world data ≈ 500 k bricks) with LRU eviction. Async,
-multithreaded, hitch-free flight is the acceptance bar. This is the highest-risk
-subsystem (sw-943a75).
+```
+extract(volume, lod) → MeshData    // vertex + index + normal buffers
+```
 
-## 7. Destruction & physics
+Implementations: Marching Cubes (baseline isosurface), Dual Contouring (sharp
+edge preservation from Hermite data stored in extended brick format).
 
-Pipeline, all edit-driven, no per-case scripting:
+### BvhAccel\<T: Bounded\>
 
-1. **Connectivity summaries** — per brick: which faces connect through its interior.
-   Structural questions run on the brick adjacency graph (thousands of nodes), descending
-   to voxel level only inside bricks the cut touched. Recomputed only for dirty bricks.
-2. **Island detection** — async (1–3 frames; 30–50 ms is imperceptible): flood from both
-   sides of the cut; the side that cannot reach the object's anchor is detached.
-3. **Extraction** — detached voxels become a new object instance (own grid + origin),
-   subtracted from the source via the standard edit op. Mass, COM, inertia are exact sums
-   over occupancy × material density.
-4. **Simulation** — rapier rigid bodies. Colliders: rapier voxel colliders if current,
-   else greedy-merged box compounds from coarse mips. No scripted topple: contact between
-   the falling tree top and the stump produces the tip-and-slide.
-5. **Settling** — sleeping instances, never re-voxelized (rotated grids resample lossily);
-   small debris coarsens/despawns.
+Generic bounding volume hierarchy. Reusable by `ChunkedVolume` macro structure,
+the instance system, and meshlet culling.
 
-**Anchors** — object base bricks contacting solid terrain. Terrain edits that dirty bricks
-intersecting an anchor region queue a re-anchor check: tunneling under the castle wall
-collapses it through this same pipeline. Undermining is emergent, not scripted.
+## World Skeleton
 
-## 8. Lighting
+Lightweight spatial hierarchy storing only AABBs, residency state, and LOD
+metadata. Fits in RAM for arbitrarily large worlds. This is the OOC pipeline's
+source of truth for what exists. Per-cell states:
 
-Lumen's architecture, cheaper on voxels — its SDF volumes and surface cache exist to
-*approximate a triangle scene as a volume*; our scene already is one, with material/color
-in the mips:
+```
+Unknown → Loading → Resident → MipOnly → (evictable)
+                                          Air (pruned)
+```
 
-1. Screen-space ray trace first (detail, visible geometry).
-2. World-space fallback: cone tracing through the brick mip chain (AO + sky occlusion
-   first; then one-bounce diffuse GI with temporal accumulation).
-3. Emissive as a material property (ore glow, lava, torches), HDR + filmic tonemap +
-   auto-exposure for cave↔surface.
+Built at startup via coarse SVO construction: multi-threaded height sampling,
+min/max mip pyramid, classification into air / buried-solid / surface-crossing.
 
-Because GI traces live data, dug tunnels go dark and opened walls let light in with zero
-light-propagation code — Minecraft's flood-fill lighting subsystem simply doesn't exist here.
+## Culling Pipeline
 
-## 9. World generation
+All culling runs as GPU compute, reading the AABB buffer.
 
-A deterministic 3D density + material function (not a heightmap): surface heightfield
-blended with stone strata, cave carving, and vein-shaped ore noise with depth-dependent
-distribution. A water table places oceans, ponds, and slow rivers as still-water material
-(§10) so water exists from the first generated world. Generates bricks on demand from
-seed; underground must contain things worth digging for. Ore mining = material-filtered subtract; the removed voxels *become* the
-collectible chunk body (the item you pick up is literally what you mined; its voxel data
-doubles as the item model/icon).
+1. **Frustum culling** — 6-plane AABB test, outputs visibility bitfield.
+2. **HzB construction** — mip-chain depth pyramid from previous frame's depth.
+   Power-of-two downsample, each level stores max depth of 2×2 parent region.
+3. **Occlusion culling** — project surviving AABBs to screen-space, sample
+   coarsest HzB mip that covers the projection. Conservative: never culls
+   visible geometry.
+4. **SSE evaluation** — `voxel_scale × focal_length / distance` per cell.
+   Unified visibility + LOD decision in one dispatch. Replaces CPU-side
+   `BrickPager::classify_demand`.
+5. **Visibility readback** — GPU → CPU. Diff visible set against resident set
+   to emit stream requests and eviction candidates.
 
-## 10. Water & atmosphere
+## Streaming Architecture
 
-**Water — representation early, simulation late (D9).** Still water (oceans, ponds,
-lakes, slow rivers) is an ordinary voxel material: the generator's water table places it,
-the DAG compresses it, the op log persists edits to it. Rendering adds one **transmission
-segment** to the raymarcher: refract at the surface, continue the march, tint by traversed
-depth (Beer–Lambert), Fresnel-blend reflections from the lighting stack (screen-space
-first, cone-traced fallback). Flowing water (waterfalls, currents, basin filling) promotes
-affected bricks into an **active-sim set** carrying an auxiliary level/flow channel — the
-hot/cold pattern again: extra state only where water moves, GPU cellular update, demotion
-back to plain material on settling. Digging a channel to a pond promotes the boundary
-bricks and the channel fills. This is notes.md's "GPU fluid dynamics via cellular
-occupancy".
+### Thread Pool
 
-**Atmosphere — mostly free by construction (D10).** Volumetric fog and god rays are
-accumulation along the primary march we already perform: sample fog density and sun
-visibility (through coarse mips) while walking the ray. Heterogeneous, voxel-shadowed
-light shafts fall out of the renderer's shape — no froxel volumes, no post-process shaft
-hack. Clouds are a raymarched layer whose coverage feeds the GI sky term; rain is
-particles + material wetness + puddles (shallow still water in depressions); wind is a
-global field consumed by particles, wave normals, and per-instance vegetation sway (the
-TLAS already refits per frame). Global weather state (wind, fog, precipitation,
-time-of-day) is plumbed as engine uniforms from M0.
+Split into dedicated pools sized independently:
+- **I/O pool** (2–3 threads): disk reads + zstd decompression
+- **Compute pool** (4–6 threads): worldgen + meshing
 
-## 11. What we take from Nanite / Lumen
+### Ring Buffer
 
-| Their idea | Their mechanism | Ours |
-|---|---|---|
-| Constant cost vs density | DAG of 128-tri clusters + SSE selection | SSE-terminated tree traversal; parents are filtered children |
-| Watertight LOD seams | Locked cluster boundaries | Free — no meshes, no seams |
-| Never shade sub-pixel | Software rasterizer fallback | Never *traverse* sub-pixel; shade from mips |
-| Occlusion culling | Two-pass HZB reprojection | Inherent — rays stop at first hit |
-| GI acceleration | SDF proxy + surface cache | The voxel mip chain *is* both |
-| Screen-space first | SSRT → SDF fallback | Same, cone-traced mips as fallback |
+Fixed-size cyclic upload heap replacing per-brick `write_buffer` calls. Workers
+lock a segment, write data, release. Wraparound when the end is reached.
 
-## 12. Milestones (= epics on the board)
+### Copy Queues
 
-| M | Epic | Exit criterion |
-|---|------|----------------|
-| M0 | sw-4df655 Foundation & Toolchain | Dense 256³ brick raymarched on Metal + Vulkan, GPU timers on screen |
-| M1 | sw-aa609f Sparse World & Core Raymarcher | Free-fly a generated sparse world with sun shadows, zero meshes |
-| M2 | sw-b254c8 Scene Structure (objects + TLAS) | Hundreds of instances via the same traversal, movable at runtime |
-| M3 | sw-d6d2c2 Streaming & LOD | km-scale world, hitch-free, fixed budget, no sub-pixel traversal |
-| M4 | sw-d9e5c0 Editing & Persistence | Dig a tunnel at 60 fps; reload; it persists |
-| M5 | sw-b815a0 Destruction & Physics | Tree top falls when chopped; wall debris; undermining collapses |
-| M6 | sw-c13774 Lighting & GI | Tunnels go dark naturally; GI responds to edits |
-| M7 | sw-b146f7 Materials, Digging & Ore | Mine a vein, chunk drops, pick it up, survives reload |
-| M8 | sw-0656de Water | Swim in a pond with refraction/reflections; waterfall flows; a dug channel fills |
-| M9 | sw-7dd08f Atmosphere & Weather | Foggy dawn with god rays; rain wets surfaces and puddles; clouds darken GI |
+**Metal path:** Cyclic `MTLBuffer` sized for N frames in flight (typically 3).
+`MTLBlitCommandEncoder` for `copyFromBuffer` staging → VRAM transfers.
+`dispatch_semaphore` / frame-in-flight counter prevents CPU overwriting segments
+the GPU is still reading.
 
-M3↔M4 order is soft: editing (M4) can begin against the un-compacted brick world once
-M3's mip chain exists; only DAG un-merge depends on compaction. M8/M9 are parallel tracks
-once M6's lighting stack exists, and the fog/god-ray stories share M6's machinery and can
-land alongside it. Water's *representation* is deliberately not deferred: it is reserved
-in M1 (bricks sw-3afd48, traversal sw-30aa3c, generator sw-00ae86) per D9.
+**Vulkan path:** Dedicated async transfer queue where available. Fence insertion
+after copy submission; poll on subsequent frame; recycle staging segments only
+after GPU confirms transfer complete.
 
-## 13. Risks & deferred knobs
+### Budget Controller
 
-**Risks**
-- **Streaming (sw-943a75)** — the hardest single story; everything at km scale depends on it.
-- **wgpu portability** — timestamp queries, subgroup ops, and 64-bit atomics differ per
-  backend; validate on Metal early (M0 exists partly for this).
-- **rapier voxel colliders** — verify current status at implementation (sw-d6b1da); box
-  compounds are the fallback.
-- **GI temporal stability** — accumulation vs. edit responsiveness is a known tension (sw-d3ae86).
-- **Transmission cost** — the underwater continuation lengthens the march in water-heavy
-  views (sw-cf89be); needs a step budget and cap.
-- **TLAS scale** — hundreds of instances is designed-for; tens of thousands (forests) may
-  need instance LOD/impostors later.
+Hard VRAM and RAM limits enforced before allocation. Eviction policy: LRU
+weighted by SSE and visibility age. Panic eviction path for sudden camera
+teleports requiring fast memory reclamation.
 
-**Deferred, deliberately**
-- Terrain cave-ins (D8) — coarse brick-level support rule when game design wants it.
-- Sub-10 cm props via per-instance scale — supported by D5, exercised when art needs it.
-- Game layer (ECS, inventory UI, NPCs, quests) — separate design doc when M7 nears.
-- Heat/temperature simulation (indoor warmth retention — notes.md pointer) — post-M9.
+### Priority Scheduling
 
-## 14. References
+Load requests ordered by (visible × SSE). Cancellation tokens for loads that
+become irrelevant when the camera moves. Integrates with culling stage visibility
+output.
 
-- `notes.md` — measured conclusions from the prior Godot meshing experiment.
-- Karis et al., *Nanite — A Deep Dive*, SIGGRAPH 2021.
-- Wright et al., *Lumen: Real-time Global Illumination*, SIGGRAPH 2022.
-- Careil, Billeter, Eisemann, *Interactively Modifying Compressed Sparse Voxel
-  Representations*, Eurographics 2020 — real-time SVDAG editing.
-- Kämpe, Sintorn, Assarsson, *High Resolution Sparse Voxel DAGs*, SIGGRAPH 2013.
-- Laine, Karras, *Efficient Sparse Voxel Octrees*, I3D 2010.
-- Crassin et al., *GigaVoxels*, I3D 2009 — hierarchical GPU voxel raymarching.
-- Gustafsson, Teardown engine talks/blog — object-decomposed voxel destruction.
+## Data Sources
+
+Voxel data enters the pipeline through the `BrickSource` trait:
+
+- **GPU worldgen** — compute shader noise (FBM terrain + cave carving). Primary
+  path; generates bricks in batches of 256. Fastest source, even outperforms
+  disk reads by ~3×.
+- **CPU worldgen** — hash-based value noise fallback. Bit-identical to GPU
+  version modulo FMA contraction differences.
+- **Disk region cache** — 16³ brick regions, zstd-compressed. Persists generated
+  data across runs.
+
+Pipeline: GPU worldgen (fast) → disk cache (persists) → CPU fallback (gap fill).
+
+## Brick Data
+
+The fundamental voxel unit: 16³ = 4096 voxels per brick.
+
+- **Voxels:** 8-bit palette index per voxel (0 = air), packed 4 per u32
+- **Palette:** 256-entry RGBA, 1 KB per brick
+- **Occupancy mask:** 64 bits, one per 4×4×4 sub-chunk, enables fine DDA skip
+- **Hermite data** (extended format): per-edge intersection point + surface
+  normal for Dual Contouring. Optional; bricks without Hermite data use standard
+  format.
+
+## Meshing Pipeline
+
+Mesh extraction converts volume data to vertex/index buffers for rasterization.
+
+### Extractors
+
+- **Marching Cubes** — isosurface from density field. Standard 256-entry lookup.
+  Vertex normals from gradient estimation. Baseline quality.
+- **Dual Contouring** — QEF minimization for vertex placement. Reads Hermite
+  data from extended brick format. Preserves sharp edges on architectural and
+  blocky geometry.
+
+### Meshlets
+
+Extracted meshes are decomposed into 64–128 triangle clusters with a DAG
+hierarchy for LOD. Evaluate `meshoptimizer` crate for clustering +
+simplification; roll own Nanite-style pipeline if integration creates too much
+churn. Per-meshlet bounding sphere + normal cone for culling.
+
+### GPU Meshlet SSE
+
+Compute pass evaluating screen-space error per meshlet against camera. Outputs
+indirect draw buffer selecting parent (coarse) or children (fine) meshlets.
+Feeds directly into the rasterizer's `draw_indexed_indirect` calls.
+
+### LOD Transitions
+
+- **Geomorphing** — vertex interpolation between LOD levels over a transition
+  distance. Smooth, no popping.
+- **Dithered blending** — screen-door dissolve (Bayer matrix) fading between
+  LODs. Cheaper than geomorphing.
+
+Selectable per-material.
+
+### Chunk Stitching
+
+Transvoxel transition cells or geometry skirts to seal cracks between adjacent
+chunks at different LOD levels.
+
+## Hybrid Rendering
+
+The compositor merges raytracer and rasterizer G-buffer outputs. Both write
+matching formats (position, albedo, normal). Depth-aware blending: closer surface
+wins per pixel. Shared lighting model (ambient + directional with shadow term).
+
+Three runtime modes:
+- **Raytrace-only** — current behavior, compute shader path
+- **Rasterize-only** — vertex/fragment path with meshlet indirect draws
+- **Hybrid** — rasterize near terrain + raytrace distant terrain, GI, shadows
+
+Switchable at runtime for profiling and debugging.
+
+## ECS
+
+Entity Component System adopted after A/B benchmark of `bevy_ecs` vs `hecs` at
+multi-million entity scale. Provides the compositional model for the hybrid
+engine: a chunk can independently have volume, mesh, visibility, and residency
+components.
+
+## Job System
+
+Persistent worker pool initialized at engine start. No per-task thread spawning.
+
+### Worker Pool
+
+Priority queues with work-stealing across threads. Job categories map to queue
+priority: frame-critical (meshing a visible chunk) runs before background
+(pre-caching a distant region). Workers pull from their own queue first, then
+steal from others when idle.
+
+### Dependency Graph
+
+Jobs declare dependencies: "mesh chunk X after worldgen X completes." The
+scheduler topologically sorts and dispatches. Main-thread result callbacks
+deliver finished work (uploaded meshes, generated bricks) without polling.
+
+The streaming pipeline's I/O and compute pools (see Streaming Architecture) are
+specialized partitions of this system — the job system is the general-purpose
+foundation they sit on.
+
+## Audio Engine
+
+Multi-channel mixer with spatial positioning. The engine provides the mixing,
+spatialization, and effects infrastructure; games supply the actual sound assets.
+
+### Mixer
+
+Per-channel play/stop/volume/pan. Channels are lightweight handles — hundreds
+can exist simultaneously. Ducking and cross-fading between channels for smooth
+transitions (e.g., combat music fading over exploration ambience).
+
+### Spatial Audio
+
+3D-positioned sources with distance attenuation. Listener position and
+orientation derived from the camera entity. Attenuation model: inverse-distance
+with configurable rolloff. Stereo panning from source-listener angle.
+
+### Effects Bus
+
+Post-mix processing chain: reverb, low-pass filter, echo. Effects are composable
+— a cave environment applies reverb + low-pass; outdoors applies none. Per-source
+effect send levels allow mixing dry and wet signals.
+
+## UI Framework
+
+Engine-level layout and widget system. Games define screens, menus, and HUD
+elements using engine primitives; the engine handles layout, input routing, and
+rendering.
+
+### Layout Engine
+
+Panel-based hierarchy with flex layout, anchoring, and scrolling. Panels can be
+positioned absolutely (HUD overlays) or flow within a flex container (menus,
+inventories). Scroll containers clip and virtualize long content.
+
+### Primitives
+
+Button, checkbox, dropdown, slider, text input. Each primitive emits interaction
+events (clicked, changed, submitted) through the ECS event system. Primitives
+are composable — a settings screen is a panel of sliders and dropdowns.
+
+### Theming
+
+Style objects defining colors, fonts, spacing, and border radii. A theme is a
+named collection of styles applied globally. Games provide their own themes; the
+engine ships a debug default. Hot-reloadable for iteration.
+
+## Scripting Runtime
+
+Embedded scripting language for game logic. The engine provides sandboxed
+execution and API bindings; games provide the scripts.
+
+### Runtime
+
+Rhai or Lua (evaluated during implementation). Sandboxed: scripts cannot access
+the filesystem, network, or unsafe memory. Execution is budgeted per frame to
+prevent runaway scripts from stalling the render loop.
+
+### Engine API Bindings
+
+Scripts can:
+- Query and modify voxel data (read/write materials, place/remove blocks)
+- Spawn and control entities (position, velocity, components)
+- Play audio (trigger sounds, set spatial position)
+- Drive UI (show/hide panels, update text, respond to input events)
+- Read input state (keyboard, mouse, gamepad)
+- Access field simulation channels (temperature, moisture, custom)
+
+Bindings are registered at engine init. Games extend with game-specific bindings
+(crafting recipes, quest state, etc.).
+
+## Field Simulation
+
+Generic scalar field propagation on the voxel grid. The engine provides storage
+and solver; games define what the fields represent (temperature, moisture, magic,
+etc.).
+
+### Storage
+
+Sparse per-brick float channels. A field is identified by name. Only bricks with
+non-default values allocate storage — air and homogeneous regions cost nothing.
+
+### Diffusion Solver
+
+Per-tick propagation on active bricks. Each tick, values diffuse to neighbors
+weighted by a per-field diffusion coefficient. Active set is the union of bricks
+with non-default values and their face-adjacent neighbors. Convergence: inactive
+bricks (no change above epsilon) are removed from the active set.
+
+### Query API
+
+Read/write field values at arbitrary world positions. Script bindings expose
+fields to game logic. Rendering can sample fields for visual effects (heat haze,
+frost, bioluminescence).
+
+## Atmosphere & Weather
+
+Environmental rendering and simulation. The engine provides fog, volumetric
+effects, and weather state; games configure biome-specific parameters.
+
+### Global Weather State
+
+Uniform buffer updated per frame: wind vector, fog density, precipitation
+intensity, time-of-day, cloud coverage. Driven by game logic or scripted weather
+sequences.
+
+### Fog
+
+Height/depth fog accumulated along the primary ray march. Density varies with
+altitude (denser in valleys) and weather state. Integrated into the shade pass —
+no separate fog pass needed.
+
+### God Rays
+
+Sun-visibility sampling along the primary march. Accumulates in-scatter when
+march steps are lit by the sun (not in shadow). Modulated by fog density for
+volumetric appearance.
+
+### Clouds
+
+Volumetric cloud layer above the terrain ceiling. Noise-driven density field
+sampled by the sky model. Lit by sun with self-shadowing. Cloud coverage and
+altitude controlled by weather state.
+
+### Precipitation
+
+Particle-based rain and snow. Surface wetness: a per-brick scalar field
+(see Field Simulation) tracking moisture accumulation. Puddle formation in
+concavities. Visual: darkened albedo + specular gloss on wet surfaces.
+
+## Water
+
+Fluid representation, rendering, and simulation. Voxel-native — water is a
+material in the brick grid, not a separate mesh.
+
+### Representation
+
+Water is a voxel material with an active-simulation flag. Bricks containing
+water are added to the simulation active set. Surface detection: water voxels
+adjacent to air are surface voxels and receive special shading.
+
+### Rendering
+
+Transmission segment in the raymarcher: when a ray enters water, switch to
+refraction (Snell's law at the surface normal) and Beer-Lambert depth tint
+(color shifts toward deep blue/green with distance). Surface shading: animated
+normals (scrolling noise), screen-space reflections, cone-traced reflections for
+rough water.
+
+### Flow Simulation
+
+Cellular automaton on the active brick set. Per-tick: water flows downward
+(gravity), laterally (pressure equalization), and accumulates in basins.
+Waterfalls: vertical flow into air creates splash particles. Flow rate modulated
+by the global wind vector from weather state.
+
+## Technology Stack
+
+- **Rust** (edition 2024, resolver 3) — memory safety, data-race freedom,
+  concurrency
+- **WGPU** — cross-platform GPU abstraction (Metal, Vulkan, DX12)
+- **glam** — linear algebra
+- **crossbeam** — multi-producer/consumer channels
+- **bytemuck** — zero-copy GPU data casting
+- **zstd** — region file compression
+- **egui** — debug UI overlay
+
+## Crate Structure
+
+```
+crates/
+  engine/     smallworld-engine (library)
+              OOC pipeline, volumes, rendering, streaming, culling,
+              job system, audio, UI, scripting, field simulation,
+              atmosphere, water
+  sandbox/    smallworld-sandbox (binary: smallworld)
+              Worldgen, scenes, camera, debug UI, GPU worldgen
+```
+
+Games depend on `smallworld-engine` and provide content: assets, biomes,
+creatures, scripts, UI themes, sound banks. The engine provides mechanisms;
+games provide policy and content.
