@@ -13,6 +13,7 @@ pub mod engine;
 pub mod gpu;
 pub mod gpu_timing;
 pub mod input;
+pub mod placeholder;
 pub mod raymarcher;
 pub mod shaders;
 pub mod svo;

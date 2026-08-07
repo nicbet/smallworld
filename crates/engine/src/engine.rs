@@ -321,12 +321,16 @@ impl Engine {
 
 /// Trait for game logic. Implement this on your game state struct.
 ///
-/// The engine calls [`update`](App::update) once per frame with the engine,
-/// world, and delta time. Other lifecycle methods have default no-op
-/// implementations.
+/// The engine calls [`update`](App::update) then [`render`](App::render)
+/// once per frame. Other lifecycle methods have default no-op implementations.
 pub trait App {
     /// Called once per frame. Mutate the world, read input, advance game state.
     fn update(&mut self, engine: &mut Engine, world: &mut World, dt: f32);
+
+    /// Called once per frame with the surface texture view. Submit GPU work here.
+    /// Default: no-op (clears to black).
+    #[allow(unused_variables)]
+    fn render(&mut self, engine: &mut Engine, frame: &FrameContext) {}
 }
 
 struct AppRunnerState {
@@ -415,6 +419,7 @@ impl ApplicationHandler for AppRunner {
                 state.engine.input.begin_frame();
 
                 if let Some(frame) = state.engine.begin_frame(&mut state.world) {
+                    self.app.render(&mut state.engine, &frame);
                     state.engine.present(frame);
                 }
             }
