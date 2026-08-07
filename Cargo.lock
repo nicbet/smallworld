@@ -1768,6 +1768,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "crossbeam-channel",
+ "env_logger",
  "glam",
  "log",
  "pollster",
@@ -1780,7 +1781,6 @@ dependencies = [
 name = "smallworld-sandbox"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "glam",
  "log",
  "smallworld-engine",

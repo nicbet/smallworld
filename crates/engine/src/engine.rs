@@ -18,7 +18,7 @@ use crate::gpu::GpuContext;
 use crate::input::Input;
 use crate::jobs::JobPool;
 use crate::placeholder::PlaceholderRenderer;
-use crate::world::{World, WorldGpuData};
+use crate::world::World;
 
 /// Window mode for engine initialization.
 #[derive(Clone, Debug)]
@@ -165,7 +165,6 @@ pub struct Engine {
     window: Option<Arc<Window>>,
     gpu: GpuContext,
     display: Option<DisplaySurface>,
-    gpu_data: WorldGpuData,
     input: Input,
     view: ViewState,
     renderer: Option<PlaceholderRenderer>,
@@ -242,7 +241,6 @@ impl Engine {
                 surface,
                 config: surface_config,
             }),
-            gpu_data: WorldGpuData::empty(),
             input: Input::default(),
             view: ViewState::default(),
             renderer: Some(renderer),
@@ -258,7 +256,6 @@ impl Engine {
             window: None,
             gpu,
             display: None,
-            gpu_data: WorldGpuData::empty(),
             input: Input::default(),
             jobs: JobPool::auto(),
             view: ViewState::default(),
@@ -313,10 +310,7 @@ impl Engine {
     /// Extracts world data if dirty, renders, and presents. Called by the
     /// engine loop — games never call this directly.
     fn render_frame(&mut self, world: &mut World) {
-        if world.is_dirty() {
-            self.gpu_data = WorldGpuData::extract(&self.gpu.device, world);
-            world.clear_dirty();
-        }
+        let _changes = world.drain_changes();
 
         let Some(display) = self.display.as_mut() else {
             return;

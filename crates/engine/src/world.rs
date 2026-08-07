@@ -1,20 +1,101 @@
-//! World: the engine's central data structure for instanced voxel objects.
+//! World: the engine's central scene container.
 //!
-//! Pure CPU data — no GPU dependency. Games construct a [`World`], populate it
-//! with models and instances, and hand it to the [`Engine`](crate::engine::Engine)
-//! which handles extraction to GPU buffers automatically.
+//! Holds everything the pipeline renders: voxel volumes (raymarched),
+//! mesh instances (rasterized), shared materials, and lights. Games
+//! populate the World; pipeline stages consume it.
+//!
+//! Per-object change tracking via [`ChangeSet`] lets the pipeline
+//! process only what changed each frame. Lights are excluded — they are
+//! re-packed into a small GPU buffer every frame.
 
-use crate::bvh;
-use crate::volume::AABB;
-use crate::voxel_object::{VoxelInstance, VoxelInstanceGpu, VoxelModel};
+use crate::light::Light;
+use crate::material::Material;
+use crate::mesh::{Mesh, MeshInstance};
+use crate::volume::VoxelVolume;
 
 slotmap::new_key_type! {
-    /// Stable handle to an instance in the [`World`].
-    pub struct InstanceKey;
+    /// Stable handle to a [`VoxelVolume`] in the World.
+    pub struct VolumeKey;
+    /// Stable handle to a shared [`Mesh`] asset in the World.
+    pub struct MeshKey;
+    /// Stable handle to a placed [`MeshInstance`] in the World.
+    pub struct MeshInstanceKey;
+    /// Stable handle to a shared [`Material`] in the World.
+    pub struct MaterialKey;
+    /// Stable handle to a [`Light`] in the World.
+    pub struct LightKey;
 }
 
-/// GPU-ready snapshot of world data. Produced by the engine's extraction
-/// step, consumed by the renderer. The game never constructs this directly.
+// ---------------------------------------------------------------------------
+// Change tracking
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ChangeSet<K: slotmap::Key> {
+    spawned: Vec<K>,
+    despawned: Vec<K>,
+    mutated: Vec<K>,
+}
+
+impl<K: slotmap::Key> ChangeSet<K> {
+    fn new() -> Self {
+        Self {
+            spawned: Vec::new(),
+            despawned: Vec::new(),
+            mutated: Vec::new(),
+        }
+    }
+
+    fn mark_spawned(&mut self, key: K) {
+        self.spawned.push(key);
+    }
+
+    fn mark_despawned(&mut self, key: K) {
+        self.despawned.push(key);
+    }
+
+    fn mark_mutated(&mut self, key: K) {
+        self.mutated.push(key);
+    }
+
+    fn drain(&mut self) -> DrainedChanges<K> {
+        DrainedChanges {
+            spawned: std::mem::take(&mut self.spawned),
+            despawned: std::mem::take(&mut self.despawned),
+            mutated: std::mem::take(&mut self.mutated),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.spawned.is_empty() && self.despawned.is_empty() && self.mutated.is_empty()
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct DrainedChanges<K: slotmap::Key> {
+    pub spawned: Vec<K>,
+    pub despawned: Vec<K>,
+    pub mutated: Vec<K>,
+}
+
+// ---------------------------------------------------------------------------
+// WorldChanges — returned by drain_changes()
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) struct WorldChanges {
+    pub volumes: DrainedChanges<VolumeKey>,
+    pub meshes: DrainedChanges<MeshKey>,
+    pub mesh_instances: DrainedChanges<MeshInstanceKey>,
+    pub materials: DrainedChanges<MaterialKey>,
+}
+
+// ---------------------------------------------------------------------------
+// WorldGpuData — stub until pipeline stages land
+// ---------------------------------------------------------------------------
+
+/// GPU-ready snapshot of world data. Stub — will be repopulated by
+/// pipeline stages (Cull/Stream/Execute) in later issues.
 pub struct WorldGpuData {
     instance_buf: Option<wgpu::Buffer>,
     grid_buf: Option<wgpu::Buffer>,
@@ -66,131 +147,35 @@ impl WorldGpuData {
         self.generation
     }
 
-    /// Extracts world data into GPU buffers. Called by Engine, not by games.
-    pub(crate) fn extract(device: &wgpu::Device, world: &World) -> Self {
-        if world.instances.is_empty() {
-            return Self::empty();
-        }
-
-        let instances: Vec<&VoxelInstance> = world.instances.values().collect();
-
-        // Pack model grids
-        let mut grid_offsets: Vec<u32> = Vec::with_capacity(world.models.len());
-        let mut packed_grids: Vec<u32> = Vec::new();
-        for model in &world.models {
-            grid_offsets.push(packed_grids.len() as u32);
-            packed_grids.extend_from_slice(model.grid_data());
-        }
-
-        // Build AABBs for BVH
-        let aabbs: Vec<AABB> = instances
-            .iter()
-            .map(|inst| inst.world_aabb(&world.models[inst.model_id]).into())
-            .collect();
-
-        let (bvh_nodes, bvh_indices) = bvh::build(&aabbs);
-
-        // Pack GPU instance data in BVH leaf order
-        let gpu_instances: Vec<VoxelInstanceGpu> = bvh_indices
-            .iter()
-            .map(|&orig_idx| {
-                let inst = instances[orig_idx as usize];
-                let model = &world.models[inst.model_id];
-                let offset = grid_offsets[inst.model_id];
-                VoxelInstanceGpu::from_instance(inst, model, offset)
-            })
-            .collect();
-
-        let instance_count = gpu_instances.len() as u32;
-
-        // Upload BVH nodes
-        let bvh_buf = if bvh_nodes.is_empty() {
-            None
-        } else {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("bvh_nodes"),
-                size: (bvh_nodes.len() * size_of::<bvh::BvhNode>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: true,
-            });
-            {
-                let mut view = buf
-                    .slice(..)
-                    .get_mapped_range_mut()
-                    .expect("failed to map BVH buffer");
-                view.copy_from_slice(bytemuck::cast_slice(&bvh_nodes));
-            }
-            buf.unmap();
-            Some(buf)
-        };
-
-        // Upload packed grids
-        let grid_buf = if packed_grids.is_empty() {
-            None
-        } else {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("packed_object_grids"),
-                size: (packed_grids.len() * size_of::<u32>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: true,
-            });
-            {
-                let mut view = buf
-                    .slice(..)
-                    .get_mapped_range_mut()
-                    .expect("failed to map packed grids buffer");
-                view.copy_from_slice(bytemuck::cast_slice(&packed_grids));
-            }
-            buf.unmap();
-            Some(buf)
-        };
-
-        // Upload instances
-        let instance_buf = {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("object_instances"),
-                size: (gpu_instances.len() * size_of::<VoxelInstanceGpu>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: true,
-            });
-            {
-                let mut view = buf
-                    .slice(..)
-                    .get_mapped_range_mut()
-                    .expect("failed to map instance buffer");
-                view.copy_from_slice(bytemuck::cast_slice(&gpu_instances));
-            }
-            buf.unmap();
-            Some(buf)
-        };
-
-        log::info!(
-            "world: {} instances, {} models, {} grid cells, {} BVH nodes",
-            instance_count,
-            world.models.len(),
-            packed_grids.len(),
-            bvh_nodes.len(),
-        );
-
-        Self {
-            instance_buf,
-            grid_buf,
-            bvh_buf,
-            instance_count,
-            generation: 0,
-        }
+    #[allow(dead_code)]
+    pub(crate) fn extract(_device: &wgpu::Device, _world: &World) -> Self {
+        Self::empty()
     }
 }
 
-/// The engine's central entity container. Pure CPU data — no GPU dependency.
+// ---------------------------------------------------------------------------
+// World
+// ---------------------------------------------------------------------------
+
+/// The engine's central scene container. Hybrid: voxel volumes
+/// (raymarched) + mesh instances (rasterized) + shared materials + lights.
 ///
-/// Owns instanced voxel objects (models + instances). The
-/// [`Engine`](crate::engine::Engine) handles extraction to GPU buffers
-/// automatically during [`begin_frame`](crate::engine::Engine::begin_frame).
+/// Games populate a World and hand it to the [`Engine`](crate::engine::Engine).
+/// Pipeline stages consume it each frame via per-object change tracking.
 pub struct World {
-    models: Vec<VoxelModel>,
-    instances: slotmap::SlotMap<InstanceKey, VoxelInstance>,
-    dirty: bool,
+    volumes: slotmap::SlotMap<VolumeKey, Box<dyn VoxelVolume>>,
+    volume_changes: ChangeSet<VolumeKey>,
+
+    meshes: slotmap::SlotMap<MeshKey, Mesh>,
+    mesh_changes: ChangeSet<MeshKey>,
+
+    mesh_instances: slotmap::SlotMap<MeshInstanceKey, MeshInstance>,
+    mesh_instance_changes: ChangeSet<MeshInstanceKey>,
+
+    materials: slotmap::SlotMap<MaterialKey, Material>,
+    material_changes: ChangeSet<MaterialKey>,
+
+    lights: slotmap::SlotMap<LightKey, Light>,
 }
 
 impl Default for World {
@@ -204,75 +189,506 @@ impl World {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            models: Vec::new(),
-            instances: slotmap::SlotMap::with_key(),
-            dirty: false,
+            volumes: slotmap::SlotMap::with_key(),
+            volume_changes: ChangeSet::new(),
+            meshes: slotmap::SlotMap::with_key(),
+            mesh_changes: ChangeSet::new(),
+            mesh_instances: slotmap::SlotMap::with_key(),
+            mesh_instance_changes: ChangeSet::new(),
+            materials: slotmap::SlotMap::with_key(),
+            material_changes: ChangeSet::new(),
+            lights: slotmap::SlotMap::with_key(),
         }
     }
 
-    /// Adds a model and returns its index.
-    pub fn add_model(&mut self, model: VoxelModel) -> usize {
-        let id = self.models.len();
-        self.models.push(model);
-        self.dirty = true;
-        id
-    }
+    // -- Volumes ----------------------------------------------------------
 
-    /// Adds an instance and returns its stable handle.
-    pub fn add_instance(&mut self, instance: VoxelInstance) -> InstanceKey {
-        let key = self.instances.insert(instance);
-        self.dirty = true;
+    /// Adds a voxel volume and returns its stable handle.
+    pub fn add_volume(&mut self, volume: Box<dyn VoxelVolume>) -> VolumeKey {
+        let key = self.volumes.insert(volume);
+        self.volume_changes.mark_spawned(key);
         key
     }
 
-    /// Removes an instance by key. Returns the instance if it existed.
-    pub fn remove_instance(&mut self, key: InstanceKey) -> Option<VoxelInstance> {
-        let removed = self.instances.remove(key);
+    /// Removes a volume by key. Returns it if it existed.
+    pub fn remove_volume(&mut self, key: VolumeKey) -> Option<Box<dyn VoxelVolume>> {
+        let removed = self.volumes.remove(key);
         if removed.is_some() {
-            self.dirty = true;
+            self.volume_changes.mark_despawned(key);
         }
         removed
     }
 
-    /// Read access to an instance.
+    /// Read access to a volume by key.
     #[must_use]
-    pub fn get(&self, key: InstanceKey) -> Option<&VoxelInstance> {
-        self.instances.get(key)
+    pub fn volume(&self, key: VolumeKey) -> Option<&dyn VoxelVolume> {
+        self.volumes.get(key).map(|v| v.as_ref())
     }
 
-    /// Mutable access to an instance. Marks the world dirty.
-    pub fn get_mut(&mut self, key: InstanceKey) -> Option<&mut VoxelInstance> {
-        let inst = self.instances.get_mut(key);
-        if inst.is_some() {
-            self.dirty = true;
+    /// Iterates all volumes.
+    pub fn volumes(&self) -> impl Iterator<Item = (VolumeKey, &dyn VoxelVolume)> {
+        self.volumes.iter().map(|(k, v)| (k, v.as_ref()))
+    }
+
+    /// Number of volumes in the world.
+    #[must_use]
+    pub fn volume_count(&self) -> usize {
+        self.volumes.len()
+    }
+
+    // -- Meshes (shared geometry assets) ----------------------------------
+
+    /// Registers a shared mesh asset and returns its handle.
+    pub fn add_mesh(&mut self, mesh: Mesh) -> MeshKey {
+        let key = self.meshes.insert(mesh);
+        self.mesh_changes.mark_spawned(key);
+        key
+    }
+
+    /// Removes a mesh asset by key.
+    pub fn remove_mesh(&mut self, key: MeshKey) -> Option<Mesh> {
+        let removed = self.meshes.remove(key);
+        if removed.is_some() {
+            self.mesh_changes.mark_despawned(key);
         }
-        inst
+        removed
     }
 
-    /// Iterator over all instances.
-    pub fn instances(&self) -> impl Iterator<Item = (InstanceKey, &VoxelInstance)> {
-        self.instances.iter()
-    }
-
-    /// Access to the model list.
+    /// Read access to a mesh asset by key.
     #[must_use]
-    pub fn models(&self) -> &[VoxelModel] {
-        &self.models
+    pub fn mesh(&self, key: MeshKey) -> Option<&Mesh> {
+        self.meshes.get(key)
     }
 
-    /// Number of live instances.
+    /// Iterates all mesh assets.
+    pub fn meshes(&self) -> impl Iterator<Item = (MeshKey, &Mesh)> {
+        self.meshes.iter()
+    }
+
+    /// Number of mesh assets in the world.
     #[must_use]
-    pub fn instance_count(&self) -> u32 {
-        self.instances.len() as u32
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
     }
 
-    /// Whether the world has been mutated since the last extraction.
-    pub(crate) fn is_dirty(&self) -> bool {
-        self.dirty
+    // -- Mesh instances (placed objects) ----------------------------------
+
+    /// Places a mesh instance in the world and returns its handle.
+    pub fn add_mesh_instance(&mut self, instance: MeshInstance) -> MeshInstanceKey {
+        let key = self.mesh_instances.insert(instance);
+        self.mesh_instance_changes.mark_spawned(key);
+        key
     }
 
-    /// Clears the dirty flag. Called by Engine after extraction.
-    pub(crate) fn clear_dirty(&mut self) {
-        self.dirty = false;
+    /// Removes a mesh instance by key.
+    pub fn remove_mesh_instance(&mut self, key: MeshInstanceKey) -> Option<MeshInstance> {
+        let removed = self.mesh_instances.remove(key);
+        if removed.is_some() {
+            self.mesh_instance_changes.mark_despawned(key);
+        }
+        removed
+    }
+
+    /// Read access to a mesh instance by key.
+    #[must_use]
+    pub fn mesh_instance(&self, key: MeshInstanceKey) -> Option<&MeshInstance> {
+        self.mesh_instances.get(key)
+    }
+
+    /// Mutable access to a mesh instance. Records the key as mutated.
+    pub fn mesh_instance_mut(&mut self, key: MeshInstanceKey) -> Option<&mut MeshInstance> {
+        if self.mesh_instances.contains_key(key) {
+            self.mesh_instance_changes.mark_mutated(key);
+        }
+        self.mesh_instances.get_mut(key)
+    }
+
+    /// Iterates all mesh instances.
+    pub fn mesh_instances(&self) -> impl Iterator<Item = (MeshInstanceKey, &MeshInstance)> {
+        self.mesh_instances.iter()
+    }
+
+    /// Number of mesh instances in the world.
+    #[must_use]
+    pub fn mesh_instance_count(&self) -> usize {
+        self.mesh_instances.len()
+    }
+
+    // -- Materials (shared) -----------------------------------------------
+
+    /// Registers a shared material and returns its handle.
+    pub fn add_material(&mut self, material: Material) -> MaterialKey {
+        let key = self.materials.insert(material);
+        self.material_changes.mark_spawned(key);
+        key
+    }
+
+    /// Removes a material by key.
+    pub fn remove_material(&mut self, key: MaterialKey) -> Option<Material> {
+        let removed = self.materials.remove(key);
+        if removed.is_some() {
+            self.material_changes.mark_despawned(key);
+        }
+        removed
+    }
+
+    /// Read access to a material by key.
+    #[must_use]
+    pub fn material(&self, key: MaterialKey) -> Option<&Material> {
+        self.materials.get(key)
+    }
+
+    /// Mutable access to a material. Records the key as mutated.
+    pub fn material_mut(&mut self, key: MaterialKey) -> Option<&mut Material> {
+        if self.materials.contains_key(key) {
+            self.material_changes.mark_mutated(key);
+        }
+        self.materials.get_mut(key)
+    }
+
+    /// Iterates all materials.
+    pub fn materials(&self) -> impl Iterator<Item = (MaterialKey, &Material)> {
+        self.materials.iter()
+    }
+
+    /// Number of materials in the world.
+    #[must_use]
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    // -- Lights (no change tracking — re-packed per frame) ----------------
+
+    /// Adds a light and returns its handle.
+    pub fn add_light(&mut self, light: Light) -> LightKey {
+        self.lights.insert(light)
+    }
+
+    /// Removes a light by key.
+    pub fn remove_light(&mut self, key: LightKey) -> Option<Light> {
+        self.lights.remove(key)
+    }
+
+    /// Read access to a light by key.
+    #[must_use]
+    pub fn light(&self, key: LightKey) -> Option<&Light> {
+        self.lights.get(key)
+    }
+
+    /// Mutable access to a light. No change tracking — lights are
+    /// re-packed into the GPU buffer every frame.
+    pub fn light_mut(&mut self, key: LightKey) -> Option<&mut Light> {
+        self.lights.get_mut(key)
+    }
+
+    /// Iterates all lights.
+    pub fn lights(&self) -> impl Iterator<Item = (LightKey, &Light)> {
+        self.lights.iter()
+    }
+
+    /// Number of lights in the world.
+    #[must_use]
+    pub fn light_count(&self) -> usize {
+        self.lights.len()
+    }
+
+    // -- Change tracking --------------------------------------------------
+
+    pub(crate) fn drain_changes(&mut self) -> WorldChanges {
+        WorldChanges {
+            volumes: self.volume_changes.drain(),
+            meshes: self.mesh_changes.drain(),
+            mesh_instances: self.mesh_instance_changes.drain(),
+            materials: self.material_changes.drain(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::volume::{AABB, LODMeta, TraversalBindings, VolumeKind};
+    use glam::{Quat, Vec3, Vec4};
+
+    struct DummyVolume;
+    impl VoxelVolume for DummyVolume {
+        fn volume_kind(&self) -> VolumeKind {
+            VolumeKind::FlatGrid
+        }
+        fn bounds(&self) -> AABB {
+            AABB::EMPTY
+        }
+        fn lod_hint(&self) -> LODMeta {
+            LODMeta {
+                voxel_scale: 0.1,
+                max_depth: 1,
+            }
+        }
+        fn traversal_bindings(&self) -> TraversalBindings<'_> {
+            TraversalBindings {
+                kind: VolumeKind::FlatGrid,
+                buffers: &[],
+            }
+        }
+    }
+
+    fn test_material() -> Material {
+        Material {
+            base_color: Vec4::ONE,
+            roughness: 0.5,
+            metallic: 0.0,
+            emissive: Vec3::ZERO,
+        }
+    }
+
+    fn test_mesh() -> Mesh {
+        Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            bounds: AABB::EMPTY,
+        }
+    }
+
+    fn test_mesh_instance(mesh: MeshKey, material: MaterialKey) -> MeshInstance {
+        MeshInstance {
+            mesh,
+            material,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            casts_shadows: true,
+        }
+    }
+
+    // -- Volumes --
+
+    #[test]
+    fn volume_add_remove() {
+        let mut world = World::new();
+        let key = world.add_volume(Box::new(DummyVolume));
+        assert_eq!(world.volume_count(), 1);
+        assert!(world.volume(key).is_some());
+
+        let removed = world.remove_volume(key);
+        assert!(removed.is_some());
+        assert_eq!(world.volume_count(), 0);
+        assert!(world.volume(key).is_none());
+    }
+
+    #[test]
+    fn volume_changes_tracked() {
+        let mut world = World::new();
+        let key = world.add_volume(Box::new(DummyVolume));
+
+        let changes = world.drain_changes();
+        assert_eq!(changes.volumes.spawned.len(), 1);
+        assert_eq!(changes.volumes.spawned[0], key);
+
+        world.remove_volume(key);
+        let changes = world.drain_changes();
+        assert_eq!(changes.volumes.despawned.len(), 1);
+        assert_eq!(changes.volumes.despawned[0], key);
+    }
+
+    #[test]
+    fn volume_iterate() {
+        let mut world = World::new();
+        world.add_volume(Box::new(DummyVolume));
+        world.add_volume(Box::new(DummyVolume));
+        let vols: Vec<_> = world.volumes().collect();
+        assert_eq!(vols.len(), 2);
+    }
+
+    #[test]
+    fn volume_trait_object_coercion() {
+        let mut world = World::new();
+        let key = world.add_volume(Box::new(DummyVolume));
+        let vol = world.volume(key).unwrap();
+        assert_eq!(vol.volume_kind(), VolumeKind::FlatGrid);
+        assert!(vol.bounds().is_empty());
+    }
+
+    // -- Materials --
+
+    #[test]
+    fn material_add_remove() {
+        let mut world = World::new();
+        let key = world.add_material(test_material());
+        assert_eq!(world.material_count(), 1);
+        assert!(world.material(key).is_some());
+
+        let removed = world.remove_material(key);
+        assert!(removed.is_some());
+        assert_eq!(world.material_count(), 0);
+    }
+
+    #[test]
+    fn material_changes_tracked() {
+        let mut world = World::new();
+        let key = world.add_material(test_material());
+
+        let changes = world.drain_changes();
+        assert_eq!(changes.materials.spawned.len(), 1);
+
+        world.material_mut(key).unwrap().roughness = 1.0;
+        let changes = world.drain_changes();
+        assert_eq!(changes.materials.mutated.len(), 1);
+        assert_eq!(changes.materials.mutated[0], key);
+
+        world.remove_material(key);
+        let changes = world.drain_changes();
+        assert_eq!(changes.materials.despawned.len(), 1);
+    }
+
+    // -- Meshes --
+
+    #[test]
+    fn mesh_add_remove() {
+        let mut world = World::new();
+        let key = world.add_mesh(test_mesh());
+        assert_eq!(world.mesh_count(), 1);
+        assert!(world.mesh(key).is_some());
+
+        let removed = world.remove_mesh(key);
+        assert!(removed.is_some());
+        assert_eq!(world.mesh_count(), 0);
+    }
+
+    #[test]
+    fn mesh_changes_tracked() {
+        let mut world = World::new();
+        let key = world.add_mesh(test_mesh());
+
+        let changes = world.drain_changes();
+        assert_eq!(changes.meshes.spawned.len(), 1);
+        assert_eq!(changes.meshes.spawned[0], key);
+
+        world.remove_mesh(key);
+        let changes = world.drain_changes();
+        assert_eq!(changes.meshes.despawned.len(), 1);
+    }
+
+    // -- Mesh instances --
+
+    #[test]
+    fn mesh_instance_add_remove() {
+        let mut world = World::new();
+        let mesh = world.add_mesh(test_mesh());
+        let mat = world.add_material(test_material());
+        let inst = world.add_mesh_instance(test_mesh_instance(mesh, mat));
+        assert_eq!(world.mesh_instance_count(), 1);
+        assert!(world.mesh_instance(inst).is_some());
+
+        let removed = world.remove_mesh_instance(inst);
+        assert!(removed.is_some());
+        assert_eq!(world.mesh_instance_count(), 0);
+    }
+
+    #[test]
+    fn mesh_instance_changes_tracked() {
+        let mut world = World::new();
+        let mesh = world.add_mesh(test_mesh());
+        let mat = world.add_material(test_material());
+        let inst = world.add_mesh_instance(test_mesh_instance(mesh, mat));
+
+        let changes = world.drain_changes();
+        assert_eq!(changes.mesh_instances.spawned.len(), 1);
+
+        world.mesh_instance_mut(inst).unwrap().position = Vec3::new(1.0, 2.0, 3.0);
+        let changes = world.drain_changes();
+        assert_eq!(changes.mesh_instances.mutated.len(), 1);
+        assert_eq!(changes.mesh_instances.mutated[0], inst);
+
+        world.remove_mesh_instance(inst);
+        let changes = world.drain_changes();
+        assert_eq!(changes.mesh_instances.despawned.len(), 1);
+    }
+
+    // -- Lights --
+
+    #[test]
+    fn light_add_remove() {
+        let mut world = World::new();
+        let sun = world.add_light(Light::directional(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::ONE,
+            1.0,
+        ));
+        assert_eq!(world.light_count(), 1);
+        assert!(world.light(sun).is_some());
+
+        let removed = world.remove_light(sun);
+        assert!(removed.is_some());
+        assert_eq!(world.light_count(), 0);
+    }
+
+    #[test]
+    fn light_mut_no_change_tracking() {
+        let mut world = World::new();
+        let key = world.add_light(Light::point(Vec3::ZERO, 10.0, Vec3::ONE, 5.0));
+
+        world.drain_changes();
+
+        world.light_mut(key).unwrap().intensity = 100.0;
+
+        let changes = world.drain_changes();
+        assert!(changes.volumes.spawned.is_empty());
+        assert!(changes.meshes.spawned.is_empty());
+        assert!(changes.mesh_instances.spawned.is_empty());
+        assert!(changes.materials.spawned.is_empty());
+    }
+
+    #[test]
+    fn light_iterate() {
+        let mut world = World::new();
+        world.add_light(Light::directional(-Vec3::Y, Vec3::ONE, 1.0));
+        world.add_light(Light::point(Vec3::ZERO, 10.0, Vec3::ONE, 5.0));
+        world.add_light(Light::spot(
+            Vec3::Y,
+            -Vec3::Y,
+            20.0,
+            0.3,
+            0.5,
+            Vec3::ONE,
+            10.0,
+        ));
+        let lights: Vec<_> = world.lights().collect();
+        assert_eq!(lights.len(), 3);
+    }
+
+    // -- Drain clears --
+
+    #[test]
+    fn drain_clears_all_changes() {
+        let mut world = World::new();
+        let v = world.add_volume(Box::new(DummyVolume));
+        let m = world.add_mesh(test_mesh());
+        let mat = world.add_material(test_material());
+        let _inst = world.add_mesh_instance(test_mesh_instance(m, mat));
+
+        let changes = world.drain_changes();
+        assert!(!changes.volumes.spawned.is_empty());
+
+        assert!(world.volume_changes.is_empty());
+        assert!(world.mesh_changes.is_empty());
+        assert!(world.mesh_instance_changes.is_empty());
+        assert!(world.material_changes.is_empty());
+
+        let _ = v;
+    }
+
+    // -- Empty world --
+
+    #[test]
+    fn empty_world_is_valid() {
+        let mut world = World::new();
+        assert_eq!(world.volume_count(), 0);
+        assert_eq!(world.mesh_count(), 0);
+        assert_eq!(world.mesh_instance_count(), 0);
+        assert_eq!(world.material_count(), 0);
+        assert_eq!(world.light_count(), 0);
+
+        let changes = world.drain_changes();
+        assert!(changes.volumes.spawned.is_empty());
     }
 }
