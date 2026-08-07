@@ -13,6 +13,7 @@ pub mod engine;
 pub mod gpu;
 pub mod gpu_timing;
 pub mod input;
+pub(crate) mod jobs;
 pub mod placeholder;
 pub mod raymarcher;
 pub mod shaders;

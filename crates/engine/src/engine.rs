@@ -16,6 +16,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::gpu::GpuContext;
 use crate::input::Input;
+use crate::jobs::JobPool;
 use crate::placeholder::PlaceholderRenderer;
 use crate::world::{World, WorldGpuData};
 
@@ -81,6 +82,9 @@ pub struct EngineConfig {
     pub vsync: bool,
     /// Log level. Overridden by `SMALLWORLD_LOG` env var if set.
     pub log_level: LogLevel,
+    /// Worker thread count for the engine's internal job pool.
+    /// `0` = auto-detect from hardware (default).
+    pub worker_threads: usize,
 }
 
 impl Default for EngineConfig {
@@ -90,6 +94,7 @@ impl Default for EngineConfig {
             window_mode: WindowMode::default(),
             vsync: true,
             log_level: LogLevel::default(),
+            worker_threads: 0,
         }
     }
 }
@@ -164,6 +169,8 @@ pub struct Engine {
     input: Input,
     view: ViewState,
     renderer: Option<PlaceholderRenderer>,
+    #[allow(dead_code)]
+    jobs: JobPool,
 }
 
 impl Engine {
@@ -222,6 +229,12 @@ impl Engine {
         );
         log::info!("boot: placeholder renderer ready");
 
+        let jobs = if config.worker_threads > 0 {
+            JobPool::new(config.worker_threads)
+        } else {
+            JobPool::auto()
+        };
+
         Self {
             window: Some(window),
             gpu,
@@ -233,6 +246,7 @@ impl Engine {
             input: Input::default(),
             view: ViewState::default(),
             renderer: Some(renderer),
+            jobs,
         }
     }
 
@@ -246,6 +260,7 @@ impl Engine {
             display: None,
             gpu_data: WorldGpuData::empty(),
             input: Input::default(),
+            jobs: JobPool::auto(),
             view: ViewState::default(),
             renderer: None,
         }
