@@ -9,6 +9,7 @@ pub mod brick_pool;
 pub mod brick_source;
 pub mod bvh;
 pub mod camera;
+pub mod cull;
 pub mod engine;
 pub mod gpu;
 pub mod light;

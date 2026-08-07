@@ -14,6 +14,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::cull::CullStage;
 use crate::gpu::GpuContext;
 use crate::input::Input;
 use crate::jobs::JobPool;
@@ -167,6 +168,7 @@ pub struct Engine {
     display: Option<DisplaySurface>,
     input: Input,
     view: ViewState,
+    cull_stage: CullStage,
     renderer: Option<PlaceholderRenderer>,
     #[allow(dead_code)]
     jobs: JobPool,
@@ -243,6 +245,7 @@ impl Engine {
             }),
             input: Input::default(),
             view: ViewState::default(),
+            cull_stage: CullStage::new(),
             renderer: Some(renderer),
             jobs,
         }
@@ -259,6 +262,7 @@ impl Engine {
             input: Input::default(),
             jobs: JobPool::auto(),
             view: ViewState::default(),
+            cull_stage: CullStage::new(),
             renderer: None,
         }
     }
@@ -311,6 +315,7 @@ impl Engine {
     /// engine loop — games never call this directly.
     fn render_frame(&mut self, world: &mut World) {
         let _changes = world.drain_changes();
+        let _visibility = self.cull_stage.cull(world, &self.view, None);
 
         let Some(display) = self.display.as_mut() else {
             return;
