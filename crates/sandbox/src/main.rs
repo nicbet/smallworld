@@ -17,8 +17,6 @@ impl App for Game {
 }
 
 fn main() {
-    env_logger::init();
-
     Engine::run(
         EngineConfig::default(),
         World::new(),

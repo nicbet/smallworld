@@ -42,6 +42,34 @@ impl Default for WindowMode {
     }
 }
 
+/// Log level for engine output.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum LogLevel {
+    /// Errors only.
+    Error,
+    /// Errors and warnings.
+    Warn,
+    /// Errors, warnings, and informational messages (default).
+    #[default]
+    Info,
+    /// Verbose debug output.
+    Debug,
+    /// Maximum verbosity including per-frame traces.
+    Trace,
+}
+
+impl LogLevel {
+    fn to_filter(self) -> log::LevelFilter {
+        match self {
+            Self::Error => log::LevelFilter::Error,
+            Self::Warn => log::LevelFilter::Warn,
+            Self::Info => log::LevelFilter::Info,
+            Self::Debug => log::LevelFilter::Debug,
+            Self::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
 /// Configuration for engine initialization.
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -51,6 +79,8 @@ pub struct EngineConfig {
     pub window_mode: WindowMode,
     /// Enable vsync (maps to `PresentMode::AutoVsync` vs `AutoNoVsync`).
     pub vsync: bool,
+    /// Log level. Overridden by `SMALLWORLD_LOG` env var if set.
+    pub log_level: LogLevel,
 }
 
 impl Default for EngineConfig {
@@ -59,8 +89,39 @@ impl Default for EngineConfig {
             title: "smallworld".to_string(),
             window_mode: WindowMode::default(),
             vsync: true,
+            log_level: LogLevel::default(),
         }
     }
+}
+
+fn init_logger(level: LogLevel) {
+    use std::io::Write;
+
+    let filter = if let Ok(env_level) = std::env::var("SMALLWORLD_LOG") {
+        match env_level.to_lowercase().as_str() {
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => level.to_filter(),
+        }
+    } else {
+        level.to_filter()
+    };
+    env_logger::Builder::new()
+        .filter_level(filter)
+        .format(|buf, record| {
+            let ts = buf.timestamp_millis();
+            let level = record.level();
+            let module = record.module_path().unwrap_or("unknown");
+            writeln!(
+                buf,
+                "[{ts}] [smallworld] [{module}] [{level}] {}",
+                record.args()
+            )
+        })
+        .init();
 }
 
 /// Surface + its configuration, bundled as one concept.
@@ -122,6 +183,7 @@ impl Engine {
                 .expect("failed to create window"),
         );
 
+        log::info!("boot: creating GPU context");
         let instance = GpuContext::create_instance();
         let surface = instance
             .create_surface(window.clone())
@@ -142,6 +204,15 @@ impl Engine {
             surface.configure(&gpu.device, &surface_config);
         }
 
+        let vsync_label = if config.vsync { "on" } else { "off" };
+        log::info!(
+            "boot: surface {}x{} {:?} vsync={}",
+            surface_config.width,
+            surface_config.height,
+            surface_config.format,
+            vsync_label,
+        );
+
         let inner = window.inner_size();
         let renderer = PlaceholderRenderer::new(
             &gpu.device,
@@ -149,6 +220,7 @@ impl Engine {
             inner.width.max(1),
             inner.height.max(1),
         );
+        log::info!("boot: placeholder renderer ready");
 
         Self {
             window: Some(window),
@@ -336,6 +408,9 @@ impl Engine {
     /// Engine::run(EngineConfig::default(), World::new(), Game { .. });
     /// ```
     pub fn run(config: EngineConfig, world: World, app: impl App + 'static) {
+        init_logger(config.log_level);
+        log::info!("smallworld engine {}", crate::VERSION);
+
         let event_loop = EventLoop::new().expect("failed to create event loop");
         let mut runner = AppRunner {
             config: Some(config),
@@ -377,11 +452,7 @@ impl ApplicationHandler for AppRunner {
         }
         let config = self.config.take().unwrap_or_default();
         let engine = Engine::new(config, event_loop);
-        log::info!(
-            "engine: {} ({:?})",
-            engine.adapter_info().name,
-            engine.adapter_info().backend,
-        );
+        log::info!("game loop started");
         self.state = Some(AppRunnerState {
             engine,
             world: self.world.take().unwrap_or_default(),

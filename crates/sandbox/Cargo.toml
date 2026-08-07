@@ -15,7 +15,6 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-env_logger.workspace = true
 glam.workspace = true
 log.workspace = true
 smallworld-engine.workspace = true
