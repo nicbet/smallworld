@@ -227,7 +227,7 @@ impl Engine {
         let inner = window.inner_size();
         let w = inner.width.max(1);
         let h = inner.height.max(1);
-        let gbuffer_pass = GBufferPass::new(&gpu.device, surface_config.format, w, h);
+        let gbuffer_pass = GBufferPass::new(&gpu.device, &gpu.queue, surface_config.format, w, h);
         log::info!("boot: gbuffer pass ready");
 
         let lighting_pass = LightingPass::new(&gpu.device, surface_config.format, w, h);

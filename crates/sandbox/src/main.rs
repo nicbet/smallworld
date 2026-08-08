@@ -40,18 +40,30 @@ fn main() {
 }
 
 fn load_glb_scene(world: &mut World, path: &str) {
-    // Lights for the loaded model
+    // Key light — soft directional from above-front-right
     world.add_light(Light::directional(
-        Vec3::new(0.3, -1.0, 0.2),
-        Vec3::new(1.0, 0.98, 0.92),
-        3.0,
+        Vec3::new(0.5, -0.8, -0.3),
+        Vec3::new(1.0, 0.98, 0.95),
+        2.0,
     ));
-    world.add_light(Light::point(
-        Vec3::new(2.0, 3.0, -1.0),
-        15.0,
-        Vec3::new(1.0, 0.7, 0.4),
-        8.0,
-    ));
+
+    // Fill light — opposite side, cooler, softer (no shadows)
+    let mut fill = Light::directional(
+        Vec3::new(-0.4, -0.5, 0.3),
+        Vec3::new(0.7, 0.8, 1.0),
+        1.0,
+    );
+    fill.casts_shadows = false;
+    world.add_light(fill);
+
+    // Rim light from behind — subtle highlight on edges
+    let mut rim = Light::directional(
+        Vec3::new(0.0, -0.3, 0.9),
+        Vec3::new(1.0, 0.95, 0.9),
+        0.8,
+    );
+    rim.casts_shadows = false;
+    world.add_light(rim);
 
     match smallworld_engine::assets::load_glb(path) {
         Ok(scene) => {
@@ -126,6 +138,7 @@ fn populate_test_scene(world: &mut World) {
         roughness: 0.85,
         metallic: 0.0,
         emissive: Vec3::ZERO,
+        ..Material::default()
     });
 
     let metal = world.add_material(Material {
@@ -133,6 +146,7 @@ fn populate_test_scene(world: &mut World) {
         roughness: 0.15,
         metallic: 1.0,
         emissive: Vec3::ZERO,
+        ..Material::default()
     });
 
     let red_plastic = world.add_material(Material {
@@ -140,6 +154,7 @@ fn populate_test_scene(world: &mut World) {
         roughness: 0.4,
         metallic: 0.0,
         emissive: Vec3::ZERO,
+        ..Material::default()
     });
 
     let wood = world.add_material(Material {
@@ -147,6 +162,7 @@ fn populate_test_scene(world: &mut World) {
         roughness: 0.7,
         metallic: 0.0,
         emissive: Vec3::ZERO,
+        ..Material::default()
     });
 
     // -- Floor (20×20 metres) --

@@ -13,6 +13,7 @@
 //! 3. `<workspace root>/assets` — the development layout, derived from the compile-time
 //!    `CARGO_MANIFEST_DIR`.
 
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -21,7 +22,8 @@ use glam::{Mat4, Quat, Vec3, Vec4};
 
 use crate::material::Material;
 use crate::mesh::{Mesh, MeshInstance, Vertex};
-use crate::world::{MeshInstanceKey, World};
+use crate::texture::TextureData;
+use crate::world::{MeshInstanceKey, TextureKey, World};
 
 /// Environment variable that overrides asset-root discovery.
 pub const ASSET_ROOT_ENV: &str = "SMALLWORLD_ASSETS";
@@ -93,10 +95,23 @@ fn dev_root() -> PathBuf {
 pub struct LoadedMesh {
     /// Mesh geometry.
     pub mesh: Mesh,
-    /// PBR material (scalar properties only, no textures).
+    /// PBR material (scalar properties, texture indices into LoadedScene::textures).
     pub material: Material,
+    /// Texture indices into [`LoadedScene::textures`] for this material.
+    pub texture_indices: MaterialTextures,
     /// Whether both sides of triangles should be rendered.
     pub double_sided: bool,
+}
+
+/// Indices into [`LoadedScene::textures`] for a material's texture slots.
+#[derive(Default)]
+pub struct MaterialTextures {
+    /// Albedo / base color texture index.
+    pub albedo: Option<usize>,
+    /// Normal map texture index.
+    pub normal: Option<usize>,
+    /// Roughness (G) + metallic (B) packed texture index.
+    pub roughness_metallic: Option<usize>,
 }
 
 /// A placed instance referencing a mesh in [`LoadedScene::meshes`].
@@ -115,13 +130,27 @@ pub struct LoadedInstance {
 pub struct LoadedScene {
     /// Unique mesh+material pairs (one per glTF primitive).
     pub meshes: Vec<LoadedMesh>,
+    /// Texture image data referenced by materials.
+    pub textures: Vec<TextureData>,
     /// Instances placed via the glTF node tree.
     pub instances: Vec<LoadedInstance>,
 }
 
 impl LoadedScene {
-    /// Adds all meshes, materials, and instances to the World.
+    /// Adds all meshes, materials, textures, and instances to the World.
     pub fn spawn(&self, world: &mut World) -> Vec<MeshInstanceKey> {
+        let tex_keys: Vec<TextureKey> = self
+            .textures
+            .iter()
+            .map(|td| {
+                world.add_texture(TextureData {
+                    pixels: td.pixels.clone(),
+                    width: td.width,
+                    height: td.height,
+                })
+            })
+            .collect();
+
         let mesh_keys: Vec<_> = self
             .meshes
             .iter()
@@ -130,7 +159,11 @@ impl LoadedScene {
                     lm.mesh.vertices.clone(),
                     lm.mesh.indices.clone(),
                 ));
-                let mat_key = world.add_material(lm.material.clone());
+                let mut mat = lm.material.clone();
+                mat.albedo_map = lm.texture_indices.albedo.map(|i| tex_keys[i]);
+                mat.normal_map = lm.texture_indices.normal.map(|i| tex_keys[i]);
+                mat.roughness_metallic_map = lm.texture_indices.roughness_metallic.map(|i| tex_keys[i]);
+                let mat_key = world.add_material(mat);
                 (mesh_key, mat_key)
             })
             .collect();
@@ -157,12 +190,40 @@ impl LoadedScene {
 /// properties. Returns an error string on failure.
 pub fn load_glb(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     let path = path.as_ref();
-    let (document, buffers, _images) =
+    let (document, buffers, images) =
         gltf::import(path).map_err(|e| format!("failed to load {}: {e}", path.display()))?;
 
+    // Convert glTF images to RGBA8 TextureData
+    let mut textures: Vec<TextureData> = Vec::new();
+    let mut image_index_map: HashMap<usize, usize> = HashMap::new();
+
+    for (i, image) in images.iter().enumerate() {
+        let rgba = match image.format {
+            gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+            gltf::image::Format::R8G8B8 => {
+                let mut rgba = Vec::with_capacity(image.pixels.len() / 3 * 4);
+                for chunk in image.pixels.chunks(3) {
+                    rgba.extend_from_slice(chunk);
+                    rgba.push(255);
+                }
+                rgba
+            }
+            other => {
+                log::warn!("unsupported image format {other:?} for image {i}, skipping");
+                continue;
+            }
+        };
+        let tex_idx = textures.len();
+        image_index_map.insert(i, tex_idx);
+        textures.push(TextureData {
+            pixels: rgba,
+            width: image.width,
+            height: image.height,
+        });
+    }
+
     let mut meshes = Vec::new();
-    let mut mesh_index_map: std::collections::HashMap<(usize, usize), usize> =
-        std::collections::HashMap::new();
+    let mut mesh_index_map: HashMap<(usize, usize), usize> = HashMap::new();
 
     for gltf_mesh in document.meshes() {
         for primitive in gltf_mesh.primitives() {
@@ -212,12 +273,14 @@ pub fn load_glb(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             let gltf_mat = primitive.material();
             let material = extract_material(&primitive);
             let double_sided = gltf_mat.double_sided();
+            let texture_indices = extract_texture_indices(&gltf_mat, &image_index_map);
 
             let idx = meshes.len();
             mesh_index_map.insert(key, idx);
             meshes.push(LoadedMesh {
                 mesh: Mesh::new(vertices, indices),
                 material,
+                texture_indices,
                 double_sided,
             });
         }
@@ -240,13 +303,36 @@ pub fn load_glb(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
     }
 
     log::info!(
-        "loaded {}: {} meshes, {} instances",
+        "loaded {}: {} meshes, {} textures, {} instances",
         path.display(),
         meshes.len(),
+        textures.len(),
         instances.len()
     );
 
-    Ok(LoadedScene { meshes, instances })
+    Ok(LoadedScene {
+        meshes,
+        textures,
+        instances,
+    })
+}
+
+fn extract_texture_indices(
+    mat: &gltf::Material<'_>,
+    image_map: &HashMap<usize, usize>,
+) -> MaterialTextures {
+    let pbr = mat.pbr_metallic_roughness();
+    MaterialTextures {
+        albedo: pbr
+            .base_color_texture()
+            .and_then(|t| image_map.get(&t.texture().source().index()).copied()),
+        normal: mat
+            .normal_texture()
+            .and_then(|t| image_map.get(&t.texture().source().index()).copied()),
+        roughness_metallic: pbr
+            .metallic_roughness_texture()
+            .and_then(|t| image_map.get(&t.texture().source().index()).copied()),
+    }
 }
 
 fn extract_material(primitive: &gltf::Primitive<'_>) -> Material {
@@ -260,13 +346,14 @@ fn extract_material(primitive: &gltf::Primitive<'_>) -> Material {
         roughness: pbr.roughness_factor(),
         metallic: pbr.metallic_factor(),
         emissive: Vec3::new(em[0], em[1], em[2]),
+        ..Material::default()
     }
 }
 
 fn collect_instances(
     node: &gltf::Node<'_>,
     parent_transform: Mat4,
-    mesh_map: &std::collections::HashMap<(usize, usize), usize>,
+    mesh_map: &HashMap<(usize, usize), usize>,
     out: &mut Vec<LoadedInstance>,
 ) {
     let local = Mat4::from_cols_array_2d(&node.transform().matrix());

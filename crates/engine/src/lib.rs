@@ -24,6 +24,7 @@ pub mod raymarcher;
 pub mod shaders;
 pub mod stream;
 pub mod svo;
+pub mod texture;
 pub mod volume;
 pub mod voxel_object;
 pub mod world;

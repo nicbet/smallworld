@@ -2,8 +2,9 @@
 //!
 //! Renders visible cached meshes into a GBuffer (albedo, normal,
 //! material) with depth. Builds the HZB mip chain from depth for
-//! next frame's occlusion culling. Blits albedo to the swapchain
-//! as a debug view until the lighting pass lands.
+//! next frame's occlusion culling.
+
+use std::collections::HashMap;
 
 use glam::Mat4;
 
@@ -11,7 +12,7 @@ use crate::camera::FreeCamera;
 use crate::mesh::Vertex;
 use crate::shaders;
 use crate::stream::{GpuMesh, StreamOutput};
-use crate::world::World;
+use crate::world::{TextureKey, World};
 
 // ---------------------------------------------------------------------------
 // Uniform structs (must match WGSL layout)
@@ -162,17 +163,154 @@ impl HzbBuilder {
         }));
     }
 
-    // Mip chain build deferred — requires depth→R32Float copy that
-    // needs a separate compute pass with texture_depth_2d binding.
-    // The CullStage doesn't use HZB yet (passes None). The build
-    // step lands when GPU occlusion culling is implemented.
-
     #[allow(dead_code)]
     fn view(&self) -> Option<wgpu::TextureView> {
         self.texture
             .as_ref()
             .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// GPU texture cache
+// ---------------------------------------------------------------------------
+
+struct GpuTextureEntry {
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+struct TextureCache {
+    cache: HashMap<TextureKey, GpuTextureEntry>,
+    fallback_albedo: GpuTextureEntry,
+    fallback_normal: GpuTextureEntry,
+    fallback_roughness_metallic: GpuTextureEntry,
+}
+
+impl TextureCache {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let fallback_albedo = create_1x1_texture(device, queue, "fallback_albedo", &[255, 255, 255, 255]);
+        let fallback_normal = create_1x1_texture(device, queue, "fallback_normal", &[128, 128, 255, 255]);
+        let fallback_roughness_metallic =
+            create_1x1_texture(device, queue, "fallback_rm", &[255, 128, 0, 255]);
+
+        Self {
+            cache: HashMap::new(),
+            fallback_albedo,
+            fallback_normal,
+            fallback_roughness_metallic,
+        }
+    }
+
+    fn get_or_upload(
+        &mut self,
+        key: TextureKey,
+        world: &World,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> &wgpu::TextureView {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.cache.entry(key)
+            && let Some(data) = world.texture(key)
+        {
+            e.insert(upload_texture(device, queue, data));
+        }
+        self.cache
+            .get(&key)
+            .map(|e| &e.view)
+            .unwrap_or(&self.fallback_albedo.view)
+    }
+
+    fn view_or_fallback<'a>(&'a self, key: Option<TextureKey>, fallback: &'a wgpu::TextureView) -> &'a wgpu::TextureView {
+        key.and_then(|k| self.cache.get(&k))
+            .map(|e| &e.view)
+            .unwrap_or(fallback)
+    }
+}
+
+fn create_1x1_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    rgba: &[u8; 4],
+) -> GpuTextureEntry {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    GpuTextureEntry { texture, view }
+}
+
+fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    data: &crate::texture::TextureData,
+) -> GpuTextureEntry {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("material_texture"),
+        size: wgpu::Extent3d {
+            width: data.width,
+            height: data.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * data.width),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: data.width,
+            height: data.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    GpuTextureEntry { texture, view }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +326,13 @@ pub struct GBufferPass {
     frame_bind_group_layout: wgpu::BindGroupLayout,
     #[allow(dead_code)]
     draw_bind_group_layout: wgpu::BindGroupLayout,
+    tex_bind_group_layout: wgpu::BindGroupLayout,
     frame_uniform_buf: wgpu::Buffer,
     draw_uniform_buf: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
+    tex_sampler: wgpu::Sampler,
+    texture_cache: TextureCache,
     hzb: HzbBuilder,
     #[allow(dead_code)]
     surface_format: wgpu::TextureFormat,
@@ -204,13 +345,13 @@ impl GBufferPass {
     /// Creates the GBuffer pass for the given surface format and size.
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
         let gbuffer = GBuffer::new(device, width, height);
 
-        // --- GBuffer pipeline ---
         let gbuffer_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gbuffer"),
             source: wgpu::ShaderSource::Wgsl(shaders::load(shaders::Shader::GBuffer)),
@@ -244,6 +385,49 @@ impl GBufferPass {
                     },
                     count: None,
                 }],
+            });
+
+        let tex_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gbuf_textures"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
             });
 
         let frame_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -292,6 +476,7 @@ impl GBufferPass {
                 bind_group_layouts: &[
                     Some(&frame_bind_group_layout),
                     Some(&draw_bind_group_layout),
+                    Some(&tex_bind_group_layout),
                 ],
                 immediate_size: 0,
             });
@@ -365,6 +550,15 @@ impl GBufferPass {
         let gbuffer_pipeline = make_pipeline("gbuffer", Some(wgpu::Face::Back));
         let gbuffer_pipeline_double_sided = make_pipeline("gbuffer_double_sided", None);
 
+        let tex_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
+        let texture_cache = TextureCache::new(device, queue);
         let hzb = HzbBuilder::new();
 
         Self {
@@ -373,17 +567,20 @@ impl GBufferPass {
             gbuffer_pipeline_double_sided,
             frame_bind_group_layout,
             draw_bind_group_layout,
+            tex_bind_group_layout,
             frame_uniform_buf,
             draw_uniform_buf,
             frame_bind_group,
             draw_bind_group,
+            tex_sampler,
+            texture_cache,
             hzb,
             surface_format,
             max_draws: MAX_DRAWS,
         }
     }
 
-    /// Recreates GBuffer textures and blit bind group on resize.
+    /// Recreates GBuffer textures on resize.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == self.gbuffer.width && height == self.gbuffer.height {
             return;
@@ -409,13 +606,11 @@ impl GBufferPass {
     ) {
         let view_proj = camera.projection_matrix() * camera.view_matrix();
 
-        // Write frame uniforms
         let frame_uniforms = FrameUniforms {
             view_proj: view_proj.to_cols_array(),
         };
         queue.write_buffer(&self.frame_uniform_buf, 0, bytemuck::bytes_of(&frame_uniforms));
 
-        // Collect draws and write per-draw uniforms
         let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
         let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(min_align) * min_align;
 
@@ -423,12 +618,15 @@ impl GBufferPass {
             gpu_mesh: &'a GpuMesh,
             dynamic_offset: u32,
             double_sided: bool,
+            albedo_key: Option<TextureKey>,
+            normal_key: Option<TextureKey>,
+            rm_key: Option<TextureKey>,
         }
 
         let mut draws: Vec<DrawCall<'_>> = Vec::new();
         let mut draw_index: u32 = 0;
 
-        // Volume meshes (identity model matrix, white material)
+        // Volume meshes
         for (_key, gpu_mesh) in &stream_output.volume_meshes {
             if draw_index >= self.max_draws {
                 break;
@@ -445,16 +643,19 @@ impl GBufferPass {
                 gpu_mesh,
                 dynamic_offset: offset as u32,
                 double_sided: false,
+                albedo_key: None,
+                normal_key: None,
+                rm_key: None,
             });
             draw_index += 1;
         }
 
-        // Mesh instance meshes
+        // Mesh instances
         for (key, gpu_mesh) in &stream_output.mesh_instances {
             if draw_index >= self.max_draws {
                 break;
             }
-            let (model, base_color, roughness, metallic, double_sided) =
+            let (model, base_color, roughness, metallic, double_sided, albedo_key, normal_key, rm_key) =
                 if let Some(inst) = world.mesh_instance(*key) {
                     let model = Mat4::from_scale_rotation_translation(
                         inst.scale,
@@ -465,9 +666,12 @@ impl GBufferPass {
                     let bc = mat.map(|m| m.base_color.to_array()).unwrap_or([1.0; 4]);
                     let rough = mat.map(|m| m.roughness).unwrap_or(0.5);
                     let metal = mat.map(|m| m.metallic).unwrap_or(0.0);
-                    (model, bc, rough, metal, inst.double_sided)
+                    let albedo = mat.and_then(|m| m.albedo_map);
+                    let normal = mat.and_then(|m| m.normal_map);
+                    let rm = mat.and_then(|m| m.roughness_metallic_map);
+                    (model, bc, rough, metal, inst.double_sided, albedo, normal, rm)
                 } else {
-                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0, false)
+                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0, false, None, None, None)
                 };
 
             let uniforms = DrawUniforms {
@@ -482,8 +686,18 @@ impl GBufferPass {
                 gpu_mesh,
                 dynamic_offset: offset as u32,
                 double_sided,
+                albedo_key,
+                normal_key,
+                rm_key,
             });
             draw_index += 1;
+        }
+
+        // Ensure all referenced textures are uploaded
+        for draw in &draws {
+            for key in [draw.albedo_key, draw.normal_key, draw.rm_key].into_iter().flatten() {
+                self.texture_cache.get_or_upload(key, world, device, queue);
+            }
         }
 
         // --- GBuffer render pass ---
@@ -550,7 +764,45 @@ impl GBufferPass {
                         rpass.set_pipeline(&self.gbuffer_pipeline);
                     }
                 }
+
+                let albedo_view = self.texture_cache.view_or_fallback(
+                    draw.albedo_key,
+                    &self.texture_cache.fallback_albedo.view,
+                );
+                let normal_view = self.texture_cache.view_or_fallback(
+                    draw.normal_key,
+                    &self.texture_cache.fallback_normal.view,
+                );
+                let rm_view = self.texture_cache.view_or_fallback(
+                    draw.rm_key,
+                    &self.texture_cache.fallback_roughness_metallic.view,
+                );
+
+                let tex_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("gbuf_tex"),
+                    layout: &self.tex_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(albedo_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(normal_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(rm_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.tex_sampler),
+                        },
+                    ],
+                });
+
                 rpass.set_bind_group(1, &self.draw_bind_group, &[draw.dynamic_offset]);
+                rpass.set_bind_group(2, &tex_bind_group, &[]);
                 rpass.set_vertex_buffer(0, draw.gpu_mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(
                     draw.gpu_mesh.index_buffer.slice(..),

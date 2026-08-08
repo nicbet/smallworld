@@ -11,6 +11,7 @@
 use crate::light::Light;
 use crate::material::Material;
 use crate::mesh::{Mesh, MeshInstance};
+use crate::texture::TextureData;
 use crate::volume::VoxelVolume;
 
 slotmap::new_key_type! {
@@ -24,6 +25,8 @@ slotmap::new_key_type! {
     pub struct MaterialKey;
     /// Stable handle to a [`Light`] in the World.
     pub struct LightKey;
+    /// Stable handle to a [`TextureData`] in the World.
+    pub struct TextureKey;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +178,8 @@ pub struct World {
     materials: slotmap::SlotMap<MaterialKey, Material>,
     material_changes: ChangeSet<MaterialKey>,
 
+    textures: slotmap::SlotMap<TextureKey, TextureData>,
+
     lights: slotmap::SlotMap<LightKey, Light>,
 }
 
@@ -197,6 +202,7 @@ impl World {
             mesh_instance_changes: ChangeSet::new(),
             materials: slotmap::SlotMap::with_key(),
             material_changes: ChangeSet::new(),
+            textures: slotmap::SlotMap::with_key(),
             lights: slotmap::SlotMap::with_key(),
         }
     }
@@ -357,6 +363,25 @@ impl World {
         self.materials.len()
     }
 
+    // -- Textures (immutable after creation, no change tracking) ----------
+
+    /// Registers a texture and returns its handle.
+    pub fn add_texture(&mut self, texture: TextureData) -> TextureKey {
+        self.textures.insert(texture)
+    }
+
+    /// Read access to a texture by key.
+    #[must_use]
+    pub fn texture(&self, key: TextureKey) -> Option<&TextureData> {
+        self.textures.get(key)
+    }
+
+    /// Number of textures in the world.
+    #[must_use]
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
     // -- Lights (no change tracking — re-packed per frame) ----------------
 
     /// Adds a light and returns its handle.
@@ -438,6 +463,7 @@ mod tests {
             roughness: 0.5,
             metallic: 0.0,
             emissive: Vec3::ZERO,
+            ..Material::default()
         }
     }
 

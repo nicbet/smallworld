@@ -15,6 +15,12 @@ struct DrawUniforms {
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(0) var<uniform> draw: DrawUniforms;
 
+// Material textures (group 2)
+@group(2) @binding(0) var t_albedo: texture_2d<f32>;
+@group(2) @binding(1) var t_normal: texture_2d<f32>;
+@group(2) @binding(2) var t_roughness_metallic: texture_2d<f32>;
+@group(2) @binding(3) var t_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -25,6 +31,9 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
+    @location(1) world_tangent: vec3<f32>,
+    @location(2) tangent_w: f32,
+    @location(3) uv: vec2<f32>,
 }
 
 @vertex
@@ -33,6 +42,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_pos = frame.view_proj * world_pos;
     out.world_normal = normalize((draw.model * vec4<f32>(in.normal, 0.0)).xyz);
+    out.world_tangent = normalize((draw.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz);
+    out.tangent_w = in.tangent.w;
+    out.uv = in.uv;
     return out;
 }
 
@@ -61,15 +73,35 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> GBufferOutput {
+    // Albedo: texture * base_color
+    let tex_color = textureSample(t_albedo, t_sampler, in.uv);
+    let albedo = tex_color * draw.base_color;
+
+    // Normal: TBN transform from normal map, or vertex normal
     var n = normalize(in.world_normal);
     if !is_front {
         n = -n;
     }
-    let oct = oct_encode(n);
+    let t = normalize(in.world_tangent);
+    let b = cross(n, t) * in.tangent_w;
+    let tbn = mat3x3<f32>(t, b, n);
+
+    let normal_sample = textureSample(t_normal, t_sampler, in.uv).xyz;
+    let tangent_normal = normal_sample * 2.0 - 1.0;
+    // If the normal map is the flat fallback (0.5, 0.5, 1.0), this produces (0, 0, 1)
+    // which transforms to the vertex normal via TBN — correct fallback behavior.
+    let world_normal = normalize(tbn * tangent_normal);
+
+    let oct = oct_encode(world_normal);
+
+    // Roughness / metallic: texture channels * scalar
+    let rm_sample = textureSample(t_roughness_metallic, t_sampler, in.uv);
+    let roughness = rm_sample.g * draw.roughness_metallic.x;
+    let metallic = rm_sample.b * draw.roughness_metallic.y;
 
     var out: GBufferOutput;
-    out.albedo = draw.base_color;
+    out.albedo = albedo;
     out.normal = vec4<f32>(oct, 0.0, 1.0);
-    out.material = vec4<f32>(draw.roughness_metallic, 0.0, 0.0);
+    out.material = vec4<f32>(roughness, metallic, 0.0, 0.0);
     return out;
 }
