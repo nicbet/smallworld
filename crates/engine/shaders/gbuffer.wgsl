@@ -1,16 +1,20 @@
-// GBuffer pass: renders meshes into albedo + normal + material targets.
-// Position is reconstructed from depth in the lighting shader.
+// GBuffer pass: renders meshes into albedo + normal + material + emissive +
+// velocity + aux targets. Position is reconstructed from depth in the
+// lighting shader.
 
 struct FrameUniforms {
     view_proj: mat4x4<f32>,
+    prev_view_proj: mat4x4<f32>,
 }
 
 struct DrawUniforms {
     model: mat4x4<f32>,
     base_color: vec4<f32>,
     roughness_metallic: vec2<f32>,
-    _pad: vec2<f32>,
+    material_id: u32,
+    _pad: u32,
     emissive: vec4<f32>,
+    prev_model: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -36,17 +40,22 @@ struct VertexOutput {
     @location(1) world_tangent: vec3<f32>,
     @location(2) tangent_w: f32,
     @location(3) uv: vec2<f32>,
+    @location(4) cur_pos_clip: vec4<f32>,
+    @location(5) prev_pos_clip: vec4<f32>,
 }
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     let world_pos = draw.model * vec4<f32>(in.position, 1.0);
+    let prev_world_pos = draw.prev_model * vec4<f32>(in.position, 1.0);
     var out: VertexOutput;
     out.clip_pos = frame.view_proj * world_pos;
     out.world_normal = normalize((draw.model * vec4<f32>(in.normal, 0.0)).xyz);
     out.world_tangent = normalize((draw.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz);
     out.tangent_w = in.tangent.w;
     out.uv = in.uv;
+    out.cur_pos_clip = out.clip_pos;
+    out.prev_pos_clip = frame.prev_view_proj * prev_world_pos;
     return out;
 }
 
@@ -55,6 +64,8 @@ struct GBufferOutput {
     @location(1) normal: vec4<f32>,
     @location(2) material: vec4<f32>,
     @location(3) emissive: vec4<f32>,
+    @location(4) velocity: vec2<f32>,
+    @location(5) aux: u32,
 }
 
 // Octahedral normal encoding: unit sphere → [0,1]² for Unorm storage.
@@ -106,10 +117,16 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> GBufferOu
     let emissive_sample = textureSample(t_emissive, t_sampler, in.uv);
     let emissive_out = emissive_sample.rgb * draw.emissive.xyz;
 
+    // Velocity: NDC delta between current and previous frame
+    let cur_ndc = in.cur_pos_clip.xy / in.cur_pos_clip.w;
+    let prev_ndc = in.prev_pos_clip.xy / in.prev_pos_clip.w;
+
     var out: GBufferOutput;
     out.albedo = albedo;
     out.normal = vec4<f32>(oct, 0.0, 1.0);
     out.material = vec4<f32>(roughness, metallic, 0.0, 0.0);
     out.emissive = vec4<f32>(emissive_out, 1.0);
+    out.velocity = cur_ndc - prev_ndc;
+    out.aux = draw.material_id & 0x7FFFu;
     return out;
 }

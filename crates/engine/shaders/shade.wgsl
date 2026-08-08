@@ -9,6 +9,8 @@
 @group(0) @binding(2) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(3) var gbuf_material: texture_2d<f32>;
 @group(0) @binding(5) var gbuf_emissive: texture_2d<f32>;
+@group(0) @binding(6) var gbuf_velocity: texture_2d<f32>;
+@group(0) @binding(7) var gbuf_aux: texture_2d<u32>;
 
 // ---- Camera + lights (group 1) ----
 

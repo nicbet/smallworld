@@ -9,8 +9,10 @@ struct DrawUniforms {
     model: mat4x4<f32>,
     base_color: vec4<f32>,
     roughness_metallic: vec2<f32>,
-    _pad: vec2<f32>,
+    material_id: u32,
+    _pad: u32,
     emissive: vec4<f32>,
+    prev_model: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> shadow: ShadowUniforms;

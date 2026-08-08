@@ -22,6 +22,7 @@ use crate::world::{TextureKey, World};
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniforms {
     view_proj: [f32; 16],
+    prev_view_proj: [f32; 16],
 }
 
 #[repr(C)]
@@ -30,8 +31,10 @@ struct DrawUniforms {
     model: [f32; 16],
     base_color: [f32; 4],
     roughness_metallic: [f32; 2],
-    _pad: [f32; 2],
+    material_id: u32,
+    _pad: u32,
     emissive: [f32; 4],
+    prev_model: [f32; 16],
 }
 
 const DRAW_UNIFORM_SIZE: u64 = size_of::<DrawUniforms>() as u64;
@@ -52,6 +55,10 @@ pub struct GBuffer {
     pub material_view: wgpu::TextureView,
     /// Emissive radiance render target view (Rgba16Float for HDR).
     pub emissive_view: wgpu::TextureView,
+    /// Screen-space velocity (NDC delta, Rg16Float).
+    pub velocity_view: wgpu::TextureView,
+    /// Aux channel: material ID (bits 0-14) + source flag (bit 15), R16Uint.
+    pub aux_view: wgpu::TextureView,
     #[allow(dead_code)]
     albedo_tex: wgpu::Texture,
     #[allow(dead_code)]
@@ -123,6 +130,28 @@ impl GBuffer {
             view_formats: &[],
         });
 
+        let velocity_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gbuf_velocity"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let aux_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gbuf_aux"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Uint,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
         let default_view = wgpu::TextureViewDescriptor::default();
 
         Self {
@@ -131,6 +160,8 @@ impl GBuffer {
             normal_view: normal_tex.create_view(&default_view),
             material_view: material_tex.create_view(&default_view),
             emissive_view: emissive_tex.create_view(&default_view),
+            velocity_view: velocity_tex.create_view(&default_view),
+            aux_view: aux_tex.create_view(&default_view),
             albedo_tex,
             depth_tex,
             width,
@@ -358,6 +389,7 @@ pub struct GBufferPass {
     surface_format: wgpu::TextureFormat,
     draw_stride: u64,
     max_draws: u32,
+    prev_view_proj: Option<Mat4>,
 }
 
 const MAX_DRAWS: u32 = 256;
@@ -545,6 +577,16 @@ impl GBufferPass {
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rg16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R16Uint,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
         ];
 
         let depth_stencil = wgpu::DepthStencilState {
@@ -615,6 +657,7 @@ impl GBufferPass {
             surface_format,
             draw_stride,
             max_draws: MAX_DRAWS,
+            prev_view_proj: None,
         }
     }
 
@@ -643,11 +686,14 @@ impl GBufferPass {
         stream_output: &StreamOutput<'_>,
     ) {
         let view_proj = camera.projection_matrix() * camera.view_matrix();
+        let prev_vp = self.prev_view_proj.unwrap_or(view_proj);
 
         let frame_uniforms = FrameUniforms {
             view_proj: view_proj.to_cols_array(),
+            prev_view_proj: prev_vp.to_cols_array(),
         };
         queue.write_buffer(&self.frame_uniform_buf, 0, bytemuck::bytes_of(&frame_uniforms));
+        self.prev_view_proj = Some(view_proj);
 
         let draw_stride = self.draw_stride;
 
@@ -673,8 +719,10 @@ impl GBufferPass {
                 model: Mat4::IDENTITY.to_cols_array(),
                 base_color: [0.6, 0.6, 0.6, 1.0],
                 roughness_metallic: [0.8, 0.0],
-                _pad: [0.0; 2],
+                material_id: 0,
+                _pad: 0,
                 emissive: [0.0; 4],
+                prev_model: Mat4::IDENTITY.to_cols_array(),
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&uniforms));
@@ -720,8 +768,10 @@ impl GBufferPass {
                 model: model.to_cols_array(),
                 base_color,
                 roughness_metallic: [roughness, metallic],
-                _pad: [0.0; 2],
+                material_id: 0,
+                _pad: 0,
                 emissive: [emissive.x, emissive.y, emissive.z, 0.0],
+                prev_model: model.to_cols_array(),
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&uniforms));
@@ -783,6 +833,24 @@ impl GBufferPass {
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.gbuffer.emissive_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.gbuffer.velocity_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.gbuffer.aux_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

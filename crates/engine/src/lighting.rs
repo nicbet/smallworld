@@ -83,8 +83,10 @@ struct DrawUniforms {
     model: [f32; 16],
     base_color: [f32; 4],
     roughness_metallic: [f32; 2],
-    _pad: [f32; 2],
+    material_id: u32,
+    _pad: u32,
     emissive: [f32; 4],
+    prev_model: [f32; 16],
 }
 
 const DRAW_UNIFORM_SIZE: u64 = size_of::<DrawUniforms>() as u64;
@@ -468,8 +470,10 @@ impl ShadowAtlas {
                 model: Mat4::IDENTITY.to_cols_array(),
                 base_color: [0.0; 4],
                 roughness_metallic: [0.0; 2],
-                _pad: [0.0; 2],
+                material_id: 0,
+                _pad: 0,
                 emissive: [0.0; 4],
+                prev_model: Mat4::IDENTITY.to_cols_array(),
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&du));
@@ -494,8 +498,10 @@ impl ShadowAtlas {
                 model: model.to_cols_array(),
                 base_color: [0.0; 4],
                 roughness_metallic: [0.0; 2],
-                _pad: [0.0; 2],
+                material_id: 0,
+                _pad: 0,
                 emissive: [0.0; 4],
+                prev_model: model.to_cols_array(),
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&du));
@@ -897,6 +903,8 @@ impl LightingPass {
                         count: None,
                     },
                     bgl_texture(5, wgpu::TextureSampleType::Float { filterable: false }),
+                    bgl_texture(6, wgpu::TextureSampleType::Float { filterable: false }),
+                    bgl_texture(7, wgpu::TextureSampleType::Uint),
                 ],
             });
 
@@ -1278,6 +1286,14 @@ impl LightingPass {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&gbuffer.emissive_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&gbuffer.velocity_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&gbuffer.aux_view),
                 },
             ],
         });
