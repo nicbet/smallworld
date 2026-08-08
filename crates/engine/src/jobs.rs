@@ -4,8 +4,7 @@
 //! The trait defines the stable task API; the backend can be replaced
 //! (e.g. with a custom crossbeam-deque scheduler) without changing callers.
 
-use std::cell::UnsafeCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -13,28 +12,21 @@ use crossbeam_channel::{Receiver, Sender};
 /// Opaque handle to a spawned task. Can be waited on or polled.
 pub(crate) struct TaskHandle<T> {
     rx: Receiver<T>,
-    cached: UnsafeCell<Option<T>>,
+    cached: Mutex<Option<T>>,
 }
-
-// SAFETY: TaskHandle is only accessed from one thread at a time in practice
-// (the owner polls or waits). The UnsafeCell is never shared — we use it to
-// cache a value between is_complete() and wait() without requiring &mut self.
-// The T: Send bound on construction ensures the value can cross threads.
-unsafe impl<T: Send> Send for TaskHandle<T> {}
 
 impl<T: Send + 'static> TaskHandle<T> {
     fn new(rx: Receiver<T>) -> Self {
         Self {
             rx,
-            cached: UnsafeCell::new(None),
+            cached: Mutex::new(None),
         }
     }
 
     /// Blocks until the task completes and returns the result.
     pub(crate) fn wait(self) -> T {
-        // SAFETY: no concurrent access — we own self by value.
-        let cached = unsafe { &mut *self.cached.get() };
-        if let Some(val) = cached.take() {
+        let cached = self.cached.lock().expect("poisoned").take();
+        if let Some(val) = cached {
             return val;
         }
         self.rx.recv().expect("task dropped without completing")
@@ -42,8 +34,7 @@ impl<T: Send + 'static> TaskHandle<T> {
 
     /// Returns true if the task has completed.
     pub(crate) fn is_complete(&self) -> bool {
-        // SAFETY: single-owner access pattern — only the holder calls this.
-        let cached = unsafe { &mut *self.cached.get() };
+        let mut cached = self.cached.lock().expect("poisoned");
         if cached.is_some() {
             return true;
         }
@@ -59,6 +50,7 @@ impl<T: Send + 'static> TaskHandle<T> {
 
 /// Scheduler backend trait. Implementations provide the thread pool and
 /// work distribution; callers use the stable API surface.
+#[allow(dead_code)]
 pub(crate) trait Scheduler: Send + Sync {
     /// Spawn a task on the pool. Returns a handle to wait on or poll.
     fn spawn<T: Send + 'static>(

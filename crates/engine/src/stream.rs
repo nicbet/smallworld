@@ -318,13 +318,15 @@ const DEFAULT_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 /// Default per-frame upload cap: 8 MB.
 const DEFAULT_UPLOAD_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
 
+type ExtractionResult = (VolumeKey, MeshData, f32);
+
 /// Second pipeline stage. Manages async mesh extraction, GPU upload,
 /// caching, and eviction.
 pub struct StreamStage {
     cache: MeshCache,
     extractor: Arc<dyn MeshExtractor>,
     pending: HashSet<VolumeKey>,
-    pending_handles: Vec<(VolumeKey, TaskHandle<(VolumeKey, MeshData, f32)>)>,
+    pending_handles: Vec<(VolumeKey, TaskHandle<ExtractionResult>)>,
     ready_queue: Vec<ReadyEntry>,
     upload_budget_bytes: u64,
 }
