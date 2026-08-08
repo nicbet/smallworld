@@ -1,158 +1,265 @@
-//! Persistent worker pool for engine-internal background work.
+//! Two-layer job system: [`Scheduler`] trait (swappable backend) +
+//! [`RayonScheduler`] (initial rayon-backed implementation).
 //!
-//! The pool is initialized at engine boot and serves OOC pipeline tasks
-//! (streaming, worldgen, meshing). It is **not** exposed to games — a
-//! game-facing job API with priorities, cancellation, and budget control
-//! is a separate concern.
+//! The trait defines the stable task API; the backend can be replaced
+//! (e.g. with a custom crossbeam-deque scheduler) without changing callers.
 
-use std::any::Any;
+use std::cell::UnsafeCell;
+use std::sync::Arc;
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender};
 
-type Job = Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
-
-/// Persistent worker pool. Workers pull jobs from a shared queue and
-/// send results through a completion channel.
-#[allow(dead_code)]
-pub(crate) struct JobPool {
-    job_tx: Option<Sender<Job>>,
-    result_rx: Receiver<Box<dyn Any + Send>>,
-    workers: Vec<thread::JoinHandle<()>>,
+/// Opaque handle to a spawned task. Can be waited on or polled.
+pub(crate) struct TaskHandle<T> {
+    rx: Receiver<T>,
+    cached: UnsafeCell<Option<T>>,
 }
 
-#[allow(dead_code)]
-impl JobPool {
-    /// Creates a pool with `count` worker threads.
-    pub(crate) fn new(count: usize) -> Self {
-        let count = count.max(1);
-        let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
-        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+// SAFETY: TaskHandle is only accessed from one thread at a time in practice
+// (the owner polls or waits). The UnsafeCell is never shared — we use it to
+// cache a value between is_complete() and wait() without requiring &mut self.
+// The T: Send bound on construction ensures the value can cross threads.
+unsafe impl<T: Send> Send for TaskHandle<T> {}
 
-        let workers = (0..count)
-            .map(|i| {
-                let rx = job_rx.clone();
-                let tx = result_tx.clone();
-                thread::Builder::new()
-                    .name(format!("sw-worker-{i}"))
-                    .spawn(move || {
-                        while let Ok(job) = rx.recv() {
-                            let result = job();
-                            if tx.send(result).is_err() {
-                                break;
-                            }
-                        }
-                    })
-                    .expect("failed to spawn worker thread")
-            })
-            .collect();
-
-        log::info!("boot: job pool with {count} worker threads");
-
+impl<T: Send + 'static> TaskHandle<T> {
+    fn new(rx: Receiver<T>) -> Self {
         Self {
-            job_tx: Some(job_tx),
-            result_rx,
-            workers,
+            rx,
+            cached: UnsafeCell::new(None),
         }
     }
 
-    /// Creates a pool sized for the current hardware.
+    /// Blocks until the task completes and returns the result.
+    pub(crate) fn wait(self) -> T {
+        // SAFETY: no concurrent access — we own self by value.
+        let cached = unsafe { &mut *self.cached.get() };
+        if let Some(val) = cached.take() {
+            return val;
+        }
+        self.rx.recv().expect("task dropped without completing")
+    }
+
+    /// Returns true if the task has completed.
+    pub(crate) fn is_complete(&self) -> bool {
+        // SAFETY: single-owner access pattern — only the holder calls this.
+        let cached = unsafe { &mut *self.cached.get() };
+        if cached.is_some() {
+            return true;
+        }
+        match self.rx.try_recv() {
+            Ok(val) => {
+                *cached = Some(val);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Scheduler backend trait. Implementations provide the thread pool and
+/// work distribution; callers use the stable API surface.
+pub(crate) trait Scheduler: Send + Sync {
+    /// Spawn a task on the pool. Returns a handle to wait on or poll.
+    fn spawn<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> TaskHandle<T>;
+
+    /// Parallel-for: split `range` into batches of `batch_size`, execute
+    /// `f(index)` across pool workers. Blocks until all batches complete.
+    fn parallel_for(
+        &self,
+        range: std::ops::Range<usize>,
+        batch_size: usize,
+        f: impl Fn(usize) + Send + Sync,
+    );
+
+    /// Number of worker threads in the pool.
+    fn worker_count(&self) -> usize;
+}
+
+/// Rayon-backed scheduler. Work-stealing thread pool with parallel
+/// iterators. Production-grade, zero custom scheduling code.
+pub(crate) struct RayonScheduler {
+    pool: rayon::ThreadPool,
+}
+
+impl RayonScheduler {
+    /// Creates a scheduler with `count` worker threads.
+    pub(crate) fn new(count: usize) -> Self {
+        let count = count.max(2);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .thread_name(|i| format!("sw-worker-{i}"))
+            .build()
+            .expect("failed to build rayon thread pool");
+
+        log::info!("boot: rayon scheduler with {count} worker threads");
+
+        Self { pool }
+    }
+
+    /// Creates a scheduler sized for the current hardware.
+    /// Reserves 4 cores (main + GPU + audio + headroom), minimum 2 workers.
     pub(crate) fn auto() -> Self {
         let cores = thread::available_parallelism()
             .map(std::num::NonZero::get)
             .unwrap_or(4);
-        let workers = (cores.saturating_sub(2)).max(2);
+        let workers = cores.saturating_sub(4).max(2);
         Self::new(workers)
-    }
-
-    /// Submits a job to the pool. The closure runs on a worker thread
-    /// and its return value is sent to the completion channel.
-    pub(crate) fn submit<T: Send + 'static>(&self, job: impl FnOnce() -> T + Send + 'static) {
-        let boxed: Job = Box::new(move || Box::new(job()));
-        self.job_tx
-            .as_ref()
-            .expect("job pool shut down")
-            .send(boxed)
-            .expect("job pool shut down");
-    }
-
-    /// Drains all completed results of type `T`, non-blocking.
-    /// Results that don't match `T` are logged and dropped.
-    pub(crate) fn drain_completed<T: 'static>(&self) -> Vec<T> {
-        let mut results = Vec::new();
-        while let Ok(boxed) = self.result_rx.try_recv() {
-            match boxed.downcast::<T>() {
-                Ok(val) => results.push(*val),
-                Err(_) => log::warn!("job result type mismatch, dropped"),
-            }
-        }
-        results
-    }
-
-    /// Number of worker threads.
-    pub(crate) fn worker_count(&self) -> usize {
-        self.workers.len()
     }
 }
 
-impl Drop for JobPool {
-    fn drop(&mut self) {
-        self.job_tx.take();
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
+impl Scheduler for RayonScheduler {
+    fn spawn<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> TaskHandle<T> {
+        let (tx, rx): (Sender<T>, Receiver<T>) = crossbeam_channel::bounded(1);
+        self.pool.spawn(move || {
+            let result = f();
+            let _ = tx.send(result);
+        });
+        TaskHandle::new(rx)
+    }
+
+    fn parallel_for(
+        &self,
+        range: std::ops::Range<usize>,
+        batch_size: usize,
+        f: impl Fn(usize) + Send + Sync,
+    ) {
+        if range.is_empty() {
+            return;
         }
+        let batch_size = batch_size.max(1);
+        let f = Arc::new(f);
+        self.pool.install(|| {
+            rayon::scope(|s| {
+                let mut start = range.start;
+                while start < range.end {
+                    let end = (start + batch_size).min(range.end);
+                    let f = Arc::clone(&f);
+                    s.spawn(move |_| {
+                        for i in start..end {
+                            f(i);
+                        }
+                    });
+                    start = end;
+                }
+            });
+        });
+    }
+
+    fn worker_count(&self) -> usize {
+        self.pool.current_num_threads()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn submit_and_drain() {
-        let pool = JobPool::new(2);
-        pool.submit(|| 42u32);
-        pool.submit(|| 99u32);
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let results = pool.drain_completed::<u32>();
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&42));
-        assert!(results.contains(&99));
+    fn spawn_and_wait() {
+        let sched = RayonScheduler::new(2);
+        let handle = sched.spawn(|| 42u32);
+        assert_eq!(handle.wait(), 42);
     }
 
     #[test]
-    fn drain_empty_returns_nothing() {
-        let pool = JobPool::new(1);
-        let results = pool.drain_completed::<u32>();
-        assert!(results.is_empty());
+    fn spawn_is_complete() {
+        let sched = RayonScheduler::new(2);
+        let handle = sched.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            99u32
+        });
+        let result = handle.wait();
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn is_complete_caches_value() {
+        let sched = RayonScheduler::new(2);
+        let handle = sched.spawn(|| 7u32);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(handle.is_complete());
+        assert!(handle.is_complete());
+        assert_eq!(handle.wait(), 7);
+    }
+
+    #[test]
+    fn parallel_for_executes_all() {
+        let sched = RayonScheduler::new(4);
+        let count = Arc::new(AtomicUsize::new(0));
+        let n = 1000;
+
+        sched.parallel_for(0..n, 32, {
+            let count = Arc::clone(&count);
+            move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        assert_eq!(count.load(Ordering::SeqCst), n);
+    }
+
+    #[test]
+    fn parallel_for_empty_range() {
+        let sched = RayonScheduler::new(2);
+        let count = Arc::new(AtomicUsize::new(0));
+
+        sched.parallel_for(0..0, 32, {
+            let count = Arc::clone(&count);
+            move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn parallel_for_batch_size_one() {
+        let sched = RayonScheduler::new(4);
+        let sum = Arc::new(AtomicUsize::new(0));
+
+        sched.parallel_for(0..100, 1, {
+            let sum = Arc::clone(&sum);
+            move |i| {
+                sum.fetch_add(i, Ordering::Relaxed);
+            }
+        });
+
+        assert_eq!(sum.load(Ordering::SeqCst), (0..100).sum::<usize>());
+    }
+
+    #[test]
+    fn worker_count_matches() {
+        let sched = RayonScheduler::new(3);
+        assert_eq!(sched.worker_count(), 3);
     }
 
     #[test]
     fn auto_creates_at_least_two() {
-        let pool = JobPool::auto();
-        assert!(pool.worker_count() >= 2);
+        let sched = RayonScheduler::auto();
+        assert!(sched.worker_count() >= 2);
     }
 
     #[test]
-    fn type_mismatch_skipped() {
-        let pool = JobPool::new(1);
-        pool.submit(|| "hello".to_string());
+    fn fire_and_forget() {
+        let sched = RayonScheduler::new(2);
+        let flag = Arc::new(AtomicUsize::new(0));
+        let flag2 = Arc::clone(&flag);
+
+        let _handle = sched.spawn(move || {
+            flag2.store(1, Ordering::SeqCst);
+        });
+        drop(_handle);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let results = pool.drain_completed::<u32>();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn drop_waits_for_workers() {
-        let pool = JobPool::new(2);
-        pool.submit(|| {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            true
-        });
-        drop(pool);
+        assert_eq!(flag.load(Ordering::SeqCst), 1);
     }
 }

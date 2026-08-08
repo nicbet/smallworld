@@ -18,7 +18,7 @@ use crate::cull::CullStage;
 use crate::gbuffer::GBufferPass;
 use crate::gpu::GpuContext;
 use crate::input::Input;
-use crate::jobs::JobPool;
+use crate::jobs::RayonScheduler;
 use crate::lighting::LightingPass;
 use crate::stream::{PlaceholderExtractor, StreamStage};
 use crate::world::World;
@@ -174,7 +174,7 @@ pub struct Engine {
     stream_stage: StreamStage,
     gbuffer_pass: Option<GBufferPass>,
     lighting_pass: Option<LightingPass>,
-    jobs: JobPool,
+    jobs: RayonScheduler,
 }
 
 impl Engine {
@@ -234,9 +234,9 @@ impl Engine {
         log::info!("boot: lighting pass ready");
 
         let jobs = if config.worker_threads > 0 {
-            JobPool::new(config.worker_threads)
+            RayonScheduler::new(config.worker_threads)
         } else {
-            JobPool::auto()
+            RayonScheduler::auto()
         };
 
         Self {
@@ -265,7 +265,7 @@ impl Engine {
             gpu,
             display: None,
             input: Input::default(),
-            jobs: JobPool::auto(),
+            jobs: RayonScheduler::auto(),
             view: ViewState::default(),
             cull_stage: CullStage::new(),
             stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),

@@ -63,6 +63,8 @@ pub struct MeshInstance {
     pub scale: Vec3,
     /// Whether this instance writes to the shadow atlas.
     pub casts_shadows: bool,
+    /// Whether both sides of triangles are rendered (disables backface culling).
+    pub double_sided: bool,
 }
 
 fn compute_bounds(vertices: &[Vertex]) -> AABB {

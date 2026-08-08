@@ -13,7 +13,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::cull::VisibilitySet;
-use crate::jobs::JobPool;
+use crate::jobs::{Scheduler, TaskHandle};
 use crate::mesh::Vertex;
 use crate::volume::AABB;
 use crate::world::{LightKey, MeshInstanceKey, MeshKey, VolumeKey, World};
@@ -324,6 +324,7 @@ pub struct StreamStage {
     cache: MeshCache,
     extractor: Arc<dyn MeshExtractor>,
     pending: HashSet<VolumeKey>,
+    pending_handles: Vec<(VolumeKey, TaskHandle<(VolumeKey, MeshData, f32)>)>,
     ready_queue: Vec<ReadyEntry>,
     upload_budget_bytes: u64,
 }
@@ -346,6 +347,7 @@ impl StreamStage {
             cache: MeshCache::new(DEFAULT_BUDGET_BYTES),
             extractor,
             pending: HashSet::new(),
+            pending_handles: Vec::new(),
             ready_queue: Vec::new(),
             upload_budget_bytes: DEFAULT_UPLOAD_BUDGET_BYTES,
         }
@@ -356,20 +358,26 @@ impl StreamStage {
         &'a mut self,
         world: &World,
         visibility: &VisibilitySet,
-        jobs: &JobPool,
+        scheduler: &impl Scheduler,
         device: &wgpu::Device,
         camera_pos: Vec3,
     ) -> StreamOutput<'a> {
-        // 1. Drain completed extraction jobs into ready_queue
-        let completed: Vec<(VolumeKey, MeshData, f32)> = jobs.drain_completed();
-        for (key, mesh_data, distance) in completed {
-            self.pending.remove(&key);
-            self.ready_queue.push(ReadyEntry {
-                key,
-                mesh_data,
-                camera_distance: distance,
-            });
+        // 1. Drain completed extraction handles into ready_queue
+        let mut still_pending = Vec::new();
+        for (key, handle) in self.pending_handles.drain(..) {
+            if handle.is_complete() {
+                let (_, mesh_data, distance) = handle.wait();
+                self.pending.remove(&key);
+                self.ready_queue.push(ReadyEntry {
+                    key,
+                    mesh_data,
+                    camera_distance: distance,
+                });
+            } else {
+                still_pending.push((key, handle));
+            }
         }
+        self.pending_handles = still_pending;
 
         // 2. Upload from ready_queue up to budget
         let mut bytes_uploaded: u64 = 0;
@@ -414,10 +422,11 @@ impl StreamStage {
         for (key, bounds, distance) in uncached {
             self.pending.insert(key);
             let extractor = Arc::clone(&self.extractor);
-            jobs.submit(move || {
+            let handle = scheduler.spawn(move || {
                 let mesh_data = extractor.extract(key, bounds);
                 (key, mesh_data, distance)
             });
+            self.pending_handles.push((key, handle));
         }
 
         // 4. Upload mesh assets for visible instances (within remaining budget)

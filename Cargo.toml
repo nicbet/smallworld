@@ -22,6 +22,9 @@ egui-winit = "0.36"
 # Math
 glam = "0.33"
 
+# Asset loading
+gltf = "1"
+
 # Serialisation
 bytemuck = { version = "1", features = ["derive"] }
 
@@ -30,6 +33,9 @@ slotmap = "1"
 
 # Channels
 crossbeam-channel = "0.5"
+
+# Job system
+rayon = "1"
 
 # Compression
 zstd = "0.13"

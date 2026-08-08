@@ -183,6 +183,7 @@ impl HzbBuilder {
 pub struct GBufferPass {
     gbuffer: GBuffer,
     gbuffer_pipeline: wgpu::RenderPipeline,
+    gbuffer_pipeline_double_sided: wgpu::RenderPipeline,
     #[allow(dead_code)]
     frame_bind_group_layout: wgpu::BindGroupLayout,
     #[allow(dead_code)]
@@ -306,60 +307,70 @@ impl GBufferPass {
             ],
         };
 
-        let gbuffer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gbuffer"),
-            layout: Some(&gbuffer_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &gbuffer_module,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout)],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &gbuffer_module,
-                entry_point: Some("fs_main"),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let color_targets = [
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
             }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        ];
+
+        let depth_stencil = wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        };
+
+        let make_pipeline = |label, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&gbuffer_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &gbuffer_module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vertex_layout.clone())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &gbuffer_module,
+                    entry_point: Some("fs_main"),
+                    targets: &color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Cw,
+                    cull_mode,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth_stencil.clone()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let gbuffer_pipeline = make_pipeline("gbuffer", Some(wgpu::Face::Back));
+        let gbuffer_pipeline_double_sided = make_pipeline("gbuffer_double_sided", None);
 
         let hzb = HzbBuilder::new();
 
         Self {
             gbuffer,
             gbuffer_pipeline,
+            gbuffer_pipeline_double_sided,
             frame_bind_group_layout,
             draw_bind_group_layout,
             frame_uniform_buf,
@@ -411,6 +422,7 @@ impl GBufferPass {
         struct DrawCall<'a> {
             gpu_mesh: &'a GpuMesh,
             dynamic_offset: u32,
+            double_sided: bool,
         }
 
         let mut draws: Vec<DrawCall<'_>> = Vec::new();
@@ -432,6 +444,7 @@ impl GBufferPass {
             draws.push(DrawCall {
                 gpu_mesh,
                 dynamic_offset: offset as u32,
+                double_sided: false,
             });
             draw_index += 1;
         }
@@ -441,7 +454,7 @@ impl GBufferPass {
             if draw_index >= self.max_draws {
                 break;
             }
-            let (model, base_color, roughness, metallic) =
+            let (model, base_color, roughness, metallic, double_sided) =
                 if let Some(inst) = world.mesh_instance(*key) {
                     let model = Mat4::from_scale_rotation_translation(
                         inst.scale,
@@ -452,9 +465,9 @@ impl GBufferPass {
                     let bc = mat.map(|m| m.base_color.to_array()).unwrap_or([1.0; 4]);
                     let rough = mat.map(|m| m.roughness).unwrap_or(0.5);
                     let metal = mat.map(|m| m.metallic).unwrap_or(0.0);
-                    (model, bc, rough, metal)
+                    (model, bc, rough, metal, inst.double_sided)
                 } else {
-                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0)
+                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0, false)
                 };
 
             let uniforms = DrawUniforms {
@@ -468,6 +481,7 @@ impl GBufferPass {
             draws.push(DrawCall {
                 gpu_mesh,
                 dynamic_offset: offset as u32,
+                double_sided,
             });
             draw_index += 1;
         }
@@ -523,10 +537,19 @@ impl GBufferPass {
                 multiview_mask: None,
             });
 
-            rpass.set_pipeline(&self.gbuffer_pipeline);
             rpass.set_bind_group(0, &self.frame_bind_group, &[]);
+            let mut current_double_sided = false;
+            rpass.set_pipeline(&self.gbuffer_pipeline);
 
             for draw in &draws {
+                if draw.double_sided != current_double_sided {
+                    current_double_sided = draw.double_sided;
+                    if current_double_sided {
+                        rpass.set_pipeline(&self.gbuffer_pipeline_double_sided);
+                    } else {
+                        rpass.set_pipeline(&self.gbuffer_pipeline);
+                    }
+                }
                 rpass.set_bind_group(1, &self.draw_bind_group, &[draw.dynamic_offset]);
                 rpass.set_vertex_buffer(0, draw.gpu_mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(

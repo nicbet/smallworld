@@ -22,7 +22,13 @@ impl App for Game {
 
 fn main() {
     let mut world = World::new();
-    populate_test_scene(&mut world);
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        load_glb_scene(&mut world, &args[1]);
+    } else {
+        populate_test_scene(&mut world);
+    }
 
     Engine::run(
         EngineConfig::default(),
@@ -31,6 +37,31 @@ fn main() {
             camera: CameraRig::new(),
         },
     );
+}
+
+fn load_glb_scene(world: &mut World, path: &str) {
+    // Lights for the loaded model
+    world.add_light(Light::directional(
+        Vec3::new(0.3, -1.0, 0.2),
+        Vec3::new(1.0, 0.98, 0.92),
+        3.0,
+    ));
+    world.add_light(Light::point(
+        Vec3::new(2.0, 3.0, -1.0),
+        15.0,
+        Vec3::new(1.0, 0.7, 0.4),
+        8.0,
+    ));
+
+    match smallworld_engine::assets::load_glb(path) {
+        Ok(scene) => {
+            scene.spawn(world);
+        }
+        Err(e) => {
+            eprintln!("error loading GLB: {e}");
+            populate_test_scene(world);
+        }
+    }
 }
 
 
@@ -137,6 +168,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
         casts_shadows: false,
+        double_sided: false,
     });
 
     // -- Boxes (different sizes, materials, positions) --
@@ -151,6 +183,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::IDENTITY,
         scale: Vec3::new(0.6, 3.0, 0.6),
         casts_shadows: true,
+        double_sided: false,
     });
 
     // Metal cube (shiny, catches specular highlights)
@@ -161,6 +194,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::from_rotation_y(0.4),
         scale: Vec3::splat(1.0),
         casts_shadows: true,
+        double_sided: false,
     });
 
     // Red plastic cube (saturated diffuse color)
@@ -171,6 +205,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::from_rotation_y(-0.3),
         scale: Vec3::splat(0.8),
         casts_shadows: true,
+        double_sided: false,
     });
 
     // Wooden crate (medium roughness)
@@ -181,6 +216,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::from_rotation_y(0.7),
         scale: Vec3::new(1.2, 1.2, 1.2),
         casts_shadows: true,
+        double_sided: false,
     });
 
     // Small metal cube near the point light
@@ -191,6 +227,7 @@ fn populate_test_scene(world: &mut World) {
         rotation: Quat::from_rotation_y(1.0),
         scale: Vec3::splat(0.5),
         casts_shadows: true,
+        double_sided: false,
     });
 }
 

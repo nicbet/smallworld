@@ -60,8 +60,11 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> GBufferOutput {
-    let n = normalize(in.world_normal);
+fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> GBufferOutput {
+    var n = normalize(in.world_normal);
+    if !is_front {
+        n = -n;
+    }
     let oct = oct_encode(n);
 
     var out: GBufferOutput;

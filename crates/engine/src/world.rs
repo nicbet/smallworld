@@ -457,6 +457,7 @@ mod tests {
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             casts_shadows: true,
+            double_sided: false,
         }
     }
 

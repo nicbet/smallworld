@@ -129,6 +129,7 @@ mod tests {
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             casts_shadows: true,
+            double_sided: false,
         });
 
         world.add_light(Light::directional(-Vec3::Y, Vec3::ONE, 1.0));

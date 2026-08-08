@@ -1,4 +1,4 @@
-//! Locating runtime assets.
+//! Asset loading and path resolution.
 //!
 //! Runtime data — textures, material palettes, saved worlds — lives in the workspace's
 //! `assets/` directory. Shaders do not: they are engine source and are baked into the
@@ -16,6 +16,12 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use glam::{Mat4, Quat, Vec3, Vec4};
+
+use crate::material::Material;
+use crate::mesh::{Mesh, MeshInstance, Vertex};
+use crate::world::{MeshInstanceKey, World};
 
 /// Environment variable that overrides asset-root discovery.
 pub const ASSET_ROOT_ENV: &str = "SMALLWORLD_ASSETS";
@@ -77,6 +83,213 @@ fn dev_root() -> PathBuf {
         .nth(2)
         .unwrap_or(manifest_dir)
         .join("assets")
+}
+
+// ---------------------------------------------------------------------------
+// GLB / glTF loading
+// ---------------------------------------------------------------------------
+
+/// A mesh primitive with its associated material, ready to add to a World.
+pub struct LoadedMesh {
+    /// Mesh geometry.
+    pub mesh: Mesh,
+    /// PBR material (scalar properties only, no textures).
+    pub material: Material,
+    /// Whether both sides of triangles should be rendered.
+    pub double_sided: bool,
+}
+
+/// A placed instance referencing a mesh in [`LoadedScene::meshes`].
+pub struct LoadedInstance {
+    /// Index into [`LoadedScene::meshes`].
+    pub mesh_index: usize,
+    /// World-space position.
+    pub position: Vec3,
+    /// Orientation.
+    pub rotation: Quat,
+    /// Scale.
+    pub scale: Vec3,
+}
+
+/// The result of loading a glTF/GLB file.
+pub struct LoadedScene {
+    /// Unique mesh+material pairs (one per glTF primitive).
+    pub meshes: Vec<LoadedMesh>,
+    /// Instances placed via the glTF node tree.
+    pub instances: Vec<LoadedInstance>,
+}
+
+impl LoadedScene {
+    /// Adds all meshes, materials, and instances to the World.
+    pub fn spawn(&self, world: &mut World) -> Vec<MeshInstanceKey> {
+        let mesh_keys: Vec<_> = self
+            .meshes
+            .iter()
+            .map(|lm| {
+                let mesh_key = world.add_mesh(Mesh::new(
+                    lm.mesh.vertices.clone(),
+                    lm.mesh.indices.clone(),
+                ));
+                let mat_key = world.add_material(lm.material.clone());
+                (mesh_key, mat_key)
+            })
+            .collect();
+
+        self.instances
+            .iter()
+            .map(|inst| {
+                let (mesh_key, mat_key) = mesh_keys[inst.mesh_index];
+                world.add_mesh_instance(MeshInstance {
+                    mesh: mesh_key,
+                    material: mat_key,
+                    position: inst.position,
+                    rotation: inst.rotation,
+                    scale: inst.scale,
+                    casts_shadows: true,
+                    double_sided: self.meshes[inst.mesh_index].double_sided,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Loads a glTF or GLB file, extracting mesh geometry and PBR material
+/// properties. Returns an error string on failure.
+pub fn load_glb(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
+    let path = path.as_ref();
+    let (document, buffers, _images) =
+        gltf::import(path).map_err(|e| format!("failed to load {}: {e}", path.display()))?;
+
+    let mut meshes = Vec::new();
+    let mut mesh_index_map: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+
+    for gltf_mesh in document.meshes() {
+        for primitive in gltf_mesh.primitives() {
+            let key = (gltf_mesh.index(), primitive.index());
+            if mesh_index_map.contains_key(&key) {
+                continue;
+            }
+
+            let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
+
+            let positions: Vec<[f32; 3]> = reader
+                .read_positions()
+                .ok_or_else(|| format!("mesh {} has no positions", gltf_mesh.index()))?
+                .collect();
+
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|iter| iter.collect())
+                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+
+            let uvs: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
+                .map(|iter| iter.into_f32().collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+
+            let tangents: Vec<[f32; 4]> = reader
+                .read_tangents()
+                .map(|iter| iter.collect())
+                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
+
+            let vertices: Vec<Vertex> = positions
+                .iter()
+                .enumerate()
+                .map(|(i, &pos)| Vertex {
+                    position: pos,
+                    normal: normals[i],
+                    uv: uvs[i],
+                    tangent: tangents[i],
+                })
+                .collect();
+
+            let indices: Vec<u32> = reader
+                .read_indices()
+                .map(|iter| iter.into_u32().collect())
+                .unwrap_or_else(|| (0..vertices.len() as u32).collect());
+
+            let gltf_mat = primitive.material();
+            let material = extract_material(&primitive);
+            let double_sided = gltf_mat.double_sided();
+
+            let idx = meshes.len();
+            mesh_index_map.insert(key, idx);
+            meshes.push(LoadedMesh {
+                mesh: Mesh::new(vertices, indices),
+                material,
+                double_sided,
+            });
+        }
+    }
+
+    let mut instances = Vec::new();
+    for scene in document.scenes() {
+        for node in scene.nodes() {
+            collect_instances(&node, Mat4::IDENTITY, &mesh_index_map, &mut instances);
+        }
+    }
+
+    if instances.is_empty() && !meshes.is_empty() {
+        instances.push(LoadedInstance {
+            mesh_index: 0,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        });
+    }
+
+    log::info!(
+        "loaded {}: {} meshes, {} instances",
+        path.display(),
+        meshes.len(),
+        instances.len()
+    );
+
+    Ok(LoadedScene { meshes, instances })
+}
+
+fn extract_material(primitive: &gltf::Primitive<'_>) -> Material {
+    let mat = primitive.material();
+    let pbr = mat.pbr_metallic_roughness();
+    let bc = pbr.base_color_factor();
+    let em = mat.emissive_factor();
+
+    Material {
+        base_color: Vec4::new(bc[0], bc[1], bc[2], bc[3]),
+        roughness: pbr.roughness_factor(),
+        metallic: pbr.metallic_factor(),
+        emissive: Vec3::new(em[0], em[1], em[2]),
+    }
+}
+
+fn collect_instances(
+    node: &gltf::Node<'_>,
+    parent_transform: Mat4,
+    mesh_map: &std::collections::HashMap<(usize, usize), usize>,
+    out: &mut Vec<LoadedInstance>,
+) {
+    let local = Mat4::from_cols_array_2d(&node.transform().matrix());
+    let world = parent_transform * local;
+
+    if let Some(gltf_mesh) = node.mesh() {
+        for primitive in gltf_mesh.primitives() {
+            let key = (gltf_mesh.index(), primitive.index());
+            if let Some(&mesh_index) = mesh_map.get(&key) {
+                let (scale, rotation, translation) = world.to_scale_rotation_translation();
+                out.push(LoadedInstance {
+                    mesh_index,
+                    position: translation,
+                    rotation,
+                    scale,
+                });
+            }
+        }
+    }
+
+    for child in node.children() {
+        collect_instances(&child, world, mesh_map, out);
+    }
 }
 
 #[cfg(test)]
