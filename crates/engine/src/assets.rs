@@ -112,6 +112,8 @@ pub struct MaterialTextures {
     pub normal: Option<usize>,
     /// Roughness (G) + metallic (B) packed texture index.
     pub roughness_metallic: Option<usize>,
+    /// Emissive texture index.
+    pub emissive: Option<usize>,
 }
 
 /// A placed instance referencing a mesh in [`LoadedScene::meshes`].
@@ -163,6 +165,7 @@ impl LoadedScene {
                 mat.albedo_map = lm.texture_indices.albedo.map(|i| tex_keys[i]);
                 mat.normal_map = lm.texture_indices.normal.map(|i| tex_keys[i]);
                 mat.roughness_metallic_map = lm.texture_indices.roughness_metallic.map(|i| tex_keys[i]);
+                mat.emissive_map = lm.texture_indices.emissive.map(|i| tex_keys[i]);
                 let mat_key = world.add_material(mat);
                 (mesh_key, mat_key)
             })
@@ -332,6 +335,9 @@ fn extract_texture_indices(
         roughness_metallic: pbr
             .metallic_roughness_texture()
             .and_then(|t| image_map.get(&t.texture().source().index()).copied()),
+        emissive: mat
+            .emissive_texture()
+            .and_then(|t| image_map.get(&t.texture().source().index()).copied()),
     }
 }
 
@@ -340,12 +346,14 @@ fn extract_material(primitive: &gltf::Primitive<'_>) -> Material {
     let pbr = mat.pbr_metallic_roughness();
     let bc = pbr.base_color_factor();
     let em = mat.emissive_factor();
+    let strength = mat.emissive_strength().unwrap_or(1.0);
+    let emissive = Vec3::new(em[0] * strength, em[1] * strength, em[2] * strength);
 
     Material {
         base_color: Vec4::new(bc[0], bc[1], bc[2], bc[3]),
         roughness: pbr.roughness_factor(),
         metallic: pbr.metallic_factor(),
-        emissive: Vec3::new(em[0], em[1], em[2]),
+        emissive,
         ..Material::default()
     }
 }

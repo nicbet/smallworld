@@ -8,6 +8,7 @@
 @group(0) @binding(1) var gbuf_albedo: texture_2d<f32>;
 @group(0) @binding(2) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(3) var gbuf_material: texture_2d<f32>;
+@group(0) @binding(5) var gbuf_emissive: texture_2d<f32>;
 
 // ---- Camera + lights (group 1) ----
 
@@ -277,6 +278,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let brdf = cook_torrance(normal, v, l, albedo, roughness, metallic);
         color += brdf * light_color * intensity * attenuation * shadow;
     }
+
+    let emissive = textureLoad(gbuf_emissive, pixel, 0).rgb;
+    color += emissive;
 
     textureStore(hdr_output, pixel, vec4<f32>(color, 1.0));
 }

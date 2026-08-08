@@ -10,6 +10,7 @@ struct DrawUniforms {
     base_color: vec4<f32>,
     roughness_metallic: vec2<f32>,
     _pad: vec2<f32>,
+    emissive: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -19,7 +20,8 @@ struct DrawUniforms {
 @group(2) @binding(0) var t_albedo: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
 @group(2) @binding(2) var t_roughness_metallic: texture_2d<f32>;
-@group(2) @binding(3) var t_sampler: sampler;
+@group(2) @binding(3) var t_emissive: texture_2d<f32>;
+@group(2) @binding(4) var t_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -52,6 +54,7 @@ struct GBufferOutput {
     @location(0) albedo: vec4<f32>,
     @location(1) normal: vec4<f32>,
     @location(2) material: vec4<f32>,
+    @location(3) emissive: vec4<f32>,
 }
 
 // Octahedral normal encoding: unit sphere → [0,1]² for Unorm storage.
@@ -99,9 +102,14 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) is_front: bool) -> GBufferOu
     let roughness = rm_sample.g * draw.roughness_metallic.x;
     let metallic = rm_sample.b * draw.roughness_metallic.y;
 
+    // Emissive: texture * scalar factor
+    let emissive_sample = textureSample(t_emissive, t_sampler, in.uv);
+    let emissive_out = emissive_sample.rgb * draw.emissive.xyz;
+
     var out: GBufferOutput;
     out.albedo = albedo;
     out.normal = vec4<f32>(oct, 0.0, 1.0);
     out.material = vec4<f32>(roughness, metallic, 0.0, 0.0);
+    out.emissive = vec4<f32>(emissive_out, 1.0);
     return out;
 }

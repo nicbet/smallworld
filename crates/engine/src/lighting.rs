@@ -84,6 +84,7 @@ struct DrawUniforms {
     base_color: [f32; 4],
     roughness_metallic: [f32; 2],
     _pad: [f32; 2],
+    emissive: [f32; 4],
 }
 
 const DRAW_UNIFORM_SIZE: u64 = size_of::<DrawUniforms>() as u64;
@@ -469,6 +470,7 @@ impl ShadowAtlas {
                 base_color: [0.0; 4],
                 roughness_metallic: [0.0; 2],
                 _pad: [0.0; 2],
+                emissive: [0.0; 4],
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&du));
@@ -494,6 +496,7 @@ impl ShadowAtlas {
                 base_color: [0.0; 4],
                 roughness_metallic: [0.0; 2],
                 _pad: [0.0; 2],
+                emissive: [0.0; 4],
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&du));
@@ -893,6 +896,7 @@ impl LightingPass {
                         },
                         count: None,
                     },
+                    bgl_texture(5, wgpu::TextureSampleType::Float { filterable: false }),
                 ],
             });
 
@@ -1270,6 +1274,10 @@ impl LightingPass {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&self.hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&gbuffer.emissive_view),
                 },
             ],
         });

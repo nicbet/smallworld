@@ -10,6 +10,7 @@ struct DrawUniforms {
     base_color: vec4<f32>,
     roughness_metallic: vec2<f32>,
     _pad: vec2<f32>,
+    emissive: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> shadow: ShadowUniforms;

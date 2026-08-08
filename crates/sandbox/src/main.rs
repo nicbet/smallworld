@@ -165,6 +165,14 @@ fn populate_test_scene(world: &mut World) {
         ..Material::default()
     });
 
+    let neon = world.add_material(Material {
+        base_color: Vec4::new(0.05, 0.05, 0.05, 1.0),
+        roughness: 0.9,
+        metallic: 0.0,
+        emissive: Vec3::new(0.0, 3.0, 1.5),
+        ..Material::default()
+    });
+
     // -- Floor (20×20 metres) --
 
     let floor = world.add_mesh(Mesh::new(
@@ -242,6 +250,17 @@ fn populate_test_scene(world: &mut World) {
         position: Vec3::new(2.5, 0.25, -1.0),
         rotation: Quat::from_rotation_y(1.0),
         scale: Vec3::splat(0.5),
+        casts_shadows: true,
+        double_sided: false,
+    });
+
+    // Emissive neon cube (self-lit, visible regardless of lighting)
+    world.add_mesh_instance(MeshInstance {
+        mesh: unit_box,
+        material: neon,
+        position: Vec3::new(0.0, 0.35, 2.0),
+        rotation: Quat::from_rotation_y(0.5),
+        scale: Vec3::splat(0.7),
         casts_shadows: true,
         double_sided: false,
     });

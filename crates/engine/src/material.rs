@@ -30,6 +30,8 @@ pub struct Material {
     pub normal_map: Option<TextureKey>,
     /// Roughness (green) + metallic (blue) packed texture (glTF convention).
     pub roughness_metallic_map: Option<TextureKey>,
+    /// Emissive texture. Sampled and multiplied with `emissive`.
+    pub emissive_map: Option<TextureKey>,
 }
 
 impl Default for Material {
@@ -42,6 +44,7 @@ impl Default for Material {
             albedo_map: None,
             normal_map: None,
             roughness_metallic_map: None,
+            emissive_map: None,
         }
     }
 }

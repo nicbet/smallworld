@@ -31,6 +31,7 @@ struct DrawUniforms {
     base_color: [f32; 4],
     roughness_metallic: [f32; 2],
     _pad: [f32; 2],
+    emissive: [f32; 4],
 }
 
 const DRAW_UNIFORM_SIZE: u64 = size_of::<DrawUniforms>() as u64;
@@ -49,6 +50,8 @@ pub struct GBuffer {
     pub normal_view: wgpu::TextureView,
     /// Material properties (roughness, metallic) render target view.
     pub material_view: wgpu::TextureView,
+    /// Emissive radiance render target view (Rgba16Float for HDR).
+    pub emissive_view: wgpu::TextureView,
     #[allow(dead_code)]
     albedo_tex: wgpu::Texture,
     #[allow(dead_code)]
@@ -109,6 +112,17 @@ impl GBuffer {
             view_formats: &[],
         });
 
+        let emissive_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gbuf_emissive"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
         let default_view = wgpu::TextureViewDescriptor::default();
 
         Self {
@@ -116,6 +130,7 @@ impl GBuffer {
             albedo_view: albedo_tex.create_view(&default_view),
             normal_view: normal_tex.create_view(&default_view),
             material_view: material_tex.create_view(&default_view),
+            emissive_view: emissive_tex.create_view(&default_view),
             albedo_tex,
             depth_tex,
             width,
@@ -186,6 +201,7 @@ struct TextureCache {
     fallback_albedo: GpuTextureEntry,
     fallback_normal: GpuTextureEntry,
     fallback_roughness_metallic: GpuTextureEntry,
+    fallback_emissive: GpuTextureEntry,
 }
 
 impl TextureCache {
@@ -194,12 +210,14 @@ impl TextureCache {
         let fallback_normal = create_1x1_texture(device, queue, "fallback_normal", &[128, 128, 255, 255]);
         let fallback_roughness_metallic =
             create_1x1_texture(device, queue, "fallback_rm", &[255, 128, 0, 255]);
+        let fallback_emissive = create_1x1_texture(device, queue, "fallback_emissive", &[255, 255, 255, 255]);
 
         Self {
             cache: HashMap::new(),
             fallback_albedo,
             fallback_normal,
             fallback_roughness_metallic,
+            fallback_emissive,
         }
     }
 
@@ -424,6 +442,16 @@ impl GBufferPass {
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
@@ -505,6 +533,11 @@ impl GBufferPass {
             }),
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
@@ -621,6 +654,7 @@ impl GBufferPass {
             albedo_key: Option<TextureKey>,
             normal_key: Option<TextureKey>,
             rm_key: Option<TextureKey>,
+            emissive_key: Option<TextureKey>,
         }
 
         let mut draws: Vec<DrawCall<'_>> = Vec::new();
@@ -636,6 +670,7 @@ impl GBufferPass {
                 base_color: [0.6, 0.6, 0.6, 1.0],
                 roughness_metallic: [0.8, 0.0],
                 _pad: [0.0; 2],
+                emissive: [0.0; 4],
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&uniforms));
@@ -646,6 +681,7 @@ impl GBufferPass {
                 albedo_key: None,
                 normal_key: None,
                 rm_key: None,
+                emissive_key: None,
             });
             draw_index += 1;
         }
@@ -655,7 +691,7 @@ impl GBufferPass {
             if draw_index >= self.max_draws {
                 break;
             }
-            let (model, base_color, roughness, metallic, double_sided, albedo_key, normal_key, rm_key) =
+            let (model, base_color, roughness, metallic, emissive, double_sided, albedo_key, normal_key, rm_key, emissive_key) =
                 if let Some(inst) = world.mesh_instance(*key) {
                     let model = Mat4::from_scale_rotation_translation(
                         inst.scale,
@@ -666,12 +702,14 @@ impl GBufferPass {
                     let bc = mat.map(|m| m.base_color.to_array()).unwrap_or([1.0; 4]);
                     let rough = mat.map(|m| m.roughness).unwrap_or(0.5);
                     let metal = mat.map(|m| m.metallic).unwrap_or(0.0);
+                    let em = mat.map(|m| m.emissive).unwrap_or(glam::Vec3::ZERO);
                     let albedo = mat.and_then(|m| m.albedo_map);
                     let normal = mat.and_then(|m| m.normal_map);
                     let rm = mat.and_then(|m| m.roughness_metallic_map);
-                    (model, bc, rough, metal, inst.double_sided, albedo, normal, rm)
+                    let em_map = mat.and_then(|m| m.emissive_map);
+                    (model, bc, rough, metal, em, inst.double_sided, albedo, normal, rm, em_map)
                 } else {
-                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0, false, None, None, None)
+                    (Mat4::IDENTITY, [1.0; 4], 0.5, 0.0, glam::Vec3::ZERO, false, None, None, None, None)
                 };
 
             let uniforms = DrawUniforms {
@@ -679,6 +717,7 @@ impl GBufferPass {
                 base_color,
                 roughness_metallic: [roughness, metallic],
                 _pad: [0.0; 2],
+                emissive: [emissive.x, emissive.y, emissive.z, 0.0],
             };
             let offset = draw_index as u64 * draw_stride;
             queue.write_buffer(&self.draw_uniform_buf, offset, bytemuck::bytes_of(&uniforms));
@@ -689,13 +728,14 @@ impl GBufferPass {
                 albedo_key,
                 normal_key,
                 rm_key,
+                emissive_key,
             });
             draw_index += 1;
         }
 
         // Ensure all referenced textures are uploaded
         for draw in &draws {
-            for key in [draw.albedo_key, draw.normal_key, draw.rm_key].into_iter().flatten() {
+            for key in [draw.albedo_key, draw.normal_key, draw.rm_key, draw.emissive_key].into_iter().flatten() {
                 self.texture_cache.get_or_upload(key, world, device, queue);
             }
         }
@@ -730,6 +770,15 @@ impl GBufferPass {
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.gbuffer.material_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.gbuffer.emissive_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -777,6 +826,10 @@ impl GBufferPass {
                     draw.rm_key,
                     &self.texture_cache.fallback_roughness_metallic.view,
                 );
+                let emissive_view = self.texture_cache.view_or_fallback(
+                    draw.emissive_key,
+                    &self.texture_cache.fallback_emissive.view,
+                );
 
                 let tex_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("gbuf_tex"),
@@ -796,6 +849,10 @@ impl GBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
+                            resource: wgpu::BindingResource::TextureView(emissive_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
                             resource: wgpu::BindingResource::Sampler(&self.tex_sampler),
                         },
                     ],
