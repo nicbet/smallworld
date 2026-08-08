@@ -208,8 +208,10 @@ impl TextureCache {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let fallback_albedo = create_1x1_texture(device, queue, "fallback_albedo", &[255, 255, 255, 255]);
         let fallback_normal = create_1x1_texture(device, queue, "fallback_normal", &[128, 128, 255, 255]);
+        // All-white so untextured materials keep their scalar roughness/metallic
+        // unmodified (shader multiplies texture x scalar, glTF convention).
         let fallback_roughness_metallic =
-            create_1x1_texture(device, queue, "fallback_rm", &[255, 128, 0, 255]);
+            create_1x1_texture(device, queue, "fallback_rm", &[255, 255, 255, 255]);
         let fallback_emissive = create_1x1_texture(device, queue, "fallback_emissive", &[255, 255, 255, 255]);
 
         Self {
