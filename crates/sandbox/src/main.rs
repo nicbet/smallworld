@@ -72,7 +72,7 @@ fn populate_test_scene(world: &mut World) {
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
         ],
-        vec![0, 1, 2, 0, 2, 3],
+        vec![0, 2, 1, 0, 3, 2],
     ));
 
     world.add_mesh_instance(MeshInstance {

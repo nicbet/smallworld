@@ -15,10 +15,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::cull::CullStage;
+use crate::gbuffer::GBufferPass;
 use crate::gpu::GpuContext;
 use crate::input::Input;
 use crate::jobs::JobPool;
-use crate::placeholder::PlaceholderRenderer;
 use crate::stream::{PlaceholderExtractor, StreamStage};
 use crate::world::World;
 
@@ -171,7 +171,7 @@ pub struct Engine {
     view: ViewState,
     cull_stage: CullStage,
     stream_stage: StreamStage,
-    renderer: Option<PlaceholderRenderer>,
+    gbuffer_pass: Option<GBufferPass>,
     jobs: JobPool,
 }
 
@@ -223,13 +223,13 @@ impl Engine {
         );
 
         let inner = window.inner_size();
-        let renderer = PlaceholderRenderer::new(
+        let gbuffer_pass = GBufferPass::new(
             &gpu.device,
             surface_config.format,
             inner.width.max(1),
             inner.height.max(1),
         );
-        log::info!("boot: placeholder renderer ready");
+        log::info!("boot: gbuffer pass ready");
 
         let jobs = if config.worker_threads > 0 {
             JobPool::new(config.worker_threads)
@@ -248,7 +248,7 @@ impl Engine {
             view: ViewState::default(),
             cull_stage: CullStage::new(),
             stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
-            renderer: Some(renderer),
+            gbuffer_pass: Some(gbuffer_pass),
             jobs,
         }
     }
@@ -266,7 +266,7 @@ impl Engine {
             view: ViewState::default(),
             cull_stage: CullStage::new(),
             stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
-            renderer: None,
+            gbuffer_pass: None,
         }
     }
 
@@ -280,8 +280,8 @@ impl Engine {
         display.config.width = w;
         display.config.height = h;
         display.surface.configure(&self.gpu.device, &display.config);
-        if let Some(r) = &mut self.renderer {
-            r.resize(&self.gpu.device, w, h);
+        if let Some(g) = &mut self.gbuffer_pass {
+            g.resize(&self.gpu.device, w, h);
         }
     }
 
@@ -319,7 +319,7 @@ impl Engine {
     fn render_frame(&mut self, world: &mut World) {
         let _changes = world.drain_changes();
         let visibility = self.cull_stage.cull(world, &self.view, None);
-        let _stream_output = self.stream_stage.stream(
+        let stream_output = self.stream_stage.stream(
             world,
             &visibility,
             &self.jobs,
@@ -349,7 +349,7 @@ impl Engine {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        if let Some(renderer) = &self.renderer {
+        if let Some(gbuffer_pass) = &mut self.gbuffer_pass {
             let (w, h) = (display.config.width, display.config.height);
             let aspect = w as f32 / h.max(1) as f32;
             let camera = crate::camera::FreeCamera {
@@ -368,7 +368,15 @@ impl Engine {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("frame"),
                     });
-            renderer.render(&self.gpu.queue, &mut encoder, &surface_view, &camera);
+            gbuffer_pass.render(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &surface_view,
+                &camera,
+                world,
+                &stream_output,
+            );
             self.gpu.queue.submit(std::iter::once(encoder.finish()));
         }
 

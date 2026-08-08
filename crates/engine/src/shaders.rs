@@ -32,6 +32,10 @@ pub enum Shader {
     Raymarch,
     /// Fullscreen-triangle blit: copies compute output to the surface.
     Blit,
+    /// GBuffer pass: vertex/fragment shader writing albedo, normals, material.
+    GBuffer,
+    /// HZB builder: compute shader downsampling depth into a mip chain.
+    Hzb,
 }
 
 impl Shader {
@@ -42,6 +46,8 @@ impl Shader {
             Self::Common => "common.wgsl",
             Self::Raymarch => "raymarch.wgsl",
             Self::Blit => "blit.wgsl",
+            Self::GBuffer => "gbuffer.wgsl",
+            Self::Hzb => "hzb.wgsl",
         }
     }
 
@@ -52,6 +58,8 @@ impl Shader {
             Self::Common => include_str!("../shaders/common.wgsl"),
             Self::Raymarch => include_str!("../shaders/raymarch.wgsl"),
             Self::Blit => include_str!("../shaders/blit.wgsl"),
+            Self::GBuffer => include_str!("../shaders/gbuffer.wgsl"),
+            Self::Hzb => include_str!("../shaders/hzb.wgsl"),
         }
     }
 }
@@ -111,7 +119,13 @@ mod tests {
     use std::path::PathBuf;
 
     /// Every shader the engine knows about. Extend alongside [`Shader`].
-    const ALL: &[Shader] = &[Shader::Common, Shader::Raymarch, Shader::Blit];
+    const ALL: &[Shader] = &[
+        Shader::Common,
+        Shader::Raymarch,
+        Shader::Blit,
+        Shader::GBuffer,
+        Shader::Hzb,
+    ];
 
     fn shader_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders")

@@ -18,7 +18,7 @@ pub mod mesh;
 pub mod gpu_timing;
 pub mod input;
 pub(crate) mod jobs;
-pub mod placeholder;
+pub mod gbuffer;
 pub mod raymarcher;
 pub mod shaders;
 pub mod stream;
