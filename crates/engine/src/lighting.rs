@@ -246,11 +246,12 @@ pub(crate) struct ShadowAtlas {
     shadow_frame_bind_group: wgpu::BindGroup,
     draw_uniform_buf: wgpu::Buffer,
     draw_bind_group: wgpu::BindGroup,
+    draw_stride: u64,
     max_draws: u32,
 }
 
 impl ShadowAtlas {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, min_ubo_align: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow_atlas"),
             size: wgpu::Extent3d {
@@ -323,8 +324,8 @@ impl ShadowAtlas {
             mapped_at_creation: false,
         });
 
-        let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(min_align) * min_align;
+        let align = min_ubo_align as u64;
+        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(align) * align;
         let draw_buf_size = draw_stride * MAX_DRAWS as u64;
 
         let draw_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -413,6 +414,7 @@ impl ShadowAtlas {
             shadow_frame_bind_group,
             draw_uniform_buf,
             draw_bind_group,
+            draw_stride,
             max_draws: MAX_DRAWS,
         }
     }
@@ -439,7 +441,7 @@ impl ShadowAtlas {
     #[allow(clippy::too_many_arguments)]
     fn render_shadow_pass(
         &self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         light_view_proj: Mat4,
@@ -452,8 +454,7 @@ impl ShadowAtlas {
         };
         queue.write_buffer(&self.shadow_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(min_align) * min_align;
+        let draw_stride = self.draw_stride;
 
         let mut draw_index: u32 = 0;
         let mut draw_offsets: Vec<u32> = Vec::new();
@@ -852,9 +853,10 @@ impl LightingPass {
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        min_ubo_align: u32,
     ) -> Self {
         let light_buffer = LightBuffer::new(device);
-        let shadow_atlas = ShadowAtlas::new(device);
+        let shadow_atlas = ShadowAtlas::new(device, min_ubo_align);
         let cluster_grid = ClusteredLightGrid::new(device, width, height);
 
         // HDR output texture
@@ -1456,7 +1458,7 @@ mod tests {
     fn shadow_atlas_allocates_single_region() {
         let instance = crate::gpu::GpuContext::create_instance();
         let ctx = pollster::block_on(crate::gpu::GpuContext::headless(instance));
-        let atlas = ShadowAtlas::new(&ctx.device);
+        let atlas = ShadowAtlas::new(&ctx.device, ctx.caps.min_ubo_align);
 
         let regions = atlas.allocate_regions(1);
         assert_eq!(regions.len(), 1);
@@ -1469,7 +1471,7 @@ mod tests {
     fn shadow_atlas_subdivides_for_multiple() {
         let instance = crate::gpu::GpuContext::create_instance();
         let ctx = pollster::block_on(crate::gpu::GpuContext::headless(instance));
-        let atlas = ShadowAtlas::new(&ctx.device);
+        let atlas = ShadowAtlas::new(&ctx.device, ctx.caps.min_ubo_align);
 
         let regions = atlas.allocate_regions(4);
         assert_eq!(regions.len(), 4);

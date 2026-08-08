@@ -356,6 +356,7 @@ pub struct GBufferPass {
     hzb: HzbBuilder,
     #[allow(dead_code)]
     surface_format: wgpu::TextureFormat,
+    draw_stride: u64,
     max_draws: u32,
 }
 
@@ -369,6 +370,7 @@ impl GBufferPass {
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        min_ubo_align: u32,
     ) -> Self {
         let gbuffer = GBuffer::new(device, width, height);
 
@@ -467,8 +469,8 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
-        let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(min_align) * min_align;
+        let align = min_ubo_align as u64;
+        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(align) * align;
         let draw_buf_size = draw_stride * MAX_DRAWS as u64;
 
         let draw_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -611,6 +613,7 @@ impl GBufferPass {
             texture_cache,
             hzb,
             surface_format,
+            draw_stride,
             max_draws: MAX_DRAWS,
         }
     }
@@ -646,8 +649,7 @@ impl GBufferPass {
         };
         queue.write_buffer(&self.frame_uniform_buf, 0, bytemuck::bytes_of(&frame_uniforms));
 
-        let min_align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let draw_stride = DRAW_UNIFORM_SIZE.div_ceil(min_align) * min_align;
+        let draw_stride = self.draw_stride;
 
         struct DrawCall<'a> {
             gpu_mesh: &'a GpuMesh,

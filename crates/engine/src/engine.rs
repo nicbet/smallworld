@@ -227,10 +227,11 @@ impl Engine {
         let inner = window.inner_size();
         let w = inner.width.max(1);
         let h = inner.height.max(1);
-        let gbuffer_pass = GBufferPass::new(&gpu.device, &gpu.queue, surface_config.format, w, h);
+        let ubo_align = gpu.caps.min_ubo_align;
+        let gbuffer_pass = GBufferPass::new(&gpu.device, &gpu.queue, surface_config.format, w, h, ubo_align);
         log::info!("boot: gbuffer pass ready");
 
-        let lighting_pass = LightingPass::new(&gpu.device, surface_config.format, w, h);
+        let lighting_pass = LightingPass::new(&gpu.device, surface_config.format, w, h, ubo_align);
         log::info!("boot: lighting pass ready");
 
         let jobs = if config.worker_threads > 0 {
@@ -432,6 +433,12 @@ impl Engine {
     #[must_use]
     pub fn window(&self) -> Option<&Window> {
         self.window.as_deref()
+    }
+
+    /// Probed hardware capabilities.
+    #[must_use]
+    pub fn caps(&self) -> &crate::gpu::Capabilities {
+        &self.gpu.caps
     }
 
     /// Adapter metadata for debug display.
