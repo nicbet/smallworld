@@ -19,6 +19,7 @@ use crate::gbuffer::GBufferPass;
 use crate::gpu::GpuContext;
 use crate::input::Input;
 use crate::jobs::JobPool;
+use crate::lighting::LightingPass;
 use crate::stream::{PlaceholderExtractor, StreamStage};
 use crate::world::World;
 
@@ -172,6 +173,7 @@ pub struct Engine {
     cull_stage: CullStage,
     stream_stage: StreamStage,
     gbuffer_pass: Option<GBufferPass>,
+    lighting_pass: Option<LightingPass>,
     jobs: JobPool,
 }
 
@@ -223,13 +225,13 @@ impl Engine {
         );
 
         let inner = window.inner_size();
-        let gbuffer_pass = GBufferPass::new(
-            &gpu.device,
-            surface_config.format,
-            inner.width.max(1),
-            inner.height.max(1),
-        );
+        let w = inner.width.max(1);
+        let h = inner.height.max(1);
+        let gbuffer_pass = GBufferPass::new(&gpu.device, surface_config.format, w, h);
         log::info!("boot: gbuffer pass ready");
+
+        let lighting_pass = LightingPass::new(&gpu.device, surface_config.format, w, h);
+        log::info!("boot: lighting pass ready");
 
         let jobs = if config.worker_threads > 0 {
             JobPool::new(config.worker_threads)
@@ -249,6 +251,7 @@ impl Engine {
             cull_stage: CullStage::new(),
             stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
             gbuffer_pass: Some(gbuffer_pass),
+            lighting_pass: Some(lighting_pass),
             jobs,
         }
     }
@@ -267,6 +270,7 @@ impl Engine {
             cull_stage: CullStage::new(),
             stream_stage: StreamStage::new(Arc::new(PlaceholderExtractor)),
             gbuffer_pass: None,
+            lighting_pass: None,
         }
     }
 
@@ -282,6 +286,9 @@ impl Engine {
         display.surface.configure(&self.gpu.device, &display.config);
         if let Some(g) = &mut self.gbuffer_pass {
             g.resize(&self.gpu.device, w, h);
+        }
+        if let Some(l) = &mut self.lighting_pass {
+            l.resize(&self.gpu.device, w, h);
         }
     }
 
@@ -349,37 +356,51 @@ impl Engine {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        if let Some(gbuffer_pass) = &mut self.gbuffer_pass {
-            let (w, h) = (display.config.width, display.config.height);
-            let aspect = w as f32 / h.max(1) as f32;
-            let camera = crate::camera::FreeCamera {
-                position: self.view.position,
-                yaw: self.view.yaw,
-                pitch: self.view.pitch,
-                fov_y: self.view.fov_y,
-                aspect,
-                near: 0.1,
-                far: 1000.0,
-            };
+        let (w, h) = (display.config.width, display.config.height);
+        let aspect = w as f32 / h.max(1) as f32;
+        let camera = crate::camera::FreeCamera {
+            position: self.view.position,
+            yaw: self.view.yaw,
+            pitch: self.view.pitch,
+            fov_y: self.view.fov_y,
+            aspect,
+            near: 0.1,
+            far: 1000.0,
+        };
 
-            let mut encoder =
-                self.gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("frame"),
-                    });
+        let mut encoder =
+            self.gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame"),
+                });
+
+        if let Some(gbuffer_pass) = &mut self.gbuffer_pass {
             gbuffer_pass.render(
                 &self.gpu.device,
                 &self.gpu.queue,
                 &mut encoder,
-                &surface_view,
                 &camera,
                 world,
                 &stream_output,
             );
-            self.gpu.queue.submit(std::iter::once(encoder.finish()));
+
+            if let Some(lighting_pass) = &mut self.lighting_pass {
+                lighting_pass.render(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut encoder,
+                    &surface_view,
+                    gbuffer_pass.gbuffer(),
+                    &camera,
+                    world,
+                    &visibility,
+                    &stream_output,
+                );
+            }
         }
 
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
         self.gpu.queue.present(frame);
     }
 

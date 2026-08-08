@@ -36,6 +36,10 @@ pub enum Shader {
     GBuffer,
     /// HZB builder: compute shader downsampling depth into a mip chain.
     Hzb,
+    /// Shadow pass: depth-only vertex shader for shadow map rendering.
+    Shadow,
+    /// Deferred shade: compute shader evaluating PBR lighting from GBuffer.
+    Shade,
 }
 
 impl Shader {
@@ -48,6 +52,8 @@ impl Shader {
             Self::Blit => "blit.wgsl",
             Self::GBuffer => "gbuffer.wgsl",
             Self::Hzb => "hzb.wgsl",
+            Self::Shadow => "shadow.wgsl",
+            Self::Shade => "shade.wgsl",
         }
     }
 
@@ -60,6 +66,8 @@ impl Shader {
             Self::Blit => include_str!("../shaders/blit.wgsl"),
             Self::GBuffer => include_str!("../shaders/gbuffer.wgsl"),
             Self::Hzb => include_str!("../shaders/hzb.wgsl"),
+            Self::Shadow => include_str!("../shaders/shadow.wgsl"),
+            Self::Shade => include_str!("../shaders/shade.wgsl"),
         }
     }
 }
@@ -125,6 +133,8 @@ mod tests {
         Shader::Blit,
         Shader::GBuffer,
         Shader::Hzb,
+        Shader::Shadow,
+        Shader::Shade,
     ];
 
     fn shader_dir() -> PathBuf {

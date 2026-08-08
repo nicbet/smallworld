@@ -19,6 +19,7 @@ pub mod gpu_timing;
 pub mod input;
 pub(crate) mod jobs;
 pub mod gbuffer;
+pub mod lighting;
 pub mod raymarcher;
 pub mod shaders;
 pub mod stream;

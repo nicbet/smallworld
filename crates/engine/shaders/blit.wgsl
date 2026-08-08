@@ -1,4 +1,5 @@
-// Fullscreen-triangle blit: copies the compute output texture to the surface.
+// Fullscreen-triangle blit with Reinhard tone mapping.
+// Used to copy HDR output to the sRGB swapchain surface.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
@@ -21,5 +22,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(src, src_sampler, in.uv);
+    let hdr = textureSample(src, src_sampler, in.uv).rgb;
+    let mapped = hdr / (hdr + vec3<f32>(1.0));
+    return vec4<f32>(mapped, 1.0);
 }

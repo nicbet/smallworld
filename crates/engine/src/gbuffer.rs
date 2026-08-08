@@ -179,7 +179,7 @@ impl HzbBuilder {
 // GBufferPass
 // ---------------------------------------------------------------------------
 
-/// Renders meshes into the GBuffer, builds HZB, and blits albedo to screen.
+/// Renders meshes into the GBuffer and builds HZB.
 pub struct GBufferPass {
     gbuffer: GBuffer,
     gbuffer_pipeline: wgpu::RenderPipeline,
@@ -191,9 +191,6 @@ pub struct GBufferPass {
     draw_uniform_buf: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
-    blit_pipeline: wgpu::RenderPipeline,
-    blit_bind_group_layout: wgpu::BindGroupLayout,
-    blit_sampler: wgpu::Sampler,
     hzb: HzbBuilder,
     #[allow(dead_code)]
     surface_format: wgpu::TextureFormat,
@@ -342,6 +339,7 @@ impl GBufferPass {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Cw,
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
@@ -357,74 +355,6 @@ impl GBufferPass {
             cache: None,
         });
 
-        // --- Blit pipeline (albedo → surface) ---
-        let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("debug_blit"),
-            source: wgpu::ShaderSource::Wgsl(shaders::load(shaders::Shader::Blit)),
-        });
-
-        let blit_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("debug_blit"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("debug_blit"),
-            bind_group_layouts: &[Some(&blit_bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("debug_blit"),
-            layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("debug_blit"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
         let hzb = HzbBuilder::new();
 
         Self {
@@ -436,9 +366,6 @@ impl GBufferPass {
             draw_uniform_buf,
             frame_bind_group,
             draw_bind_group,
-            blit_pipeline,
-            blit_bind_group_layout,
-            blit_sampler,
             hzb,
             surface_format,
             max_draws: MAX_DRAWS,
@@ -453,14 +380,18 @@ impl GBufferPass {
         self.gbuffer = GBuffer::new(device, width, height);
     }
 
-    /// Renders the GBuffer pass, builds HZB, and blits albedo to the surface.
+    /// Returns a reference to the GBuffer textures for downstream passes.
+    pub fn gbuffer(&self) -> &GBuffer {
+        &self.gbuffer
+    }
+
+    /// Renders the GBuffer pass and builds HZB.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        surface_view: &wgpu::TextureView,
         camera: &FreeCamera,
         world: &World,
         stream_output: &StreamOutput<'_>,
@@ -609,48 +540,5 @@ impl GBufferPass {
         // HZB: ensure texture is allocated (build step deferred)
         self.hzb
             .ensure_texture(device, self.gbuffer.width, self.gbuffer.height);
-
-        // --- Debug blit: albedo → surface ---
-        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("debug_blit"),
-            layout: &self.blit_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.gbuffer.albedo_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
-                },
-            ],
-        });
-
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("debug_blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: surface_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rpass.set_pipeline(&self.blit_pipeline);
-            rpass.set_bind_group(0, &blit_bind_group, &[]);
-            rpass.draw(0..3, 0..1);
-        }
     }
 }
