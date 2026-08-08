@@ -201,4 +201,21 @@ mod tests {
         let err = pollster::block_on(scope.pop());
         assert!(err.is_none(), "raymarch shader failed validation: {err:?}");
     }
+
+    /// Validates the shade module on a real device so WGSL errors fail
+    /// `cargo test` instead of surfacing at first app launch.
+    #[test]
+    fn shade_shader_validates() {
+        let instance = crate::gpu::GpuContext::create_instance();
+        let ctx = pollster::block_on(crate::gpu::GpuContext::headless(instance));
+        let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shade_validation"),
+                source: wgpu::ShaderSource::Wgsl(load(Shader::Shade)),
+            });
+        let err = pollster::block_on(scope.pop());
+        assert!(err.is_none(), "shade shader failed validation: {err:?}");
+    }
 }

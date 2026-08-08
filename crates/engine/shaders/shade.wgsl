@@ -169,20 +169,39 @@ fn spot_attenuation(cos_angle: f32, inner_cos: f32, outer_cos: f32) -> f32 {
 
 // ---- Shadow sampling ----
 
-fn sample_shadow(world_pos: vec3<f32>, shadow_idx: i32) -> f32 {
+// Receiver-side biasing (Godot-style): the shadow pipeline uses no hardware
+// depth bias. Normal offset handles slope, a small constant bias along the
+// light handles depth separation.
+const SHADOW_NORMAL_BIAS: f32 = 2.0; // in shadow-map texels
+const SHADOW_DEPTH_BIAS: f32 = 0.05; // world units toward the light
+
+fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, shadow_idx: i32) -> f32 {
     if shadow_idx < 0 || shadow_idx >= i32(shadow_header.count) {
         return 1.0;
     }
     let sv = shadow_views[shadow_idx];
-    let light_clip = sv.view_proj * vec4<f32>(world_pos, 1.0);
+    let vp = sv.viewport;
+
+    // World-space texel size of the ortho frustum: NDC x spans the frustum
+    // width, so |row0(view_proj)| = 2 / width.
+    let row0 = vec3<f32>(sv.view_proj[0][0], sv.view_proj[1][0], sv.view_proj[2][0]);
+    let texel_size = 2.0 / (length(row0) * vp.z);
+
+    // Slope-scaled normal offset: zero at normal incidence, maximal at grazing.
+    var offset = normal * (texel_size * SHADOW_NORMAL_BIAS * (1.0 - saturate(dot(normal, to_light))));
+    // Project out the light-parallel component: the offset shifts where the
+    // shadow map is sampled but can never change the depth comparison, so it
+    // cannot cause Peter-Panning.
+    offset -= to_light * dot(to_light, offset);
+
+    let pos = world_pos + offset + to_light * SHADOW_DEPTH_BIAS;
+    let light_clip = sv.view_proj * vec4<f32>(pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
 
     if any(light_ndc.xy < vec2<f32>(-1.0)) || any(light_ndc.xy > vec2<f32>(1.0)) {
         return 1.0;
     }
 
-    let atlas_size = shadow_header.atlas_size;
-    let vp = sv.viewport;
     let shadow_uv = light_ndc.xy * 0.5 + 0.5;
     let atlas_pixel = vec2<i32>(
         i32(vp.x + shadow_uv.x * vp.z),
@@ -274,7 +293,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 * spot_attenuation(cos_angle, light.spot_params.x, light.spot_params.y);
         }
 
-        let shadow = sample_shadow(world_pos, shadow_idx);
+        let shadow = sample_shadow(world_pos, normal, l, shadow_idx);
         let brdf = cook_torrance(normal, v, l, albedo, roughness, metallic);
         color += brdf * light_color * intensity * attenuation * shadow;
     }
