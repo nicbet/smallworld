@@ -1,9 +1,40 @@
 # smallworld — Technical Design
 
-A voxel engine built in Rust + WGPU. The architecture is organized around an
-**out-of-core (OOC) rendering pipeline** that runs every frame. Disk is the
-source of truth; RAM and VRAM are caches. The engine streams, culls, and renders
-only what the camera can see.
+## Philosophy
+
+Smallworld is an ultra-modern game engine built from scratch in Rust + WGPU, with
+none of the architectural baggage of older engines. Every layer — memory, threads,
+GPU — is designed for current hardware, not retrofitted onto decades-old
+abstractions.
+
+**Voxels and meshes are both first-class citizens.** Voxel volumes make up the
+world: terrain, caves, buildings, destruction — rendered to the horizon via
+raymarching. Entities (characters, creatures, props) are meshed so they can be
+rigged and animated. Near-field volumes are also meshed for destructible geometry
+with per-voxel fidelity. Both paths converge at the same GBuffer and share the
+same lighting model.
+
+**Best-in-class rendering, cherry-picked from the best engines.** The renderer
+pulls proven techniques from Unreal, Unity, Godot, and the research literature —
+not invented-here alternatives. Full AAA feature set: global illumination, bloom,
+motion blur, ambient occlusion, volumetric fog, screen-space reflections. Every
+algorithm is chosen for correctness first, then optimized for throughput.
+
+**Blazing fast by architecture, not just optimization.** Out-of-core pipeline
+treats disk as source of truth and VRAM as a cache. Persistent thread pools with
+work-stealing — no per-task spawning. GPU-driven culling and indirect draws. Ring
+buffer staging with async copy queues. The engine is designed to never stall.
+
+**A complete game engine, not just a renderer.** Audio, UI, scripting, input,
+field simulation — all built-in with clean APIs. Game developers describe intent
+(a window, a resolution, a volume, a sound); the engine owns the plumbing. The
+API makes sense first and is fast second — but it is both.
+
+## Architecture
+
+The architecture is organized around an **out-of-core (OOC) rendering pipeline**
+that runs every frame. Disk is the source of truth; RAM and VRAM are caches. The
+engine streams, culls, and renders only what the camera can see.
 
 ## Per-Frame Pipeline
 
@@ -252,12 +283,21 @@ Three runtime modes:
 
 Switchable at runtime for profiling and debugging.
 
-## ECS
+## Entity Architecture
 
-Entity Component System adopted after A/B benchmark of `bevy_ecs` vs `hecs` at
-multi-million entity scale. Provides the compositional model for the hybrid
-engine: a chunk can independently have volume, mesh, visibility, and residency
-components.
+SlotMap + side structs for entity storage. `SlotMap<EntityId, Instance>` provides
+stable handles with O(1) insert/remove. GPU singletons (GpuContext, BrickPool,
+SVO, Raymarcher) live as side structs, not entity components.
+
+ECS (hecs) is deferred until entity heterogeneity justifies it — when the engine
+needs queries like "all entities with X but not Y" at scale. Current workloads
+(culling, LOD, streaming, GPU upload) are dense iteration or spatial traversal
+where plain arrays win. A/B benchmarks (sw-cf6350) confirmed SlotMap is the right
+choice for this stage.
+
+Runtime state (`LodLevel`, `Visible`, `StreamingState`) is stored as mutable
+fields, never modeled as component presence/absence — archetype migration is
+500–660× slower than field mutation.
 
 ## Job System
 
