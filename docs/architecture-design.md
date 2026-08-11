@@ -24,10 +24,10 @@ Smallworld uses a **2-frame pipeline** where the Game Thread and Render Thread o
 
 While the Render Thread draws frame *N*, the Game Thread is already computing frame *N+1*. The extract step at the end of each game tick is the synchronization point.
 
-- **Step 1: Game Thread (Frame N).** The engine processes game logic, physics, animation, and input. At the end of the tick, the extract step snapshots the World into a self-contained `FramePacket` and sends it through a bounded channel.
-- **Step 2: Render Thread (Frame N, one step behind).** The Render Thread receives the `FramePacket`, processes GPU resource updates, then executes the render graph to produce the final image.
+- **Step 1: Game Thread (Frame N).** The engine processes game logic, physics, animation, and input. At the end of the tick, the extract step diffs the World against the `ChangeTracker` and produces a `FramePacket` — views, lights, resource operations, and per-backend scene deltas — and sends it through a bounded channel.
+- **Step 2: Render Thread (Frame N, one step behind).** The Render Thread receives the `FramePacket`, applies its deltas to the retained `RenderScene`, processes GPU resource updates, then executes the render graph to produce the final image.
 
-This introduces one frame of input latency (~16 ms at 60 fps) in exchange for doubled throughput. Same tradeoff as UE5.
+This introduces one frame of input latency (~16 ms at 60 fps) in exchange for up to double the throughput when both threads carry comparable load. Same tradeoff as UE5.
 
 ```
 time ──────────────────────────────────────────────────────▶
@@ -46,14 +46,16 @@ Three execution contexts, each with clear ownership boundaries:
 | Context | Owns | Communicates via |
 |---------|------|------------------|
 | **Game Thread** (main) | World, Input, Time, Systems, AssetServer | Sends `FramePacket` to Render Thread; receives `FrameFeedback` (N-2) |
-| **Render Thread** (dedicated) | GpuContext, RenderGraph, GPU resource pools, render targets | Receives `FramePacket`; sends `FrameFeedback` back |
+| **Render Thread** (dedicated) | GpuContext, RenderScene (retained draw data), RenderGraph, GPU resource pools, render targets | Receives `FramePacket`; sends `FrameFeedback` back |
 | **Worker Pool** (rayon, work-stealing) | Nothing persistent — borrows work items | Scoped tasks with `join()` / `parallel_for()` |
 
 The Worker Pool is shared between both threads. The Game Thread uses it for physics broadphase, animation sampling, and streaming demand computation. The Render Thread uses it for frustum culling, draw call sorting, and batch generation.
 
 ### Render-to-Game Feedback
 
-The pipeline is not one-directional. The Render Thread sends a `FrameFeedback` back to the Game Thread after each frame completes. This travels through a separate channel and arrives two frames later — the Game Thread reads feedback from frame N-2 while processing frame N. Never a synchronous wait.
+The pipeline is not one-directional. The Render Thread sends a `FrameFeedback` back to the Game Thread after each frame is submitted. This travels through a separate channel — the Game Thread typically reads feedback from frame N-2 while processing frame N. Never a synchronous wait.
+
+Feedback data has two ages. CPU-side data (cull statistics) describes the frame the feedback was sent after. GPU-derived data (timestamps, occlusion queries, compute readbacks) is older: at submit time the GPU has not yet executed the frame, so query results are collected through a **frames-in-flight readback ring** — 2–3 buffered query/readback sets, polled via `map_async` without blocking — and each GPU-derived datum is stamped with the frame it actually measures. The Render Thread never blocks on the GPU to assemble feedback.
 
 ```
 time ──────────────────────────────────────────────────────▶
@@ -68,15 +70,16 @@ Render:  │ render(N-1)      │ │ render(N)         │  │ render(N+1)
 
 ```rust
 struct FrameFeedback {
-    frame_index:    u64,
-    gpu_time:       GpuTimingFeedback,
-    occlusion:      OcclusionFeedback,
+    frame_index:    u64,                       // frame this feedback was sent after
+    gpu_time:       Option<GpuTimingFeedback>, // from the readback ring; None until first results land
+    occlusion:      OcclusionFeedback,         // CPU cull stats for frame_index
     readback:       Vec<ReadbackResult>,
 }
 
 struct GpuTimingFeedback {
+    measured_frame:  u64,                 // the frame these numbers describe (≥ ring depth behind frame_index)
     total_gpu_ms:    f32,
-    pass_timings:    Vec<(String, f32)>,  // per render pass
+    pass_timings:    Vec<(PassId, f32)>,  // PassId: interned pass name, assigned at graph build
     gpu_memory_used: u64,
 }
 
@@ -87,8 +90,8 @@ struct OcclusionFeedback {
 }
 
 enum ReadbackResult {
-    OcclusionQuery { entity: EntityId, visible_samples: u32 },
-    ComputeResult  { tag: u32, data: Vec<u8> },
+    OcclusionQuery { source_frame: u64, entity: EntityId, visible_samples: u32 },
+    ComputeResult  { source_frame: u64, tag: u32, data: Vec<u8> },
 }
 ```
 
@@ -114,7 +117,7 @@ EngineConfig {
 }
 ```
 
-In lockstep mode, feedback arrives from the immediately preceding frame instead of N-2, but the game thread stalls until the render thread finishes — the same bottleneck UE5 documents with `r.OneFrameThreadLag 0`.
+In lockstep mode, CPU-side feedback arrives from the immediately preceding frame instead of N-2 (GPU-derived data still trails by the readback ring depth), but the game thread stalls until the render thread finishes — the same bottleneck UE5 documents with `r.OneFrameThreadLag 0`.
 
 ---
 
@@ -124,25 +127,28 @@ The Render Thread receives a `FramePacket` each frame and translates it into GPU
 
 ### 1. Receive & Prepare
 
-The Render Thread blocks on the channel until a `FramePacket` arrives. It then processes any `ResourceOp` entries — uploading new meshes and textures to GPU pools, updating material uniform data, and freeing resources for despawned entities.
+The Render Thread blocks on the channel until a `FramePacket` arrives. It then processes any `ResourceOp` entries — uploading new meshes and textures to GPU pools, updating material uniform data, and freeing resources for despawned entities — and applies the packet's scene deltas to the retained `RenderScene`: upserting and removing commands in the shared mesh draw store, and handing each backend's custom payload to its renderer half.
 
-This is the only point where the Render Thread mutates its persistent state (GPU resource caches). Everything after this is read-only traversal of the packet.
+This is the only point where the Render Thread mutates its persistent state (GPU resource caches and the `RenderScene`). Everything after this is read-only traversal of the scene and packet.
 
 ### 2. Visibility & Culling
 
-Before anything is drawn, the engine determines what the camera can see. Each registered `GeometryBackend` runs its own culling logic via `backend.cull()`, allowing geometry types to implement specialized culling strategies (e.g., octree traversal for volumes vs. flat AABB tests for meshes).
+Before anything is drawn, the engine determines what each view can see. Culling is **per-view**: the packet's main and auxiliary views, plus shadow views the Render Thread derives from the shadow-casting lights (cascade fitting against the main view — the equivalent of UE5's InitViews shadow setup). Each registered geometry renderer culls the retained scene per view via `renderer.cull()`, allowing geometry types to implement specialized strategies (e.g., octree traversal for volumes vs. flat AABB tests for meshes).
 
-- **Frustum culling.** Test every draw command's world-space AABB against the camera's six frustum planes. Parallelized across the worker pool.
-- **Occlusion culling (HZB).** Using the Hierarchical Z-Buffer from the previous frame's depth, test remaining objects to discard those hidden behind large occluders.
+- **View setup.** Collect this frame's views: main camera, aux views (render-to-texture, probes), and one view per shadow cascade / shadowed local light.
+- **RT instance collection.** When RT is enabled, the TLAS instance list is gathered **before any per-view culling**, from the retained scene under its own, larger culling domain (an RT radius around the camera — off-screen geometry must still exist for shadows, reflections, and GI). See the Ray Tracing section.
+- **Frustum culling.** Test every draw command's world-space AABB against each view's frustum planes. Parallelized across the worker pool.
+- **Occlusion culling (HZB).** Using the Hierarchical Z-Buffer built from the previous frame's *final opaque depth* — all backends, not just meshes (see the GBuffer stage) — test remaining objects in the main view to discard those hidden behind large occluders.
 - **LOD selection.** For volumes and meshes with LOD levels, select the appropriate detail tier based on screen-space size or distance. Each backend owns its LOD strategy.
-- **Sort & batch.** Opaque draws are sorted front-to-back (minimize overdraw), transparent draws back-to-front. Draws sharing the same pipeline state are batched.
+- **Sort & batch.** Per view: opaque draws sorted front-to-back (minimize overdraw), transparent draws back-to-front. Draws sharing pipeline state are merged into instanced batches.
 
 ### 3. Depth Pre-Pass
 
 Establishes the scene's depth early to prevent overdraw in the full GBuffer pass.
 
 - **Early Z.** Opaque meshes render depth-only to the Z-buffer.
-- **HZB construction.** The depth buffer is downsampled into a mip chain for next-frame occlusion queries.
+
+The HZB is deliberately *not* built here — a pre-pass HZB would contain only mesh depth, and geometry from other backends (raymarched volumes, custom plugins) would never act as occluders. It is built after the GBuffer stage, once every backend has contributed depth.
 
 ### 4. GBuffer Pass (Geometry)
 
@@ -150,7 +156,7 @@ Visible opaque surfaces write their material properties to the Geometry Buffer. 
 
 | GBuffer Target | Format | Data |
 |----------------|--------|------|
-| Albedo | Rgba8UnormSrgb | Base color (RGB) + flags (A) |
+| Albedo | Rgba8UnormSrgb | Base color (RGB); A = shading model ID (4 bits) + flags (4 bits) |
 | Normal | Rgba16Float | World-space normals (octahedral encoded) |
 | Material | Rgba8Unorm | Roughness, metallic, reflectance, AO |
 | Emissive | Rgba16Float | Self-illumination (RGB) + intensity |
@@ -165,9 +171,20 @@ Both rendering paths write to this same GBuffer:
 
 The lighting pass and everything downstream never knows which path produced a given pixel.
 
+**Shading Model ID.** The albedo alpha channel carries a per-pixel shading model ID (up to 16 models). The lighting pass switches on it to select the lighting response — `Standard` (Cook-Torrance PBR), `Unlit`, and registered custom models (toon, foliage, …). This is UE5's per-pixel shading-model mechanism: it is what lets custom materials change *how light responds*, not just which material inputs are written.
+
+**HZB construction.** After all opaque backends have written depth — rasterized meshes and raymarched volumes alike — the final opaque depth is downsampled into the HZB mip chain used by the next frame's occlusion culling. Building the HZB here (rather than in the depth pre-pass) means volumes and custom geometry act as occluders: a voxel mountain culls the city behind it.
+
 ### 5. Shadow Pass
 
-The engine renders depth from the perspective of each shadow-casting light into a shadow atlas.
+The engine renders depth from the perspective of each shadow-casting light into a shadow atlas, using the per-shadow-view draw lists produced during culling — shadow views see geometry the main camera culled.
+
+Two kinds of geometry feed each shadow view:
+
+- **The shared mesh stream.** Every `MeshDrawCommand` flagged `CAST_SHADOW` renders into the atlas — regardless of which backend emitted it (the Voxel Plugin's extracted-mesh tiers included).
+- **`ShadowCaster` participants.** Backends whose geometry has no triangle form implement the `ShadowCaster` participation trait to render depth into a given shadow view themselves (e.g., raymarched volume depth).
+
+Light types:
 
 - **Directional lights** use cascaded shadow maps (CSM) with configurable cascade count (1–4).
 - **Point and spot lights** render into atlas sub-regions.
@@ -175,45 +192,32 @@ The engine renders depth from the perspective of each shadow-casting light into 
 
 ### 6. Lighting Pass (Deferred Shading)
 
-A full-screen compute dispatch evaluates Cook-Torrance PBR shading by reading the GBuffer, shadow atlas, and light buffer.
+A full-screen compute dispatch evaluates deferred shading by reading the GBuffer, shadow atlas, and light buffer. Each pixel's lighting response is selected by its GBuffer shading model ID — `Standard` is Cook-Torrance PBR; other registered models (toon, foliage, unlit) branch here.
 
 - **Clustered light assignment.** Screen-space tiles × depth slices. Lights are assigned to clusters on the CPU. Each cluster stores up to 32 light indices.
 - **Shadow evaluation.** Percentage-closer filtering (PCF) samples the shadow atlas per light.
+- **Pluggable indirect inputs.** The lighting pass declares public input slots for an indirect-diffuse (GI) texture and per-light shadow masks. Engine RT passes feed them when hardware RT is available — but they are a **public render-graph contract**: a plugin (e.g., the Voxel Plugin's SVO-traced GI) or a future software-GI tier can feed the same slots without touching the lighting pass.
 - **Output.** HDR lighting result written to an Rgba16Float texture.
 
 ### 7. Ray Tracing (Secondary Effects)
 
 Smallworld follows UE5's hybrid rendering model: rasterization handles primary visibility (what the camera sees), ray tracing handles secondary effects (how light bounces, reflects, and casts shadows). Rasterization writes the GBuffer; ray tracing reads it.
 
-This section is conditional on `Capabilities::ray_query`. When hardware RT is unavailable, the engine falls back to screen-space approximations (SSAO, SSR) or skips the effects entirely. The rest of the pipeline is unchanged — RT passes are optional render graph nodes.
+This section is conditional on `Capabilities::ray_query`. **The design targets wgpu's inline ray queries exclusively** — rays are traced from compute shaders via `ray_query`. wgpu exposes no ray-tracing pipelines, no shader binding table, and no hit/any-hit/intersection shaders, so nothing in this design may depend on them; on a hit, shaders receive instance/primitive indices and fetch surface data manually (see RT Global Illumination). When hardware RT is unavailable, the engine falls back to screen-space approximations (SSAO, SSR) or skips the effects entirely. The rest of the pipeline is unchanged — RT passes are optional render graph nodes.
 
 #### Acceleration Structure
 
-Ray tracing requires a spatial index on the GPU so rays can efficiently find intersections. This is a two-level hierarchy maintained by the Render Thread as part of `RenderState`:
+Ray tracing requires a spatial index on the GPU so rays can efficiently find intersections. This is a two-level hierarchy maintained by the Render Thread as part of `RenderState` (see Data Structures for the `AccelerationStructure` definition):
 
 - **Bottom-Level Acceleration Structure (BLAS).** One per unique mesh geometry. Built from the vertex/index buffers already in `GpuMeshPool`. Rebuilt only when geometry changes (rare for static meshes, per-frame for skinned/deformable).
-- **Top-Level Acceleration Structure (TLAS).** One per frame. References all BLAS instances with their world transforms. Rebuilt every frame from the `FramePacket`'s draw commands — each `MeshDrawCommand` becomes a TLAS instance entry.
-
-```rust
-struct AccelerationStructure {
-    blas_cache:  HashMap<GpuId, BlasEntry>,
-    tlas:        wgpu::Tlas,
-    tlas_dirty:  bool,
-}
-
-struct BlasEntry {
-    blas:        wgpu::Blas,
-    mesh_gpu_id: GpuId,
-    generation:  u32,         // rebuilt when mesh geometry changes
-}
-```
+- **Top-Level Acceleration Structure (TLAS).** One per frame. References all BLAS instances with their world transforms. **Built before any per-view culling, from the retained scene** — never from a culled draw list. Rays need geometry the camera cannot see: off-screen shadow casters, the room behind the camera in a mirror. The TLAS therefore uses its own culling domain — an **RT culling radius** around the camera, larger than any view frustum (the same reason UE5 has a separate ray-tracing culling radius). `TlasContributor` backends add their instances here.
 
 The TLAS build is a GPU operation — the Render Thread records it as a command before the RT passes execute. Cost is proportional to instance count, not triangle count, so it scales well.
 
-Volume geometry poses a challenge: voxel data doesn't have a triangle representation to feed into BLAS construction. Two strategies:
+Volume geometry has no triangle representation to feed into BLAS construction. Two strategies:
 
-- **Extracted mesh BLAS.** If the `VolumeBackend` extracts meshes (marching cubes / dual contouring), those meshes get BLAS entries like any other mesh. Works today, coarser than the actual voxel data.
-- **SVO traversal in ray-any-hit.** Keep the SVO on the GPU and trace against it using a custom intersection shader. More accurate but requires `ray_tracing_pipeline` support beyond basic `ray_query`. This is the long-term path.
+- **Extracted mesh BLAS.** The Voxel Plugin's extracted-mesh LOD tiers enter the TLAS like any other mesh draws — the shared mesh stream at work. Works today, coarser than the actual voxel data.
+- **SVO compute raymarching (no RT hardware needed).** For voxel shadows and GI, the Voxel Plugin traces its own SVO directly in compute — no acceleration structure, no `ray_query` required — and feeds the results into the lighting pass's public shadow-mask / GI input slots. Hardware traversal of the SVO via custom intersection shaders is **not possible under wgpu** (no ray-tracing pipelines), so compute-side SVO tracing is the plugin's path. Direction agreed in principle; specifics tracked in Open Questions.
 
 #### RT Passes
 
@@ -224,14 +228,14 @@ RT passes are standard `RenderPass` implementations that read the GBuffer and tr
 For each pixel in the GBuffer, cast one shadow ray toward each light source through the TLAS. Produces a per-light shadow mask — a binary (or soft-penumbra) occlusion value per pixel. Replaces or supplements the rasterized shadow atlas for lights that opt in.
 
 - **Input:** GBuffer (depth, normal, position reconstructed from depth), TLAS, light buffer.
-- **Output:** `rt_shadow_mask` — Rgba8Unorm, one channel per shadow-casting light (up to 4 per tile; overflow falls back to shadow atlas).
+- **Output:** `rt_shadow_mask` — Rgba8Unorm; channels are assigned to the (up to 4) most significant RT-shadowed lights per cluster via the clustered light grid; lights beyond that fall back to the shadow atlas.
 - **Dispatch:** Full-screen compute, 8×8 workgroups. One ray per pixel per light. Denoised temporally.
 
 ##### RT Global Illumination (`RTGIPass`)
 
-Indirect lighting from light bounces. Cast rays outward from each GBuffer pixel based on a cosine-weighted hemisphere around the surface normal. Hit points sample their own material (via the BLAS hit shader or a surface cache) to compute bounced radiance.
+Indirect lighting from light bounces. Cast rays outward from each GBuffer pixel based on a cosine-weighted hemisphere around the surface normal. `ray_query` returns instance and primitive indices on a hit; the shader then fetches the hit point's surface data manually — via a **surface cache** (radiance cached per surface texel, Lumen-style) or bindless vertex/material buffer access. There are no hit shaders under wgpu; this fetch path is a required piece of the design (see Open Questions).
 
-- **Input:** GBuffer, TLAS, material data (surface cache or hit shaders).
+- **Input:** GBuffer, TLAS, material data (surface cache or bindless fetch).
 - **Output:** `rt_gi` — Rgba16Float, indirect diffuse irradiance per pixel.
 - **Dispatch:** Half-resolution (one ray per 2×2 quad), spatially and temporally denoised, then upsampled. Full-resolution GI is too expensive for real-time; the denoiser fills in.
 
@@ -257,7 +261,9 @@ LightingPass reads:
     clustered_light_grid                           — always
 ```
 
-The shader branches on whether RT targets are bound. When RT shadows are available for a light, they replace the shadow atlas sample for that light. RT GI adds to the ambient/indirect term. RT reflections replace or blend with the specular term based on roughness.
+When RT shadows are available for a light, they replace the shadow atlas sample for that light. RT GI adds to the ambient/indirect term. RT reflections replace or blend with the specular term based on roughness.
+
+WGSL has no optional bindings — a pipeline's bind group layout is fixed at creation — so "reads the RT targets when they exist" needs an explicit mechanism: either pipeline permutations of the lighting shader (with/without RT inputs) or always-bound dummy targets plus uniform flags. The render graph knows at build time which passes are registered, so either is implementable; the choice is tracked in Open Questions.
 
 This is pure additive integration — the rasterization pipeline produces a complete image on its own. RT passes improve quality when available but nothing breaks without them.
 
@@ -266,11 +272,12 @@ This is pure additive integration — the rasterization pipeline produces a comp
 ```rust
 // Added to RenderTargets when Capabilities::ray_query is true
 struct RTTargets {
-    shadow_mask:  wgpu::Texture,  // Rgba8Unorm — per-light RT shadow
-    gi:           wgpu::Texture,  // Rgba16Float — indirect diffuse
-    reflections:  wgpu::Texture,  // Rgba16Float — specular reflections
-    history_gi:   wgpu::Texture,  // Rgba16Float — temporal accumulation for denoiser
-    history_refl: wgpu::Texture,  // Rgba16Float — temporal accumulation for denoiser
+    shadow_mask:    wgpu::Texture,  // Rgba8Unorm — per-light RT shadow
+    gi:             wgpu::Texture,  // Rgba16Float — indirect diffuse
+    reflections:    wgpu::Texture,  // Rgba16Float — specular reflections
+    history_shadow: wgpu::Texture,  // Rgba8Unorm — temporal accumulation for denoiser
+    history_gi:     wgpu::Texture,  // Rgba16Float — temporal accumulation for denoiser
+    history_refl:   wgpu::Texture,  // Rgba16Float — temporal accumulation for denoiser
 }
 ```
 
@@ -284,7 +291,9 @@ When `ray_query` is unavailable, the engine uses screen-space approximations in 
 | `RTGIPass` | SSAO + ambient probe | No bounce lighting, baked or constant ambient |
 | `RTReflectionPass` | SSR (screen-space reflections) | Misses off-screen reflections |
 
-The render graph handles this naturally — if the RT passes aren't registered (because `ray_query` is false), the lighting pass simply doesn't bind their targets and uses the fallback terms.
+If the RT passes aren't registered (because `ray_query` is false), the lighting pass's RT input slots go unfed and the fallback terms are used.
+
+The GI fallback is a **conscious v1 quality cliff**: UE5's Lumen degrades through a *software* ray-tracing tier (distance fields) before reaching this point. Smallworld core does not assume any particular scene structure — the SVO belongs to the Voxel Plugin, which core cannot depend on — so a general software-GI tier (SDF scene or screen-space GI) is deferred; see Open Questions. Voxel-heavy games get a better fallback from the Voxel Plugin's SVO-traced GI, delivered through the lighting pass's public input slots.
 
 ### 8. Sky & Atmosphere
 
@@ -311,86 +320,130 @@ The final image is blitted to the swapchain surface. The Render Thread loops bac
 
 ## Customizing the Render Pipeline
 
-Smallworld's rendering architecture is modular at five levels, mirroring UE5's customization depth but expressed in Rust traits rather than C++ inheritance. The guiding principle: **the engine's own voxel volume support is a geometry backend plugin, not a special case.** It uses the same `GeometryBackend` trait a game would use to add GPU particles, procedural terrain, or SDF shapes. If the API isn't powerful enough for voxels, it isn't powerful enough for games.
+Smallworld's rendering architecture is modular at five levels, mirroring UE5's customization depth but expressed in Rust traits rather than C++ inheritance. The guiding principle: **the engine's own voxel volume support ships as the Voxel Plugin — a geometry backend plugin, not a special case.** It uses the same backend traits a game would use to add GPU particles, procedural terrain, or SDF shapes. If the API isn't powerful enough for voxels, it isn't powerful enough for games.
 
-### 1. Custom Geometry Types (`GeometryBackend`)
+### 1. Custom Geometry Types (`GeometryExtractor` + `GeometryRenderer`)
 
-The deepest customization point. A `GeometryBackend` defines a new kind of renderable — its game-side component, how it extracts into draw commands, how it manages GPU resources, and which render passes it needs.
+The deepest customization point. A geometry backend defines a new kind of renderable — its game-side component, how it extracts into scene deltas, how the render side retains and culls that data, which GPU resources it needs, and which render passes it contributes.
+
+A backend is **two objects, one per side of the thread firewall** — the same split as UE5's `UPrimitiveComponent` / `FPrimitiveSceneProxy`. The extractor lives on the Game Thread and never sees GPU types. The renderer lives on the Render Thread, owns its retained scene data, and may use wgpu directly — it *is* render-side code; Principle 3 constrains game code, not render plugins.
 
 ```rust
-trait GeometryBackend: Send + Sync {
+// Game Thread half — reads the World, emits deltas. No GPU types anywhere.
+trait GeometryExtractor: Send {
     fn name(&self) -> &str;
 
-    // Which component type does this backend process?
+    // Which component type does this extractor process?
     fn component_id(&self) -> TypeId;
 
-    // Extract: read World components, produce draw commands for the Render Thread
-    fn extract(
-        &self,
-        world: &World,
-        changes: &ChangeTracker,
-        camera: &CameraParams,
-    ) -> Box<dyn DrawCommandSet>;
+    // Diff the World against the change tracker; write mesh-draw updates and/or a
+    // backend-specific delta payload for the renderer half. View-independent.
+    fn extract(&mut self, world: &World, changes: &ChangeTracker, out: &mut SceneDeltaWriter);
+}
 
-    // Cull: filter commands by visibility (frustum, HZB, distance)
-    fn cull(
-        &self,
-        commands: &mut dyn DrawCommandSet,
-        camera: &CameraParams,
-        hzb: Option<&wgpu::TextureView>,
-    );
+// Render Thread half — owns retained scene data for this geometry type.
+trait GeometryRenderer: Send {
+    fn name(&self) -> &str;
 
-    // Prepare: upload/update GPU resources this geometry type needs
-    fn prepare(&mut self, commands: &dyn DrawCommandSet, state: &mut RenderState);
+    // Apply this frame's delta payload to retained state; upload/update GPU resources.
+    fn apply_delta(&mut self, delta: Box<dyn Any + Send>, state: &mut RenderState);
 
-    // Register the render passes this geometry type contributes
+    // Cull retained data for one view (frustum, HZB, distance). Called once per view.
+    fn cull(&self, view: &ViewParams, hzb: Option<&wgpu::TextureView>, out: &mut ViewDrawList);
+
+    // Register the render passes this geometry type contributes.
     fn register_passes(&self, graph: &mut RenderGraph);
+
+    // Optional pass participation (see below).
+    fn shadow_caster(&self) -> Option<&dyn ShadowCaster> { None }
+    fn tlas_contributor(&self) -> Option<&dyn TlasContributor> { None }
+}
+
+// Per-view culling output: visible members of the shared mesh stream, plus
+// backend-defined visible-set payloads consumed by the backend's own passes.
+struct ViewDrawList {
+    mesh_draws: Vec<DrawId>,               // indices into the shared mesh store
+    custom:     Vec<Box<dyn Any + Send>>,  // downcast by the owning backend's passes
 }
 ```
 
-`DrawCommandSet` is an opaque, type-erased container. Each backend defines its own concrete draw command struct; render passes downcast to access it.
+#### The Shared Mesh Stream (participation contract #1)
+
+`SceneDeltaWriter` gives every extractor two lanes:
 
 ```rust
-trait DrawCommandSet: Send + Sync + Any {
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool;
-    fn bounds(&self) -> &[AABB];        // per-command world bounds, for culling
-    fn as_any(&self) -> &dyn Any;       // downcast in render passes
-    fn as_any_mut(&mut self) -> &mut dyn Any;
+impl SceneDeltaWriter {
+    // Shared lane: standard mesh draws. Anything written here automatically participates
+    // in the depth pre-pass, shadow atlas, HZB, TLAS, and velocity — the engine's passes
+    // all consume the shared mesh store.
+    fn upsert_mesh_draw(&mut self, id: DrawId, cmd: MeshDrawCommand);
+    fn remove_mesh_draw(&mut self, id: DrawId);
+
+    // Backend lane: opaque payload delivered to this backend's renderer half.
+    fn custom(&mut self, payload: impl Any + Send);
 }
 ```
+
+The shared mesh stream is smallworld's equivalent of UE5's `FMeshBatch` common currency: it is *why* custom geometry gets shadows, occlusion, and RT presence for free. A backend that can express its geometry as triangles — even coarsely — should. The Voxel Plugin's extracted-mesh LOD tiers flow through this lane; only its raymarched near-field detail needs the custom lane.
+
+#### Pass-Participation Traits (participation contract #2)
+
+Geometry with no triangle form participates in engine passes through explicit traits:
+
+```rust
+trait ShadowCaster {
+    // Render this backend's depth into one shadow view.
+    fn render_shadow_depth(&self, view: &ViewParams, ctx: &mut PassContext);
+}
+
+trait TlasContributor {
+    // Contribute BLAS instances to the frame's TLAS build (pre-cull, RT culling radius).
+    fn tlas_instances(&self, out: &mut TlasInstanceList);
+}
+```
+
+The set is intentionally small and grows only when a real backend needs a new integration point.
 
 #### Built-in Backends
 
-The engine ships two backends. Both use the same `GeometryBackend` trait a game would.
+The engine ships two backends. Both use the same extractor/renderer traits a game would.
 
-| Backend | Component | Draw Command | Passes | Notes |
-|---------|-----------|-------------|--------|-------|
-| `MeshBackend` | `MeshRenderer` | `MeshDrawCommand` | `DepthPrepass`, `GBufferPass`, `ShadowPass`, `TransparencyPass` | Standard triangle rasterization |
-| `VolumeBackend` | `VolumeRenderer` | `VolumeDrawCommand` | `VolumePass` | Compute raymarching or mesh extraction; pluggable strategy per LOD tier |
+| Backend | Component | Shared mesh stream | Custom lane | Own passes | Shadow / RT participation |
+|---------|-----------|--------------------|-------------|------------|---------------------------|
+| `MeshBackend` | `MeshRenderer` | All draws | — | — (engine passes consume the shared store: `DepthPrepass`, `GBufferPass`, `ShadowPass`, `TransparencyPass`) | Via shared stream |
+| Voxel Plugin (`VolumeBackend`) | `VolumeRenderer` | Extracted-mesh LOD tiers | Brick/SVO residency + raymarch data | `VolumePass` | Shared stream (extracted tiers) + `ShadowCaster` for raymarched detail |
 
 Both converge at the same GBuffer — the lighting pass and everything downstream is backend-agnostic.
 
 #### Registering a Custom Backend
 
-Games register backends at init time. The engine integrates them into the extract → cull → prepare → render pipeline automatically.
+Games register backends at init time. The extractor stays on the Game Thread; the renderer half is moved to the Render Thread once, at registration. The engine integrates them into the extract → apply → cull → render pipeline automatically.
 
 ```rust
 impl GameContext<'_> {
-    fn register_geometry_backend(&mut self, backend: impl GeometryBackend + 'static);
+    fn register_geometry_backend(
+        &mut self,
+        extractor: impl GeometryExtractor + 'static,
+        renderer: impl GeometryRenderer + 'static,
+    );
 }
 
 // Example: a game adds GPU particle rendering
-struct ParticleBackend { /* ... */ }
+struct ParticleExtractor { /* ... */ }
+struct ParticleRenderer  { /* retained emitter GPU state ... */ }
 
-impl GeometryBackend for ParticleBackend {
+impl GeometryExtractor for ParticleExtractor {
     fn name(&self) -> &str { "particles" }
     fn component_id(&self) -> TypeId { TypeId::of::<ParticleEmitter>() }
-    fn extract(&self, world: &World, changes: &ChangeTracker, camera: &CameraParams)
-        -> Box<dyn DrawCommandSet> { /* ... */ }
-    fn cull(&self, commands: &mut dyn DrawCommandSet, camera: &CameraParams,
-        hzb: Option<&wgpu::TextureView>) { /* ... */ }
-    fn prepare(&mut self, commands: &dyn DrawCommandSet, state: &mut RenderState) { /* ... */ }
+    fn extract(&mut self, world: &World, changes: &ChangeTracker,
+        out: &mut SceneDeltaWriter) { /* ... */ }
+}
+
+impl GeometryRenderer for ParticleRenderer {
+    fn name(&self) -> &str { "particles" }
+    fn apply_delta(&mut self, delta: Box<dyn Any + Send>, state: &mut RenderState) { /* ... */ }
+    fn cull(&self, view: &ViewParams, hzb: Option<&wgpu::TextureView>,
+        out: &mut ViewDrawList) { /* ... */ }
     fn register_passes(&self, graph: &mut RenderGraph) { /* ... */ }
 }
 ```
@@ -398,6 +451,8 @@ impl GeometryBackend for ParticleBackend {
 ### 2. Custom Draw Processing (`DrawProcessor`)
 
 If you want to modify how a standard pass handles draws — custom sorting, per-draw filtering, shader binding overrides — without writing an entire pass from scratch, you provide a `DrawProcessor`.
+
+A `DrawProcessor` operates on the **shared mesh stream** — every `MeshDrawCommand`, regardless of which backend emitted it. Custom-lane geometry is processed by its owning backend's own passes and is not visible here.
 
 ```rust
 trait DrawProcessor: Send + Sync {
@@ -430,14 +485,28 @@ Write full compute or raster passes with custom shaders. The `RenderPass` trait 
 
 ### 5. Custom Materials (Shader Composition)
 
-Games need materials beyond the built-in PBR model — toon shading, water, foliage wind, hologram effects. The engine provides a shader composition system where games supply WGSL fragments that plug into defined insertion points.
+Games need materials beyond the built-in PBR model — toon shading, water, foliage wind, hologram effects. Custom materials customize two things independently:
+
+1. **What goes into the GBuffer** — a WGSL fragment computes the albedo, normal, roughness, etc.
+2. **How light responds to it** — a shading model ID, written per-pixel into the GBuffer and switched on in the lighting pass.
+
+Toon shading is a shading model; wet-surface albedo is a fragment. Both still write to the same GBuffer.
 
 ```rust
 struct CustomMaterial {
     base:            MaterialDef,            // PBR properties still available
+    shading_model:   ShadingModel,           // lighting response, written per-pixel to the GBuffer
     fragment_shader: ShaderFragment,         // custom WGSL fragment
     uniforms:        Vec<(String, UniformValue)>,  // custom uniform data
     textures:        Vec<(String, AssetHandle<TextureAsset>)>,
+}
+
+enum ShadingModel {
+    Standard,    // Cook-Torrance PBR (default for all non-custom materials)
+    Unlit,
+    Toon,
+    Foliage,
+    // …engine-registered custom models, ≤ 16 total (4 GBuffer bits)
 }
 
 struct ShaderFragment {
@@ -447,42 +516,48 @@ struct ShaderFragment {
 }
 ```
 
-The engine composes the final shader by concatenating the standard GBuffer output code with the custom fragment. Custom materials still write to the same GBuffer — they control *how* the albedo, normal, roughness, etc. are computed, not *where* they go.
+The engine composes the final shader by concatenating the standard GBuffer output code with the custom fragment. Custom materials control *how* the GBuffer inputs are computed and *which lighting response* consumes them — not where they go. Lighting behavior beyond the registered shading models requires a custom pass (level 3/4).
 
 ---
 
 ## Data Structures
 
-### 1. The Extract System (Bridging the Threads)
+### 1. Extract & the Retained Scene (Bridging the Threads)
 
-Smallworld's equivalent of UE5's Scene Proxy system. Instead of maintaining persistent mirror objects on the Render Thread, we send a self-contained `FramePacket` each frame. This is simpler and more Rust-friendly — no shared ownership, no lifetime entanglement.
-
-The `FramePacket` is extensible — it carries a `DrawCommandSet` per registered `GeometryBackend` rather than hardcoding specific draw command types.
+Smallworld adopts the same retained-scene principle as UE5's proxy system: the Render Thread owns a persistent **`RenderScene`** — the shared mesh draw store plus each backend renderer's retained data — and the Game Thread sends **deltas**, not snapshots. The difference from UE5 is the transport: deltas cross the boundary as owned values through a channel, never as writes into shared memory. No shared ownership, no lifetime entanglement — and no re-sending the world every frame. A static entity costs zero extract work and zero transfer after its first frame; this is what makes `EntityFlags::STATIC` meaningful.
 
 #### FramePacket
 
-The complete render-thread-safe snapshot of everything needed to draw one frame.
+The per-frame message from Game to Render. Everything in it is owned and `Send`.
 
 ```rust
 struct FramePacket {
-    camera:       CameraParams,
-    draw_sets:    Vec<Box<dyn DrawCommandSet>>,  // one per registered GeometryBackend
-    lights:       Vec<LightParams>,
+    frame_index:  u64,
+    views:        Vec<ViewParams>,     // main camera + game-defined aux views (RTT, probes)
+    lights:       Vec<LightParams>,    // small; re-sent in full each frame
     environment:  EnvironmentParams,
     resource_ops: Vec<ResourceOp>,
-    frame_index:  u64,
+    mesh_delta:   MeshDrawDelta,       // shared mesh stream updates (all backends)
+    deltas:       Vec<(BackendId, Box<dyn Any + Send>)>,  // per-backend custom payloads
+}
+
+struct MeshDrawDelta {
+    upserts: Vec<(DrawId, MeshDrawCommand)>,  // spawned or changed draws
+    removes: Vec<DrawId>,                     // despawned draws
 }
 ```
 
-- **`Send` and owned.** No references, no `Arc`, no borrowed lifetimes. Once sent through the channel, the Game Thread is free to mutate the World.
-- **Extensible.** Each registered `GeometryBackend` contributes one `DrawCommandSet` to the packet. The engine doesn't know or care what's inside — it's opaque until a render pass downcasts it.
-- **Change-driven.** The extract step reads the World's `ChangeTracker` to identify dirty entities. Unchanged entities reuse their draw commands from the previous packet.
-- **Read-only extraction.** The extract function borrows `&World`, never `&mut World`.
+- **Owned and `Send`.** No references, no borrowed lifetimes. Once sent through the channel, the Game Thread is free to mutate the World.
+- **Delta-driven.** The extract step walks the `ChangeTracker`'s dirty sets; unchanged entities produce nothing. The retained `RenderScene` carries everything else across frames.
+- **Read-only extraction.** The extract functions borrow `&World`, never `&mut World`.
+- **Extensible.** Each registered extractor writes into the shared mesh lane and/or its custom lane. The engine doesn't know what's inside a custom payload — it's opaque until the matching renderer half applies it.
+- **Shadow views are not in the packet.** The Render Thread derives them from `lights` + the main view during culling.
 
-#### CameraParams
+#### ViewParams
 
 ```rust
-struct CameraParams {
+struct ViewParams {
+    kind:            ViewKind,
     view:            Mat4,
     projection:      Mat4,
     view_projection: Mat4,
@@ -490,7 +565,13 @@ struct CameraParams {
     frustum_planes:  [Vec4; 6],
     near:            f32,
     far:             f32,
-    jitter:          Vec2,       // TAA sub-pixel jitter
+    jitter:          Vec2,       // TAA sub-pixel jitter (main view only)
+}
+
+enum ViewKind {
+    Main,
+    Aux { target: RenderTargetRef },          // render-to-texture, probes, split-screen
+    Shadow { light: LightId, cascade: u8 },   // derived render-side, never sent in the packet
 }
 ```
 
@@ -501,7 +582,8 @@ When the game adds, modifies, or removes assets, the extract step encodes these 
 ```rust
 enum ResourceOp {
     UploadMesh     { gpu_id: GpuId, vertices: Vec<Vertex>, indices: Vec<u32>, bounds: AABB },
-    UploadTexture  { gpu_id: GpuId, pixels: Vec<u8>, width: u32, height: u32, format: TextureFormat },
+    UploadTexture  { gpu_id: GpuId, pixels: Vec<u8>, width: u32, height: u32,
+                     format: TextureFormat, mip_count: u32 },  // pixels holds all mips, tightly packed
     UpdateMaterial { gpu_id: GpuId, props: MaterialGpuProps },
     Free           { gpu_id: GpuId, kind: ResourceKind },
 }
@@ -511,22 +593,29 @@ enum ResourceOp {
 
 #### MeshDrawCommand
 
-The render-ready description of a single draw. Fully resolved — no handles to chase, no indirection.
+The render-ready description of a single draw. Fully resolved — no handles to chase, no indirection. Instancing is first-class: a command draws `instances.len()` copies; a single-instance draw is the degenerate case.
 
 ```rust
 struct MeshDrawCommand {
-    mesh_gpu_id:       GpuId,       // index into GpuMeshPool
-    material_gpu_id:   GpuId,       // index into GpuMaterialPool
+    mesh_gpu_id:     GpuId,        // index into GpuMeshPool
+    material_gpu_id: GpuId,        // index into GpuMaterialPool
+    instances:       Range<u32>,   // slice of the shared InstanceData buffer; len ≥ 1
+    bounds:          AABB,         // world-space union over instances, for culling
+    flags:           DrawFlags,    // shadow casting, double-sided, alpha mode
+}
+
+// One entry per instance, in a shared, GPU-visible buffer
+struct InstanceData {
     world_matrix:      Mat4,
-    prev_world_matrix: Mat4,        // for motion vectors
-    bounds:            AABB,        // world-space, for culling
-    flags:             DrawFlags,   // shadow casting, double-sided, alpha mode
+    prev_world_matrix: Mat4,       // for motion vectors
 }
 ```
 
-This is the equivalent of UE5's `FMeshDrawCommand` — a fully stateless draw description that can be sorted, merged, and cached. Unlike UE5, we don't have the intermediate `FMeshBatch` layer; the extract step produces final draw commands directly.
+This is the equivalent of UE5's `FMeshDrawCommand` — a fully stateless draw description that can be sorted, merged, and cached. Because the render side retains the mesh store across frames, static commands genuinely *are* cached: sorted batch lists for static geometry are rebuilt only when the store changes, not per frame. Unlike UE5, we don't have the intermediate `FMeshBatch` layer as a data structure — its cross-backend role is played by the shared mesh stream itself; the extract step produces final draw commands directly.
 
 #### VolumeDrawCommand
+
+The Voxel Plugin's custom-lane draw data — carried in its backend delta payload and consumed only by `VolumePass`. (Its extracted-mesh tiers travel the shared mesh stream as ordinary `MeshDrawCommand`s.)
 
 ```rust
 struct VolumeDrawCommand {
@@ -566,7 +655,13 @@ bitflags! {
 
 ### 3. Render Thread Resources
 
-The Render Thread owns all GPU memory through typed pools. Resources are identified by `GpuId` — an opaque handle that the extract layer maps from game-side handles. When hardware RT is available, the Render Thread also maintains the TLAS/BLAS acceleration structure.
+The Render Thread owns all GPU memory through typed pools. Resources are identified by `GpuId` — an opaque **generational dense index** that the extract layer maps from game-side handles. Pool lookups on the draw path are array indexing, never hashing.
+
+```rust
+struct GpuId { index: u32, generation: u32 }
+```
+
+When hardware RT is available, the Render Thread also maintains the TLAS/BLAS acceleration structure.
 
 #### GpuContext
 
@@ -600,18 +695,19 @@ struct Capabilities {
 
 #### Acceleration Structure (RT)
 
-Allocated only when `Capabilities::ray_query` is true. Maintained by the Render Thread — rebuilt each frame from the `FramePacket`'s draw commands.
+Allocated only when `Capabilities::ray_query` is true. Maintained by the Render Thread — the TLAS is rebuilt each frame from the retained scene, **before per-view culling**, within the RT culling radius (see the Ray Tracing section). This is the canonical definition.
 
 ```rust
 struct AccelerationStructure {
-    blas_cache: HashMap<GpuId, BlasEntry>,
+    blas_cache: SecondaryMap<GpuId, BlasEntry>,  // parallel to GpuMeshPool — indexed, not hashed
     tlas:       wgpu::Tlas,
+    tlas_dirty: bool,
 }
 
 struct BlasEntry {
     blas:        wgpu::Blas,
     mesh_gpu_id: GpuId,
-    generation:  u32,
+    generation:  u32,         // rebuilt when mesh geometry changes
 }
 ```
 
@@ -619,7 +715,7 @@ struct BlasEntry {
 
 ```rust
 struct GpuMeshPool {
-    meshes: HashMap<GpuId, GpuMesh>,
+    meshes: SlotMap<GpuId, GpuMesh>,   // dense, generational — O(1) indexed lookup on the draw path
     budget: MemoryBudget,
 }
 
@@ -632,7 +728,7 @@ struct GpuMesh {
 }
 
 struct GpuTexturePool {
-    textures: HashMap<GpuId, GpuTexture>,
+    textures: SlotMap<GpuId, GpuTexture>,
     budget:   MemoryBudget,
 }
 
@@ -646,7 +742,7 @@ struct GpuTexture {
 }
 
 struct GpuMaterialPool {
-    materials: HashMap<GpuId, GpuMaterialEntry>,
+    materials: SlotMap<GpuId, GpuMaterialEntry>,
 }
 
 struct GpuMaterialEntry {
@@ -669,7 +765,7 @@ struct RenderTargets {
     gbuffer_id:       wgpu::Texture,  // R32Uint
     hdr:              wgpu::Texture,  // Rgba16Float
     shadow_atlas:     wgpu::Texture,  // D32Float
-    hzb:              wgpu::Texture,  // R32Float mip chain
+    hzb:              wgpu::Texture,  // R32Float mip chain — built from final opaque depth (all backends)
 
     // Ray tracing (allocated only when Capabilities::ray_query is true)
     rt:               Option<RTTargets>,
@@ -703,7 +799,11 @@ Games can customize the render graph — insert post-process passes, swap the vo
 
 ### 5. Geometry Backend Convergence
 
-The GBuffer is the unification point. Every registered `GeometryBackend` — built-in or game-defined — writes to the same targets. The lighting pass and everything downstream is backend-agnostic.
+Backends converge at two points.
+
+**The shared mesh stream.** Any backend's triangle-expressible geometry — extracted meshes, imposters, proxy hulls — flows through the same retained mesh store, and therefore through the same depth, shadow, HZB, TLAS, and velocity machinery as native meshes. No per-backend integration required.
+
+**The GBuffer.** Every registered geometry backend — built-in or game-defined — writes to the same targets. The lighting pass and everything downstream is backend-agnostic.
 
 ```
   MeshBackend ────▶ │ GBufferPass  │──┐
@@ -720,7 +820,7 @@ The GBuffer is the unification point. Every registered `GeometryBackend` — bui
                     └──────────────┘
 ```
 
-The `VolumeBackend` itself is pluggable in how it renders — compute raymarching, mesh extraction (marching cubes / dual contouring fed into rasterization), or a hybrid where nearby volumes get full-resolution raymarching and distant volumes get extracted meshes. This is an internal detail of the backend, invisible to the rest of the pipeline.
+The Voxel Plugin's `VolumeBackend` is itself pluggable in how it renders — compute raymarching, mesh extraction (marching cubes / dual contouring fed into rasterization), or a hybrid where nearby volumes get full-resolution raymarching and distant volumes get extracted meshes. This is an internal detail of the backend, invisible to the rest of the pipeline — except that extracted tiers ride the shared mesh stream and therefore participate in engine passes automatically.
 
 When RT is available, the full pipeline including optional RT passes looks like:
 
@@ -732,9 +832,9 @@ When RT is available, the full pipeline including optional RT passes looks like:
                    └──▶ RT Reflect ───┘
 ```
 
-RT passes are optional nodes in the graph. The lighting pass binds their outputs when present, falls back to rasterized shadows / SSAO / SSR when absent. The render graph's dependency resolution handles this automatically — unregistered passes simply don't produce their targets, and the lighting shader branches accordingly.
+RT passes are optional nodes in the graph. The lighting pass consumes their outputs through its public input slots when present, and falls back to rasterized shadows / SSAO / SSR when absent (via the binding mechanism chosen in Open Questions — WGSL itself has no optional bindings).
 
-Future raytraced shadows and GI plug in as additional render graph passes (`RTShadowPass`, `RTGIPass`) that read the GBuffer and write to targets consumed by the lighting pass. The existing backends and their passes are unchanged.
+Plugin-provided lighting contributions — the Voxel Plugin's SVO-traced shadows and GI foremost — plug in exactly the same way: additional render graph passes that read the GBuffer and feed the lighting pass's public GI / shadow-mask slots. The existing backends and their passes are unchanged.
 
 ---
 
@@ -881,6 +981,26 @@ impl World {
 }
 ```
 
+##### Camera
+
+```rust
+struct Camera {
+    projection: Projection,
+    target:     RenderTargetRef,   // Screen, or an offscreen texture (RTT, probes)
+    priority:   i32,               // ordering among active cameras (split-screen, PiP)
+    active:     bool,
+}
+
+enum Projection {
+    Perspective  { fov_y: f32, near: f32, far: f32 },
+    Orthographic { height: f32, near: f32, far: f32 },
+}
+
+enum RenderTargetRef { Screen, Texture(ResourceHandle<RenderTexture>) }
+```
+
+A camera is an entity with a `Transform` and a `Camera` component — view matrices derive from its `WorldTransform`. Every active camera becomes a `ViewParams` entry in the `FramePacket`; multiple active cameras give split-screen and render-to-texture without special cases.
+
 ##### Rendering
 
 ```rust
@@ -1002,10 +1122,24 @@ struct GameContext<'a> {
     world:  &'a mut World,
     input:  &'a Input,
     time:   &'a Time,
-    assets: &'a AssetServer,
+    assets: &'a mut AssetServer,
     audio:  &'a mut AudioCommands,
     events: &'a mut EventBus,
     window: &'a WindowState,
+}
+
+// Registration APIs and render feedback are methods on GameContext,
+// backed by engine state outside the public fields:
+impl GameContext<'_> {
+    // Init-time registration
+    fn register_geometry_backend(&mut self, extractor: impl GeometryExtractor + 'static,
+                                 renderer: impl GeometryRenderer + 'static);
+    fn register_system(&mut self, phase: Phase, system: impl System + 'static);
+    fn set_draw_processor(&mut self, pass: &str, processor: impl DrawProcessor + 'static);
+
+    // Render feedback (see Frame Pipeline — Render-to-Game Feedback)
+    fn feedback(&self) -> Option<&FrameFeedback>;
+    fn gpu_frame_time(&self) -> f32;
 }
 
 struct Time {
@@ -1259,9 +1393,10 @@ The engine tracks which entities and components have been modified each frame. T
 
 ```rust
 struct ChangeTracker {
-    spawned:   HashSet<EntityId>,
-    despawned: HashSet<EntityId>,
-    dirty:     HashMap<TypeId, HashSet<EntityId>>,  // per-component-type dirty sets
+    spawned:         HashSet<EntityId>,
+    despawned:       HashSet<EntityId>,
+    dirty:           HashMap<TypeId, HashSet<EntityId>>,  // per-component-type dirty sets
+    dirty_resources: HashSet<ResourceId>,  // mutable resources (materials) — drives UpdateMaterial ops
 }
 
 impl ChangeTracker {
@@ -1272,7 +1407,7 @@ impl ChangeTracker {
 }
 ```
 
-Mutations through `World::get_mut<C>()` automatically mark the component dirty. The change tracker is cleared after the extract step completes.
+Mutations through `World::get_mut<C>()` automatically mark the component dirty; mutations through a `ResourceHandle` (e.g., animating a material) mark the resource dirty. The change tracker is cleared after the extract step completes.
 
 ---
 
@@ -1288,7 +1423,7 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | **FIXED** | `App::fixed_update()` runs 0–N times at fixed timestep |
 | **UPDATE** | `App::update()` runs once. Game systems mutate World |
 | **LATE** | Engine systems: hierarchy propagation, bounds recomputation, streaming demand |
-| **EXTRACT** | Read `&World` + `&ChangeTracker`, produce `FramePacket`, send through channel |
+| **EXTRACT** | Diff `&World` via `&ChangeTracker` into a `FramePacket` (views, lights, deltas, resource ops), send through channel |
 | **CLEAR** | Clear change tracker. Game thread free for next frame |
 
 ### Render Thread
@@ -1296,8 +1431,8 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | Phase | Action |
 |-------|--------|
 | **RECEIVE** | Block on channel, receive `FramePacket` |
-| **PREPARE** | Process `ResourceOp`s — upload meshes/textures, update materials, free resources |
-| **CULL** | Frustum + occlusion culling. Produce sorted, batched draw list |
+| **PREPARE** | Apply `ResourceOp`s and scene deltas — upload resources, update the retained `RenderScene` |
+| **CULL** | Derive shadow views; collect TLAS instances (pre-cull); per-view frustum + occlusion culling; produce sorted, batched draw lists |
 | **RECORD** | Render graph executes: each pass records GPU commands |
 | **SUBMIT** | `queue.submit()` — command buffers sent to hardware |
 | **PRESENT** | Swapchain present. Send `FrameFeedback`. Loop back to RECEIVE |
@@ -1307,9 +1442,38 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | Data | Owner | Crosses boundary as |
 |------|-------|---------------------|
 | World, Components | Game Thread | Read-only in extract |
-| FramePacket | Produced by Game, consumed by Render | Owned value through channel (Game → Render) |
-| FrameFeedback | Produced by Render, consumed by Game | Owned value through channel (Render → Game, 2-frame lag) |
+| FramePacket (deltas + views) | Produced by Game, consumed by Render | Owned value through channel (Game → Render) |
+| RenderScene (retained draw data) | Render Thread | Never — updated only by applying packet deltas |
+| FrameFeedback | Produced by Render, consumed by Game | Owned value through channel (Render → Game, ~2-frame lag; GPU data via readback ring) |
 | GPU resources | Render Thread | Never — game code uses handles |
-| Assets (CPU) | AssetServer (Game Thread) | Copied into `ResourceOp` at extract |
+| Assets (CPU) | AssetServer (Game Thread) | Copied into `ResourceOp` at extract (transport under review — Open Questions) |
 | Input | Main Thread | Snapshot borrowed by game tick |
 | Audio commands | Collected on Game Thread | Drained by audio server each frame |
+
+---
+
+## Open Questions
+
+Decisions consciously deferred; each needs a follow-up design discussion before implementation.
+
+1. **Volume depth writes.** Compute shaders cannot write a `D32Float` depth attachment, and
+   `Rgba8UnormSrgb` cannot be a storage texture. How does `VolumePass` contribute depth (and
+   sRGB-correct albedo) so that transparency, TAA, RT ray reconstruction, and the HZB see volumes?
+   Candidates: (a) fragment-shader raymarch over rasterized proxy geometry with `frag_depth`
+   export; (b) compute writes to `R32Float` depth-as-data + non-sRGB GBuffer formats, followed by
+   a depth-merge raster pass; (c) a hybrid, chosen per LOD tier.
+2. **RT-input binding mechanism.** WGSL has no optional bindings. Pipeline permutations of the
+   lighting shader vs. always-bound dummy targets + uniform flags.
+3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
+   reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
+   vertex/material access. Required before RT GI/reflections can be implemented.
+4. **Core software-GI tier.** v1 ships the SSAO + ambient-probe fallback as a conscious cliff.
+   Does core eventually grow a scene-agnostic software tier (SDF scene, screen-space GI), or does
+   plugin-provided GI (the Voxel Plugin's SVO tracing) cover the cases that matter?
+5. **Asset payload transport.** `ResourceOp` currently deep-copies vertex/pixel data into the
+   channel. Options: `Arc<[u8]>` of immutable asset bytes (thread-safe — the ownership rule
+   targets shared *mutable* state), or pre-populated staging buffers handed off by handle.
+6. **Gameplay-layer semantics.** Event bus buffering (same-frame visibility vs. double-buffered),
+   script access to `World` (command buffers vs. exclusive storage), and fixed-timestep transform
+   interpolation for rendering. None block the render architecture; all block gameplay API
+   stability.
