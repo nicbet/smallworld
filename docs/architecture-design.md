@@ -269,11 +269,24 @@ A full-screen compute dispatch evaluates deferred shading by reading the GBuffer
 - **Clustered light assignment.** Screen-space tiles × depth slices. Lights are assigned to clusters on the CPU. Each cluster stores up to 32 light indices.
 - **Shadow evaluation.** Percentage-closer filtering (PCF) samples the shadow atlas per light.
 - **Pluggable indirect inputs.** The lighting pass declares public input slots for an indirect-diffuse (GI) texture, per-light shadow masks, and **sky visibility**. Engine RT passes feed the first two when hardware RT is available — but all are a **public render-graph contract**: a plugin (e.g., the Voxel Plugin's SVO-traced GI and sky visibility) or a future software-GI tier feeds the same slots without touching the lighting pass. This is the GI upgrade path: each slot progressively supersedes the fallback below it.
-- **Indirect diffuse chain** *(OQ 11)*: GI input slot when fed (RT GI, plugin GI) → sky SH9 irradiance × AO × sky visibility → constant ambient.
-- **Indirect specular chain** *(OQ 11)*: RT reflections → SSR (**always-on**, not RT-gated) → local reflection probes (when present — deferred feature) → prefiltered sky cubemap × sky visibility.
-- **Sky visibility is mandatory.** The environment term — specular *and* diffuse — is always modulated by a sky-visibility factor, so interiors go dark instead of sky-mirrored. Baseline (core): bent-normal/SSAO-derived specular occlusion — screen-space, no authoring, works for any game. Upgrade (public slot): the Voxel Plugin traces directional sky visibility against the SVO — exact and destruction-proof (carve the roof open; visibility updates the same frame).
+- **Indirect diffuse chain** *(OQ 11, ladder completed by OQ 4)*: GI input slot when fed (RT GI → screen traces + GI clipmap → plugin GI) → sky SH9 irradiance × AO × sky visibility → constant ambient.
+- **Indirect specular chain** *(OQ 11)*: RT reflections → SSR (**always-on**, not RT-gated) → GI-clipmap rough-specular cones (when the software GI tier is active — OQ 4) → local reflection probes (when present — deferred feature) → prefiltered sky cubemap × sky visibility.
+- **Sky visibility is mandatory.** The environment term — specular *and* diffuse — is always modulated by a sky-visibility factor, so interiors go dark instead of sky-mirrored. Floor (core): bent-normal/SSAO-derived specular occlusion — screen-space, no authoring, works for any game. Upgrades (public slot): cone-traced visibility from the core GI clipmap when the software tier is active (OQ 4), or the Voxel Plugin's SVO-traced directional visibility — exact and destruction-proof (carve the roof open; visibility updates the same frame).
 - **Fog application.** Sample the integrated froxel volume at each pixel's depth and apply scattering/transmittance (see Volumetrics).
 - **Output.** HDR lighting result written to an Rgba16Float texture.
+
+#### Software GI Tier — the GI Clipmap
+
+*(OQ 4 resolution, 2026-08-11.)* When hardware RT GI is unavailable or disabled, core provides software GI: **screen traces first, then cone tracing against a lighting-domain voxel clipmap** — the SVOGI family, with shipped precedent in CryEngine's SVOGI carrying Kingdom Come: Deliverance 1 and 2 (open world, time-of-day, no bakes).
+
+- **The clipmap.** Camera-centered cascaded 3D textures (opacity, albedo, normal, emissive) — a *lighting-domain* voxelization, distinct from the Voxel Plugin's content SVO. Geometry enters by **conservative rasterization of the shared mesh stream** (any backend's triangles participate automatically — a pure-mesh game gets full GI with zero content changes) or through the **GI injection point**, a participation contract in the froxel-injection mold: the Voxel Plugin injects SVO data directly — more accurate than voxelizing extracted meshes, and destruction updates GI the same frame.
+- **Geometry and lighting are separate steps.** Direct light injects into voxels each frame (sun via the shadow cascades, locals via the cluster grid), so time-of-day *relights* without re-voxelizing; destruction re-voxelizes only touched clipmap regions.
+- **Consumers.** Cone-traced indirect diffuse feeds the GI slot (half-res + temporal, same dispatch pattern as RT GI). **Cone-traced sky visibility** from the same structure upgrades the OQ 11 baseline for *all* games (the bent-normal floor remains beneath it). **Rough-specular cones** slot into the reflection chain between SSR and the sky term — a middle rung it previously lacked.
+- **Costs, on the record.** Thin-wall light leaking is the classic VCT artifact (finer near cascades and occlusion cones mitigate it; nothing eliminates it); clipmap memory is a named budget (~100–200 MB across cascades); quality sits below Lumen-class GI.
+
+The indirect-diffuse ladder in full: **hardware RT GI → screen traces + GI clipmap → sky SH × visibility floor** — every rung feeds the same public slots; changing rungs never touches a shader contract.
+
+**Roadmap (v2/v3): the smallworld Lumen analog.** Mesh-distance-field + surface-cache GI — per-asset SDFs computed at import, an incrementally composited global SDF, radiance-cached surface parameterization — is the **committed quality end-state**, not a rejected option. The architecture is published and de-risked; the remaining cost is content-hardening (thin geometry, foliage, leak edge cases), not research. The upgrade is a **swap of the world representation behind the same public slots**: screen traces, temporal accumulation, and every consumer carry forward unchanged, and the clipmap likely survives as the far-field/fallback representation.
 
 ### 9. Ray Tracing (Secondary Effects)
 
@@ -364,12 +377,12 @@ When `ray_query` is unavailable, the engine uses screen-space approximations in 
 | RT Pass | Fallback | Quality tradeoff |
 |---------|----------|------------------|
 | `RTShadowPass` | Shadow atlas only (rasterized CSM/atlas) | No soft penumbra from RT, same shadows as baseline |
-| `RTGIPass` | SSAO + ambient probe | No bounce lighting, baked or constant ambient |
+| `RTGIPass` | Screen traces + GI clipmap (software tier — OQ 4); SSAO + sky floor beneath | Coarser bounce, VCT leak artifacts vs. RT |
 | `RTReflectionPass` | SSR (screen-space reflections) | Misses off-screen reflections |
 
 If the RT passes aren't registered (because `ray_query` is false), the lighting pass's RT input slots go unfed and the fallback terms are used.
 
-The GI fallback is a **conscious v1 quality cliff**: UE5's Lumen degrades through a *software* ray-tracing tier (distance fields) before reaching this point. Smallworld core does not assume any particular scene structure — the SVO belongs to the Voxel Plugin, which core cannot depend on — so a general software-GI tier (SDF scene or screen-space GI) is deferred; see Open Questions. Voxel-heavy games get a better fallback from the Voxel Plugin's SVO-traced GI, delivered through the lighting pass's public input slots.
+The fallback ladder no longer cliffs *(updated by OQ 4)*: below hardware RT sits the **core software GI tier** — screen traces + cone tracing against the lighting-domain GI clipmap (see the Lighting Pass) — which assumes no particular scene structure: geometry enters by rasterizing the shared mesh stream. The SSAO + sky-IBL × visibility floor remains beneath it for minimal hardware. Voxel-heavy games improve the tier further through the GI injection point (the Voxel Plugin injects SVO data directly), and all of it flows through the same public input slots.
 
 ### 10. Sky & Atmosphere
 
@@ -1805,15 +1818,18 @@ lands.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
    reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
    vertex/material access. Required before RT GI/reflections can be implemented.
-4. **Core software-GI tier.** *Stance decided 2026-08-11:* core **will** provide a software GI
-   tier — hardware-RT GI cannot be the only quality rung above the SSAO + sky-IBL × visibility
-   floor. The remaining question is the technique: SSGI (screen-space only — cheapest,
-   view-limited), DDGI-style dynamic probe grids (needs a world proxy to trace against),
-   cascaded SDFGI (Godot-style — needs SDF generation for arbitrary geometry), or voxel cone
-   tracing over an engine-owned *lighting-domain* voxelization of all geometry (VXGI-style —
-   distinct from the Voxel Plugin's content SVO). Whatever the pick, it feeds the existing
-   GI/sky-visibility slots (no shader rework), and plugin GI can still supersede it for
-   voxel-native content.
+4. **[RESOLVED 2026-08-11] Core software-GI tier.** Technique: **screen traces + cascaded
+   voxel cone tracing over an engine-owned lighting-domain GI clipmap** (SVOGI family; KCD 1/2
+   precedent). Geometry via conservative raster of the shared mesh stream; plugins inject
+   directly through the **GI injection point** (Voxel Plugin: SVO data, destruction-fresh).
+   Same structure yields cone-traced sky visibility (upgrading the OQ 11 baseline for all
+   games) and rough-specular cones (new middle rung in the reflection chain). Known costs
+   named: VCT thin-wall leaking, ~100–200 MB clipmap budget, sub-Lumen quality. **Roadmap
+   commitment: the smallworld Lumen analog (mesh SDFs + surface cache) is the v2/v3 quality
+   end-state** — a representation swap behind unchanged public slots; the clipmap survives as
+   far-field fallback. SDFGI rejected (static-biased generation, needs a voxel radiance cache
+   anyway); DDGI probes = encoding option, not a representation; SSGI = first hop, kept. Spec:
+   Software GI Tier (Lighting Pass).
 5. **[RESOLVED 2026-08-11] Asset payload transport.** Option B — the engine-owned **staging
    pool**: decode threads write directly into mapped staging regions (no payload memcpy on any
    hot thread); `ResourceOp` carries `StagingRef` handles; the Render Thread records GPU copies
