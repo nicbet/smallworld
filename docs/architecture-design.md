@@ -2131,6 +2131,10 @@ audit — the chapters the doc only covered where they intersected the render pi
 rule for all five: **decide the engine primitives and traits; games compose them** — Gregory
 intermixes game and engine concerns, we deliberately do not.
 
+Round 3 (OQ 29–30): opened 2026-08-11 during the Voxel Plugin design kickoff — vegetation
+surfaced as a missing subsystem, and large-world coordinates escalated from the plugin's V2
+(see `voxel-plugin-design.md` for the plugin's own V-series).
+
 1. **[RESOLVED 2026-08-11] Volume depth writes & motion vectors.** Fragment-shader raymarch over
    rasterized per-object proxy AABBs with `frag_depth` export — one shader writes depth, the full
    GBuffer, and velocity; its depth-only variant implements `ShadowCaster`. Full spec: "Volume
@@ -2285,6 +2289,23 @@ intermixes game and engine concerns, we deliberately do not.
     input routing with focus semantics. Widget catalog / theming / text / l10n / a11y deferred
     to the UI design round. **Editor = an application on the engine** (Godot's proof) — not
     engine core; designed only once there is a runtime to edit. Spec: UI Framework section.
+29. **Vegetation, foliage & the PCG framework.** An entire missing subsystem: (a) a **PCG
+    scatter framework** (the UE5 PCG analog — graph-based sample-surface → filter-by-rules →
+    spawn-instances, authored as data like `AnimGraph`), engine-level and surface-agnostic —
+    providers of sampleable surfaces plug in (heightfields, meshes, the Voxel Plugin via its
+    V6 hooks); (b) **foliage rendering at scale** — massive instance counts on the shared mesh
+    stream, imposter/billboard far LODs, wind animation (a deformer or material feature),
+    density scaling; (c) **persistence** — scattered instances belong to streaming cells
+    (generated = cache, edited = overlay, per OQ 17's rules). Engine/game split: engine owns
+    the framework, sampler trait, and foliage renderer; games author scatter graphs and rules.
+30. **Large-world coordinates.** Escalated from Voxel Plugin V2: planet-scale worlds break
+    `f32` — visible transform jitter beyond ~10 km from origin (UE5 built Large World
+    Coordinates for exactly this). Candidate shape: **f64 world-space transforms CPU-side +
+    camera-relative rendering GPU-side** — extract subtracts the camera position, so shaders
+    see camera-local f32 and GPU cost never doubles. Touches `WorldTransform`, extract,
+    physics (provider f64 support), streaming cell coordinates, and listener math.
+    Alternatives to weigh: UE-style LWC doubles throughout vs. periodic origin rebasing vs.
+    camera-relative-only with f32 world space.
 19. **[RESOLVED 2026-08-11] Networking.** Explicitly **out of scope for v1**, with the hooks
     accounted for now: `fixed_update` is the deterministic tick (with the engine guarantee that
     no engine system introduces nondeterminism into fixed-tick simulation — see The App Trait),
