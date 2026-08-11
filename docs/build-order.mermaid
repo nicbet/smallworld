@@ -1,0 +1,72 @@
+flowchart TD
+    M0["M0 · Boot<br/>window · GpuContext · Capabilities<br/>threads + channels · App/Time<br/>profiling lanes (day one)"]
+    M1["M1 · First pixels<br/>World (f64 pos) · delta extract · retained scene<br/>instance lane · naive StagingRef · GPU pools<br/>GBuffer → sun light → ACES → present"]
+    M2["M2 · A game<br/>Input · fixed tick + interpolation<br/>events · Rust behaviors · systems"]
+    M3["M3 · Survives reality<br/>resize + teardown · direct glTF/PNG<br/>egui overlay + budget table"]
+    M0 --> M1 --> M2 --> M3
+
+    subgraph LIGHT["Lighting"]
+        L1["clustered lights"] --> L2["shadow atlas (CSM, shadow views)"] --> L3["env capture / IBL<br/>+ sky visibility floor"] --> L4["froxel volumetrics"] --> L5["GI clipmap<br/>(+ sky-vis cones)"] --> L6["RT passes (cap-gated,<br/>clipmap hit radiance)"] --> L7["v2/3 · Lumen analog"]
+    end
+
+    subgraph POST["Post / AA"]
+        P1["TAA (velocity + jitter)"] --> P2["TAAU + internal/display split"] --> P3["auto-exposure"] --> P4["DRS"] --> P5["v2 · FSR 2.2 / DLSS slot"]
+    end
+
+    subgraph PACE["Pacing"]
+        PC1["queue-depth throttle"] --> PC2["DRS controller"] --> PC3["v2 · predictive pacing"]
+    end
+
+    subgraph SCALE["World scale"]
+        S1["hierarchy + LATE systems"] --> S2["World Streaming cells<br/>+ OQ20 documents"] --> S3["Streaming Coordinator<br/>+ detail streaming + staging rings"] --> S4["multi-cell LWC anchors"] --> S5["v2 · GPU-driven phase 2"]
+        S2 --> SER1["save games<br/>(registry + EntityRef)"]
+    end
+
+    subgraph VOX["Voxel Plugin"]
+        VP1["VolumeSource (code) + brick tree/pool"] --> VP2["VolumePass raymarch (near)"] --> VP3["MC+Transvoxel far tier + handoff"] --> VP4["materials + dither"] --> VP5["density graphs"] --> VP6["edits + fan-out"] --> VP7["collision ring"] --> VP8["PCG scatter + foliage"]
+    end
+
+    subgraph PHYS["Physics"]
+        PH1["rapier provider<br/>fixed tick + sync-back"] --> PH2["queries + CPU picking"] --> PH3["joints"] --> PH4["character controller"]
+    end
+
+    subgraph ANIM["Animation"]
+        A1["DeformPass + clip sampling"] --> A2["AnimGraph + state machines"] --> A3["events · root motion · sockets"] --> A4["IK nodes"]
+    end
+
+    subgraph AUD["Audio"]
+        AU1["cpal + voices + commands"] --> AU2["mixer buses (data)"] --> AU3["streaming music"] --> AU4["reverb/DSP → v2 graphs"]
+    end
+
+    subgraph ASSET["Asset pipeline"]
+        AS1["derived-data cache<br/>(cook-on-demand)"] --> AS2["GUIDs + .meta + VFS mounts"] --> AS3["dependency closures"] --> AS4["ship cook + paks"]
+    end
+
+    subgraph SCRIPT["Scripting & UI"]
+        B1["Lua tier (mlua, accessor API)"] --> B2["C ABI vtable"]
+        UI1["game-UI round<br/>(widgets = entities)"] --> UI2["editor (application, far)"]
+    end
+
+    subgraph SKY["Sky & weather"]
+        W1["Hillaire atmosphere"] --> W2["clouds module"] --> W3["WeatherState + hooks"]
+    end
+
+    M3 --> L1
+    M3 --> P1
+    M3 --> PC1
+    M3 --> S1
+    M3 --> A1
+    M3 --> AS1
+    M2 --> PH1
+    M2 --> AU1
+    M2 --> B1
+    M3 --> UI1
+    L3 --> W1
+    S3 --> VP1
+    L2 -.->|"ShadowCaster"| VP2
+    L5 -.->|"GI injection"| VP6
+    M1 -.->|"velocity target ready since M1"| P1
+    PC2 -.->|"consumes resolution_scale"| P2
+    S4 -.->|"before planet content"| VP1
+    PH2 -.->|"gameplay raycasts"| VP7
+    VP8 -.->|"ScatterSurface"| S2
