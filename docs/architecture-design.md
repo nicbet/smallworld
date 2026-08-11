@@ -161,7 +161,6 @@ Visible opaque surfaces write their material properties to the Geometry Buffer. 
 | Material | Rgba8Unorm | Roughness, metallic, reflectance, AO |
 | Emissive | Rgba16Float | Self-illumination (RGB) + intensity |
 | Velocity | Rg16Float | Per-pixel motion vectors (TAA, motion blur) |
-| Entity ID | R32Uint | Entity/material ID for debug and picking |
 | Depth | D32Float | Z-buffer |
 
 Both rendering paths write to this same GBuffer:
@@ -169,7 +168,7 @@ Both rendering paths write to this same GBuffer:
 - **Rasterized meshes** write via traditional vertex/fragment shaders through the `GBufferPass`.
 - **Raymarched volumes** write via fragment-shader raymarching over rasterized proxy geometry through the `VolumePass`, exporting real depth via `frag_depth` (see the Volume Rendering Mechanism below).
 
-The lighting pass and everything downstream never knows which path produced a given pixel.
+The lighting pass and everything downstream never knows which path produced a given pixel. (A mesh/volume source bit exists among the albedo-alpha flag bits for debug tooling — but no lighting or post pass may branch on it.)
 
 **Shading Model ID.** The albedo alpha channel carries a per-pixel shading model ID (up to 16 models). The lighting pass switches on it to select the lighting response — `Standard` (Cook-Torrance PBR), `Unlit`, and registered custom models (toon, foliage, …). This is UE5's per-pixel shading-model mechanism: it is what lets custom materials change *how light responds*, not just which material inputs are written.
 
@@ -187,6 +186,16 @@ The lighting pass and everything downstream never knows which path produced a gi
 - **Distant tiers** are extracted meshes on the shared mesh stream — no raymarching at all.
 
 **Capability-gated upgrade tier (deferred to the GPU-driven work, OQ 7).** A compute visibility-buffer variant — depth+payload packed via 64-bit atomic min/max (`Capabilities::int64_atomic_min_max`; on Metal this requires Apple M2-class "Nanite atomics") — is the sanctioned future optimization, not a rejected option. It is deferred because it needs its own coverage/binning and resolve machinery, the fragment path must exist for baseline hardware anyway, and its win is unproven for large-box proxies (Nanite's software raster exists to beat micro-triangle raster inefficiency, which volume proxies don't have). **Adoption trigger:** profiling shows the fragment path limiting on capable hardware, or variable-rate marching is needed.
+
+#### Picking & Debug IDs
+
+*(OQ 22 resolution, 2026-08-11.)* There is deliberately **no per-frame ID target** in the GBuffer — per-pixel IDs would pay ~4 bytes/pixel of write+read bandwidth every frame for consumers that are better served elsewhere:
+
+- **Gameplay picking = CPU raycast** against the BVH on the Game Thread. Zero GPU involvement, zero latency, and it can hit entities the camera culled.
+- **Tools/editor picking = on-demand pick pass**, scissored to a few pixels around the cursor. Each geometry path has an ID-output shader variant writing a tagged `PickId` (u32: 2-bit source tag + 30-bit payload — the mesh path writes the instance-slot index into the shared `InstanceData` buffer, which resolves uniquely to draw + instance; the volume path writes the entity index). Results return through the readback ring (~2-frame latency, fine for tools). The CPU resolves PickId → entity/material and **validates the entity generation**, so a pick landing after a despawn misses cleanly instead of hitting a recycled slot.
+- **Debug views** (entity/material heatmaps) run the same pass full-screen, only while active.
+
+Material identity has no dedicated storage anywhere — it is derivable: PickId → draw → `material_gpu_id`.
 
 ### 5. Shadow Pass
 
@@ -291,7 +300,7 @@ LightingPass reads:
 
 When RT shadows are available for a light, they replace the shadow atlas sample for that light. RT GI adds to the ambient/indirect term. RT reflections replace or blend with the specular term based on roughness.
 
-WGSL has no optional bindings — a pipeline's bind group layout is fixed at creation — so "reads the RT targets when they exist" needs an explicit mechanism: either pipeline permutations of the lighting shader (with/without RT inputs) or always-bound dummy targets plus uniform flags. The render graph knows at build time which passes are registered, so either is implementable; the choice is tracked in Open Questions.
+Optional RT inputs bind through the render graph's **optional-input-slot mechanism** (see Render Graph — Optional Input Slots): always-bound neutral dummies plus per-frame uniform flags — one lighting pipeline, uniform branching, no shader permutations.
 
 This is pure additive integration — the rasterization pipeline produces a complete image on its own. RT passes improve quality when available but nothing breaks without them.
 
@@ -840,7 +849,6 @@ struct RenderTargets {
     gbuffer_material: wgpu::Texture,  // Rgba8Unorm
     gbuffer_emissive: wgpu::Texture,  // Rgba16Float
     gbuffer_velocity: wgpu::Texture,  // Rg16Float
-    gbuffer_id:       wgpu::Texture,  // R32Uint
     hdr:              wgpu::Texture,  // Rgba16Float
     scene_color_copy: wgpu::Texture,  // Rgba16Float — HDR snapshot after lighting + sky (refraction)
     shadow_atlas:     wgpu::Texture,  // D32Float
@@ -877,6 +885,15 @@ impl RenderGraph {
 ```
 
 Games can customize the render graph — insert post-process passes, swap the volume pass implementation, add debug overlays — without touching engine internals.
+
+#### Optional Input Slots
+
+*(OQ 2 resolution, 2026-08-11.)* The implementation of every "public input slot" in this document — GI, per-light shadow masks, sky visibility, and any future slot: **always-bound neutral dummies + per-frame uniform flags**. Never optional bindings (WGSL has none), never pipeline permutations as architecture.
+
+- **Declaration.** A consuming pass declares each optional slot with a name, format, and neutral value. The graph binds the producer's output when one is registered, or a 1×1 dummy holding the neutral value when none is (gi = 0, shadow mask = 1, sky visibility = 1) — so even a flag bug degrades to the fallback look, never to garbage.
+- **Per-frame flags.** A uniform bitfield tells the shader which slots are live this frame. Shaders branch on it — uniform control flow, coherent across the whole dispatch, effectively free on modern GPUs. A producer that skips a frame (e.g., RT budget throttling) clears its flag with zero bind-group churn; bind groups rebuild only when producers register or unregister.
+- **One pipeline per consumer.** No shader-variant system, no PSO explosion; runtime feature toggles are a flag write. Pipeline permutations remain available as a *targeted optimization* (e.g., a dedicated no-RT lighting variant for low-end hardware) — the graph knows producer presence at build time, so promoting a proven-hot variant is cheap. Trigger: profiling shows a register-pressure/occupancy win. Permutation as optimization, never as architecture.
+- **Limits.** The lighting pass's full input set exceeds base WebGPU's 16 sampled textures per stage; the engine is native-only and requests elevated limits at boot (`Capabilities` reports the actuals).
 
 ### 5. Geometry Backend Convergence
 
@@ -915,7 +932,7 @@ When RT is available, the full pipeline including optional RT passes looks like:
                    └──▶ RT Reflect ───────────────────┘
 ```
 
-RT passes are optional nodes in the graph. The lighting pass consumes their outputs through its public input slots when present, and falls back to rasterized shadows / SSAO / SSR when absent (via the binding mechanism chosen in Open Questions — WGSL itself has no optional bindings).
+RT passes are optional nodes in the graph. The lighting pass consumes their outputs through its public input slots when present, and falls back to rasterized shadows / SSAO / SSR when absent (via the optional-input-slot mechanism — neutral dummies + uniform flags; WGSL itself has no optional bindings).
 
 Plugin-provided lighting contributions — the Voxel Plugin's SVO-traced shadows and GI foremost — plug in exactly the same way: additional render graph passes that read the GBuffer and feed the lighting pass's public GI / shadow-mask slots. The existing backends and their passes are unchanged.
 
@@ -928,6 +945,8 @@ UE5's real power is the composability of its Actor-Component model and data-driv
 ### The Entity-Component Model
 
 Every entity in the world is an ID in a SlotMap. Behavior is assembled by attaching components — plain data structs. There is no `AActor` base class, no `UObject` hierarchy, no reflection macros. Components are registered by type and stored in dense, cache-friendly arrays.
+
+This is the **Game Object Model** decision — Object-Oriented vs. ECS — and ECS is the answer (decided 2026-08-09, framing clarified 2026-08-11). It applies to the game-facing `World` only: engine internals (GPU pools, the retained `RenderScene`, streaming state) deliberately remain side structs and dense pools, where dense iteration wins and ECS query machinery adds nothing. Two questions, two answers.
 
 ```rust
 // Composing an entity in code (equivalent to UE5's Actor constructor)
@@ -1577,8 +1596,12 @@ lands.
    atomic min/max, `Capabilities::int64_atomic_min_max`) is the sanctioned capability-gated
    upgrade tier, scheduled with the GPU-driven work (OQ 7); adoption trigger: profiling shows the
    fragment path limiting on capable hardware, or variable-rate marching is needed.
-2. **RT-input binding mechanism.** WGSL has no optional bindings. Pipeline permutations of the
-   lighting shader vs. always-bound dummy targets + uniform flags.
+2. **[RESOLVED 2026-08-11] RT-input binding mechanism.** Always-bound neutral dummies +
+   per-frame uniform flag bits — one pipeline per consumer, uniform branching (coherent, ~free),
+   runtime toggles without pipeline rebuilds. Adopted as the render graph's **general
+   optional-input-slot mechanism**: the implementation of every public input slot (GI, shadow
+   masks, sky visibility, future slots). Pipeline permutations remain a targeted optimization
+   behind a profiling trigger. Spec: Render Graph — Optional Input Slots.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
    reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
    vertex/material access. Required before RT GI/reflections can be implemented.
@@ -1653,9 +1676,17 @@ lands.
     inside a "plain data" component — and `VolumeDrawCommand.brick_residency` is produced at
     extract while residency is streaming/GPU-side state. Decide which side owns residency; fold
     into the Voxel Plugin / streaming design (with 17).
-22. **GBuffer ID reconciliation.** The doc's `Entity ID (R32Uint)` target vs. the implemented
-    GBuffer contract (velocity + source flag + material ID, sw-6dd982). Reconcile doc with code
-    and decide entity-vs-material ID for picking/debug.
-23. **CLAUDE.md entity-model reconciliation.** CLAUDE.md still describes "SlotMap + side
-    structs, ECS deferred" while this doc specifies per-type dense component stores (ECS decided
-    2026-08-09). Align the two so there is one source of truth.
+22. **[RESOLVED 2026-08-11] GBuffer ID reconciliation.** The spec **cuts the per-frame ID
+    target entirely** (GBuffer is six targets; ~4 B/px bandwidth saved). Gameplay picking = CPU
+    BVH raycast; tools/editor = on-demand scissored pick pass writing tagged `PickId`s, returned
+    via the readback ring with generation validation; debug heatmaps = the same pass
+    full-screen, on demand. The mesh/volume source flag lives in the albedo-alpha flag bits,
+    debug-tooling-only — no lighting or post pass may branch on it. Implementation (sw-6dd982's
+    persistent material-ID target) migrates to match the spec. Spec: Picking & Debug IDs
+    (GBuffer stage).
+23. **[RESOLVED 2026-08-11] CLAUDE.md entity-model reconciliation.** The old CLAUDE.md text
+    conflated two questions. Clarified framing: the sw-cf6350 benchmarks evaluated ECS as a
+    general *engine-internals* mechanism (answer: no — side structs and dense pools win there);
+    the **Game Object Model** decision was always Object-Oriented vs. ECS, and ECS is the modern
+    consensus (decided 2026-08-09). CLAUDE.md rewritten with the two-question split; this doc's
+    Entity-Component Model section states it too. One source of truth restored.

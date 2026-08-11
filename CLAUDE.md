@@ -20,29 +20,28 @@ Set the `assignee` field to yourself when transitioning an issue to DOING. Use t
 
 ## Entity Architecture
 
-The engine uses **SlotMap + side structs** for entity storage. ECS (hecs) is deferred until
-entity heterogeneity justifies it (game layer, material diversity). See sw-cf6350 for the full
-benchmark data behind this decision.
+Two separate questions, two separate answers (clarified 2026-08-11 — earlier versions of this
+section conflated them):
 
-**Current pattern:**
+1. **Game Object Model → ECS.** The game-facing `World`: entities are IDs, components are plain
+   data in per-type dense stores, systems are functions over queries. The real decision here was
+   Object-Oriented vs. ECS, and ECS is the modern consensus. Spec: `docs/architecture-design.md`
+   (Composability & Scripting). hecs 0.11 is the vetted crate.
+2. **Engine internals → NOT ECS.** Render thread, GPU resources, streaming: side structs and
+   dense pools (`GpuContext`, `SlotMap` resource pools, retained `RenderScene`). These are
+   dense-iteration / spatial-traversal workloads where plain arrays win. The sw-cf6350
+   benchmarks evaluated ECS as a general engine-internals mechanism and support *this* answer —
+   do not cite them against the Game Object Model.
 
-- `SlotMap<EntityId, Instance>` for instanced voxel objects (stable handles, O(1) insert/remove)
-- GPU singletons (GpuContext, BrickPool, SVO, Raymarcher) as side structs
-- Camera as a standalone struct
-- BVH rebuilt from SlotMap iteration
+Transitional: `SlotMap<EntityId, Instance>` still bridges the OOC pipeline until the game-layer
+World lands; new code targets the component model in `docs/architecture-design.md`.
 
-**When to introduce ECS:**
-ECS subset queries are 4-7× faster than scanning `Vec<Option>` — but only matter when entity
-types diverge (different component sets per entity). Current workloads (culling, LOD, streaming,
-GPU upload) are all dense iteration or spatial traversal where plain arrays win. Introduce hecs
-when we need queries like "all entities with X but not Y" at scale.
-
-**Performance rules (apply to both SlotMap fields and future ECS components):**
+**Performance rules (ECS usage):**
 
 1. **Runtime state → mutable field.** `LodLevel(u8)`, `Visible(bool)`, `StreamingState(enum)`
-   change per-frame. If ECS is adopted later, these must be fields inside components, NOT
-   modeled as component presence/absence. ECS archetype migration is 500-660× slower than
-   field mutation.
-2. **GPU handles → side struct.** `Device`, `Queue`, pipelines, buffer pools stay in `GpuContext`.
+   change per-frame — these are fields inside components, NEVER modeled as component
+   presence/absence. Archetype migration is 500-660× slower than field mutation.
+2. **GPU handles → side struct.** `Device`, `Queue`, pipelines, buffer pools stay in engine-side
+   structs; game code holds opaque handles only.
 3. **Batch spawns at load time.** Entity insert has overhead. Spawn during preload/streaming,
    never in the render loop.
