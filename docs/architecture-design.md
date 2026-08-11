@@ -9,8 +9,8 @@ The architecture takes the best ideas from Unreal Engine 5 — the Game Thread /
 ### Design Principles
 
 1. **Data-driven.** Components are plain data structs. Systems are functions that operate on component stores. No inheritance hierarchies, no virtual dispatch on hot paths.
-2. **Thread ownership.** Each thread owns its data exclusively. Communication between threads happens via owned value-typed packets sent through channels — never shared mutable state.
-3. **Game–render firewall.** Game code never sees a `wgpu::Device`, a bind group, or a GPU buffer. The extract step is the boundary. Everything above it speaks in transforms, materials, and handles. Everything below it speaks in draw commands and GPU resources.
+2. **Thread ownership.** Each thread owns its data exclusively. Communication between threads happens via owned value-typed packets sent through channels — never shared mutable state. Sharing *immutable* data across threads (`Arc` payloads, mapped staging regions) is permitted: the rule forbids shared mutability, not sharing.
+3. **Game–render firewall.** Game code never sees a `wgpu::Device`, a bind group, or a GPU buffer. The extract step is the boundary. Everything above it speaks in transforms, materials, and handles. Everything below it speaks in draw commands and GPU resources. The firewall constrains *game code*, not engine internals: engine subsystems (asset pipeline, staging pool) may create and populate CPU-visible staging resources from any thread — wgpu is internally synchronized and built for it. The narrow invariant that actually matters: **the Render Thread exclusively owns device-local resources and command submission.**
 4. **Handle-based resources.** Games hold opaque handles (`AssetHandle<T>`, `ResourceHandle<T>`). Lifetime, caching, and GPU upload are engine-managed. Handles are cheap to copy and safe to hold across frames.
 5. **Budget-explicit.** Frame time, GPU memory, upload bandwidth, and streaming distance are explicit budgets with engine arbitration, not emergent properties.
 
@@ -634,13 +634,33 @@ When the game adds, modifies, or removes assets, the extract step encodes these 
 
 ```rust
 enum ResourceOp {
-    UploadMesh     { gpu_id: GpuId, vertices: Vec<Vertex>, indices: Vec<u32>, bounds: AABB },
-    UploadTexture  { gpu_id: GpuId, pixels: Vec<u8>, width: u32, height: u32,
-                     format: TextureFormat, mip_count: u32 },  // pixels holds all mips, tightly packed
-    UpdateMaterial { gpu_id: GpuId, props: MaterialGpuProps },
+    UploadMesh     { gpu_id: GpuId, vertices: StagingRef, indices: StagingRef, bounds: AABB },
+    UploadTexture  { gpu_id: GpuId, staging: StagingRef, width: u32, height: u32,
+                     format: TextureFormat, mip_count: u32 },  // staging holds all mips, row-pitch aligned
+    UpdateMaterial { gpu_id: GpuId, props: MaterialGpuProps },  // small: stays by-value
     Free           { gpu_id: GpuId, kind: ResourceKind },
 }
+
+// Handle into the engine-owned staging pool: a mapped wgpu buffer region populated
+// off-thread by the asset pipeline. The Render Thread records a GPU copy from it and
+// the region returns to the pool once that submission's fence completes.
+struct StagingRef {
+    buffer: StagingBufferId,
+    offset: u64,
+    size:   u64,
+}
 ```
+
+#### Staging Pool & Upload Path
+
+*(OQ 5 resolution, 2026-08-11.)* Bulk asset bytes never travel by value and are never memcpy'd on a hot thread. The engine owns a **staging pool**: CPU-visible mapped `wgpu` buffers, ring/size-class allocated, fence-reclaimed, and budgeted like every other pool (Principle 5 — wgpu's internal `write_*` staging would be invisible memory; ours is accounted).
+
+- **Decode-direct population.** Asset IO/decode threads write decoder output *straight into* a mapped staging region (rows 256-byte aligned at decode time; sequential writes — it's write-combined memory). This is the write the decoder performs anyway; no thread performs an additional payload copy.
+- **O(1) render-thread cost.** The Render Thread records `copy_buffer_to_buffer` / `copy_buffer_to_texture` from staging into the device-local pools — command recording only, independent of payload size. (The alternative — `Arc` bytes + `queue.write_*` — would put an O(bytes) memcpy on the Render Thread per upload; rejected for steady-state streaming workloads.)
+- **Firewall-clean.** Creating and mapping staging buffers off-thread is designed-for wgpu usage (`Device`/`Queue` are internally synchronized). This is engine-internal machinery; Principle 3 constrains game code, and the Render Thread's exclusive ownership of *device-local* resources and submission is untouched.
+- **Small payloads stay by-value.** `UpdateMaterial` uniforms and other sub-threshold payloads ride the channel directly — pool overhead isn't worth it. `Arc` of immutable bytes remains legal engine-internal transport where staging doesn't fit (e.g., CPU-retained asset caches).
+- **Shared with streaming.** This pool is the same subsystem the out-of-core brick streaming path rides (OQ 17) — one system, two clients; brick uploads use dedicated rings within it, not generic `ResourceOp`s.
+- **Teardown.** The pool participates in the device teardown protocol (OQ 15): in-flight mapped regions drain before device destruction.
 
 ### 2. The Mesh Drawing Pipeline
 
@@ -1397,6 +1417,8 @@ enum AssetState { Unloaded, Loading, Loaded, Failed(String) }
 
 Games register custom asset loaders for game-specific formats. The engine provides built-in loaders for meshes (glTF/GLB), textures (PNG, KTX2), audio (WAV, OGG), and scenes.
 
+GPU-destined bulk data is decoded directly into staging-pool regions (see Staging Pool & Upload Path); the `AssetServer` retains CPU-side copies only for assets that need CPU access, so GPU-only assets cost no long-lived CPU memory.
+
 #### Handles
 
 ```rust
@@ -1574,8 +1596,9 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | FramePacket (deltas + views) | Produced by Game, consumed by Render | Owned value through channel (Game → Render) |
 | RenderScene (retained draw data) | Render Thread | Never — updated only by applying packet deltas |
 | FrameFeedback | Produced by Render, consumed by Game | Owned value through channel (Render → Game, ~2-frame lag; GPU data via readback ring) |
-| GPU resources | Render Thread | Never — game code uses handles |
-| Assets (CPU) | AssetServer (Game Thread) | Copied into `ResourceOp` at extract (transport under review — Open Questions) |
+| Device-local GPU resources + submission | Render Thread | Never — game code uses handles |
+| Staging buffers (CPU-visible, mapped) | Engine staging pool (thread-safe) | `StagingRef` through `ResourceOp`; fence-reclaimed after the GPU copy |
+| Asset bulk data | AssetServer + staging pool | Decoded directly into mapped staging off-thread; never copied by value |
 | Input | Main Thread | Snapshot borrowed by game tick |
 | Audio commands | Collected on Game Thread | Drained by audio server each frame |
 
@@ -1610,9 +1633,15 @@ lands.
    screen-space GI), or does plugin-provided GI (the Voxel Plugin's SVO tracing) cover the cases
    that matter? The lighting chains from OQ 11 already reserve the public slots (GI, sky
    visibility, reflections) this tier would feed — whatever the answer, no shader rework.
-5. **Asset payload transport.** `ResourceOp` currently deep-copies vertex/pixel data into the
-   channel. Options: `Arc<[u8]>` of immutable asset bytes (thread-safe — the ownership rule
-   targets shared *mutable* state), or pre-populated staging buffers handed off by handle.
+5. **[RESOLVED 2026-08-11] Asset payload transport.** Option B — the engine-owned **staging
+   pool**: decode threads write directly into mapped staging regions (no payload memcpy on any
+   hot thread); `ResourceOp` carries `StagingRef` handles; the Render Thread records GPU copies
+   only — O(1) per upload. Principles clarified alongside: Principle 2 permits shared
+   *immutable* data; Principle 3 constrains game code, and the real invariant is Render-Thread
+   ownership of device-local resources + submission — engine subsystems may create/populate
+   staging off-thread. Small payloads stay by-value; `Arc` transport remains legal internally.
+   The pool is shared with OQ 17 streaming and joins the OQ 15 teardown protocol. Spec: Staging
+   Pool & Upload Path (Data Structures).
 6. **Gameplay-layer semantics.** Event bus buffering (same-frame visibility vs. double-buffered),
    script access to `World` (command buffers vs. exclusive storage), and fixed-timestep transform
    interpolation for rendering. None block the render architecture; all block gameplay API
@@ -1659,13 +1688,15 @@ lands.
     vertices feed the depth pre-pass, motion vectors, and per-frame BLAS refit consistently.
 15. **Resize / device-lost / teardown.** Swapchain recreation crosses the thread boundary;
     `Engine::run() -> !` plus `App::shutdown` implies a drain/GPU-idle ordering that is
-    unspecified. Define the lifecycle protocol.
+    unspecified. Define the lifecycle protocol. Participants now include the staging pool
+    (OQ 5): in-flight mapped regions must drain before device teardown.
 16. **Physics architecture.** Engine choice (e.g., rapier), `Transform` sync, fixed-step
     ownership — plus worker-pool priorities: game physics jobs and render-critical culling jobs
     share one rayon pool today, with no protection against priority inversion.
 17. **Streaming.** Principle 5 promises budget arbitration; `BrickResidencyInfo` and
     `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
-    full section of its own.
+    full section of its own. The staging pool (OQ 5) is its upload backbone — brick uploads
+    ride dedicated rings in the same subsystem, not generic `ResourceOp`s.
 18. **UI.** No story (immediate-mode overlay, egui integration, retained widget tree?). A
     complete game engine needs at least a stance.
 19. **Networking.** Not mentioned anywhere — even "out of scope for v1" needs saying, with the
