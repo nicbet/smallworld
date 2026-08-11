@@ -1877,6 +1877,43 @@ The ordering that bites: stage 1 before stage 2 — shutdown callbacks that save
 
 ---
 
+## Profiling & Instrumentation
+
+*(OQ 24 resolution, 2026-08-11.)* One instrumentation API, multiple sinks — the shape UE (`stat` + Unreal Insights) and Unity (`ProfilerMarker` + Profiler) both converged on, with **Tracy playing the deep-timeline role** so we never build one. Engine/game split: the engine owns the markers API, collection across all execution contexts, and the sinks; games annotate their own systems and behaviors through the *same* macros and read the same overlay.
+
+### The Instrumentation API (engine primitive)
+
+```rust
+profile_scope!("cull.shadow_views");    // scoped hierarchical timer, any thread
+counter!(DRAW_CALLS, n);                // per-frame counter
+gauge!(STREAMING_QUEUE_DEPTH, depth);   // sampled value
+```
+
+- Every execution context registers a **named thread lane**: Game, Render, game-pool workers, render-pool workers, Streaming Coordinator, Audio, IO pool.
+- **Zero-cost rule.** All macros compile to no-ops in shipping builds; in dev builds, overhead is nanoseconds per scope with no client attached.
+- Games use the identical macros — a game system's scopes appear in the same lanes and overlay as engine scopes.
+
+### Sinks
+
+| Sink | Role | When |
+|------|------|------|
+| **Tracy** | Deep dives: zones, lock contention, memory (alloc hook), GPU lanes, capture files | Dev machine, on attach |
+| **egui overlay** | Always available: frame graph, per-thread ms, top-N scopes, counters, **budget table** | Any dev build, toggle key |
+| **chrome-trace JSON export** | CI captures, bug reports, offline diffing | On demand |
+
+- **GPU timeline unification.** `GpuTimingFeedback`'s per-pass timings — already frame-stamped by the readback ring — feed Tracy's GPU context, so CPU and GPU lanes sit on one timeline.
+- Shipping telemetry (player-machine aggregation) is out of scope for v1; the trace export is the hook it would later build on.
+
+### The BudgetRegistry — receipts for every budget
+
+Every named budget in this document (GPU pools, staging pool, deform output, GI clipmap, froxels, streaming IO/upload/decode) **registers a gauge at creation**: budget, current usage, peak. The overlay's budget table renders whatever is registered — adding a budget without receipts is structurally impossible. Budget-consuming systems (the DRS controller, the streaming arbiter, deform LOD capping) read the same gauges they publish.
+
+### The Standard Counter Set
+
+Spec'd so tooling can rely on them: draw calls and instances per view; culled counts per view (mirroring the `OcclusionFeedback` advisory — that remains the game-facing data path); brick residency (resident / pinned / evicted this frame); streaming queue depth and in-flight bytes; staging in-flight regions; TLAS instance count; deformed instance count. Games add their own counters through the same macro.
+
+---
+
 ## Frame Lifecycle
 
 The complete sequence of a single frame, showing which thread owns each phase.
@@ -1921,11 +1958,16 @@ The complete sequence of a single frame, showing which thread owns each phase.
 
 ## Open Questions
 
-The decision backlog from the 2026-08-11 review round — **fully resolved as of 2026-08-11**.
-Entries are kept as decision records: each captures the choice, the rationale, the rejected
-alternatives, and where the spec lives. Deferred items *inside* resolutions (v2 tiers,
-capability-gated upgrades, scheduled hardening) carry their own explicit adoption triggers and
-need no separate tracking here.
+Round 1 (OQ 1–23): the decision backlog from the 2026-08-11 review round — **fully resolved as
+of 2026-08-11**. Entries are kept as decision records: each captures the choice, the rationale,
+the rejected alternatives, and where the spec lives. Deferred items *inside* resolutions (v2
+tiers, capability-gated upgrades, scheduled hardening) carry their own explicit adoption
+triggers and need no separate tracking here.
+
+Round 2 (OQ 24–28): opened 2026-08-11 from the Gregory (*Game Engine Architecture*) subsystem
+audit — the chapters the doc only covered where they intersected the render pipeline. Framing
+rule for all five: **decide the engine primitives and traits; games compose them** — Gregory
+intermixes game and engine concerns, we deliberately do not.
 
 1. **[RESOLVED 2026-08-11] Volume depth writes & motion vectors.** Fragment-shader raymarch over
    rasterized per-object proxy AABBs with `frag_depth` export — one shader writes depth, the full
@@ -2110,3 +2152,31 @@ need no separate tracking here.
     the **Game Object Model** decision was always Object-Oriented vs. ECS, and ECS is the modern
     consensus (decided 2026-08-09). CLAUDE.md rewritten with the two-question split; this doc's
     Entity-Component Model section states it too. One source of truth restored.
+24. **[RESOLVED 2026-08-11] Profiling & instrumentation.** One instrumentation API, multiple
+    sinks (the UE stat+Insights / Unity ProfilerMarker shape): scope/counter/gauge macros with
+    named lanes for all execution contexts, zero-cost in shipping builds; sinks = **Tracy**
+    (deep timeline, lock/memory profiling, GPU lanes fed by the readback ring), **egui
+    overlay** (frame graph, top-N scopes, counters, generated budget table), **chrome-trace
+    export** (CI, bug reports). **BudgetRegistry**: every named budget registers a gauge at
+    creation — receipts are structurally mandatory; DRS and the streaming arbiter read the
+    gauges they publish. Standard counter set spec'd; `OcclusionFeedback` remains the
+    game-facing advisory path. Shipping telemetry out of scope v1 (trace export is its hook).
+    In-engine-only rejected (rebuilds Insights); Tracy-only rejected (no always-on budget
+    receipts). Spec: Profiling & Instrumentation section.
+25. **Animation runtime.** The pose-computation half feeding the DeformPass: skeleton + clip
+    assets, an animator component, blending architecture (trees, layers, masks, additive),
+    state machines, animation events, root motion, clip compression, bone sockets/attachment.
+    Engine provides sampling/blending primitives and the palette contract; games compose
+    graphs and logic.
+26. **Audio engine.** Behind the `AudioCommands` surface: the build-vs-middleware decision,
+    mixer/bus hierarchy, DSP effects (reverb, filters, occlusion), voice management and
+    virtualization, streaming audio (music), the spatialization model. Currently the doc
+    specifies an API and a thread, not an audio engine.
+27. **Resource pipeline & filesystem.** The offline half of assets: cooking/conditioning
+    pipeline (import → engine-native formats), filesystem abstraction (mounts, archives/paks,
+    platform paths), asset identity (GUID vs. path), inter-asset dependency management,
+    refcount/unload policy. The runtime half (AssetServer, staging, streaming) is done.
+28. **Physics contract completion.** Joints/constraints (component + `PhysicsProvider` API —
+    doors, ropes, ragdolls all sit on them) and the character controller (the most
+    gameplay-facing physics feature, currently unspecified). Ragdolls/vehicles come later but
+    depend on joints.
