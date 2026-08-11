@@ -167,13 +167,26 @@ Visible opaque surfaces write their material properties to the Geometry Buffer. 
 Both rendering paths write to this same GBuffer:
 
 - **Rasterized meshes** write via traditional vertex/fragment shaders through the `GBufferPass`.
-- **Raymarched volumes** write via compute shaders through the `VolumePass`, reading depth to composite correctly with rasterized geometry.
+- **Raymarched volumes** write via fragment-shader raymarching over rasterized proxy geometry through the `VolumePass`, exporting real depth via `frag_depth` (see the Volume Rendering Mechanism below).
 
 The lighting pass and everything downstream never knows which path produced a given pixel.
 
 **Shading Model ID.** The albedo alpha channel carries a per-pixel shading model ID (up to 16 models). The lighting pass switches on it to select the lighting response — `Standard` (Cook-Torrance PBR), `Unlit`, and registered custom models (toon, foliage, …). This is UE5's per-pixel shading-model mechanism: it is what lets custom materials change *how light responds*, not just which material inputs are written.
 
 **HZB construction.** After all opaque backends have written depth — rasterized meshes and raymarched volumes alike — the final opaque depth is downsampled into the HZB mip chain used by the next frame's occlusion culling. Building the HZB here (rather than in the depth pre-pass) means volumes and custom geometry act as occluders: a voxel mountain culls the city behind it.
+
+#### Volume Rendering Mechanism (`VolumePass`)
+
+*(OQ 1 resolution, 2026-08-11.)* Raymarched volume tiers render as **fragment-shader raymarching over rasterized proxy geometry** — the Teardown-proven pattern, chosen because it gets depth testing, sRGB conversion, MRT writes, and shadow-view reuse from hardware, and runs on all supported GPUs:
+
+- **Proxy geometry.** One AABB per volume object (or streaming chunk), rasterized in the `VolumePass`. The fragment shader marches the object's brick/SVO data via hierarchical DDA; the first hit writes all GBuffer targets, velocity, and `frag_depth`. Bricks of one object are traversed inside a single invocation (first-hit termination), so only inter-*object* overlap pays overdraw.
+- **Depth interop.** `frag_depth` export writes the real D32Float depth buffer; hardware depth testing resolves volume-vs-volume and volume-vs-mesh ordering. Because `frag_depth` forces late-Z (WGSL has no conservative-depth hint), the shader early-outs against `depth_mesh_copy` — a snapshot of the mesh pre-pass depth taken before the `VolumePass` (a compute copy; Depth32Float cannot be reinterpreted as R32Float in wgpu).
+- **Motion vectors.** The hit point's world position is transformed by the volume's previous-frame transform and previous view-projection — the same velocity math as meshes, written in the same shader. (Rigid-motion approximation; animated voxel *content* reads as changed data, not motion.)
+- **Camera inside a volume.** Rasterize proxy back faces; clamp the ray start to the near plane.
+- **Shadow casting.** The same shader compiled depth-only implements `ShadowCaster::render_shadow_depth` for each shadow view.
+- **Distant tiers** are extracted meshes on the shared mesh stream — no raymarching at all.
+
+**Capability-gated upgrade tier (deferred to the GPU-driven work, OQ 7).** A compute visibility-buffer variant — depth+payload packed via 64-bit atomic min/max (`Capabilities::int64_atomic_min_max`; on Metal this requires Apple M2-class "Nanite atomics") — is the sanctioned future optimization, not a rejected option. It is deferred because it needs its own coverage/binning and resolve machinery, the fragment path must exist for baseline hardware anyway, and its win is unproven for large-box proxies (Nanite's software raster exists to beat micro-triangle raster inefficiency, which volume proxies don't have). **Adoption trigger:** profiling shows the fragment path limiting on capable hardware, or variable-rate marching is needed.
 
 ### 5. Shadow Pass
 
@@ -682,14 +695,16 @@ Probed at startup. The engine adapts its feature set based on what the hardware 
 
 ```rust
 struct Capabilities {
-    timestamp_query:   bool,
-    ray_query:         bool,
-    mesh_shader:       bool,
-    shader_f16:        bool,
-    subgroups:         bool,
-    max_buffer_mb:     u32,
-    max_texture_dim:   u32,
-    min_ubo_alignment: u32,
+    timestamp_query:      bool,
+    ray_query:            bool,
+    mesh_shader:          bool,
+    shader_f16:           bool,
+    subgroups:            bool,
+    int64_atomic_min_max: bool,  // 64-bit atomic min/max (Metal: Apple M2-class+ "Nanite atomics")
+    texture_int64_atomic: bool,  // R64Uint image atomic min/max (MSL 3.1+)
+    max_buffer_mb:        u32,
+    max_texture_dim:      u32,
+    min_ubo_alignment:    u32,
 }
 ```
 
@@ -757,6 +772,7 @@ struct GpuMaterialEntry {
 struct RenderTargets {
     // Core
     depth:            wgpu::Texture,  // D32Float
+    depth_mesh_copy:  wgpu::Texture,  // R32Float — mesh pre-pass depth snapshot (VolumePass early-out)
     gbuffer_albedo:   wgpu::Texture,  // Rgba8UnormSrgb
     gbuffer_normal:   wgpu::Texture,  // Rgba16Float
     gbuffer_material: wgpu::Texture,  // Rgba8Unorm
@@ -820,7 +836,7 @@ Backends converge at two points.
                     └──────────────┘
 ```
 
-The Voxel Plugin's `VolumeBackend` is itself pluggable in how it renders — compute raymarching, mesh extraction (marching cubes / dual contouring fed into rasterization), or a hybrid where nearby volumes get full-resolution raymarching and distant volumes get extracted meshes. This is an internal detail of the backend, invisible to the rest of the pipeline — except that extracted tiers ride the shared mesh stream and therefore participate in engine passes automatically.
+The Voxel Plugin's `VolumeBackend` is itself pluggable in how it renders — proxy-raster fragment raymarching (the v1 mechanism — see the GBuffer stage), mesh extraction (marching cubes / dual contouring fed into rasterization), or a hybrid where nearby volumes get full-resolution raymarching and distant volumes get extracted meshes. This is an internal detail of the backend, invisible to the rest of the pipeline — except that extracted tiers ride the shared mesh stream and therefore participate in engine passes automatically.
 
 When RT is available, the full pipeline including optional RT passes looks like:
 
@@ -1460,14 +1476,13 @@ documented stance (some are full subsystem designs); items 21–23 are doc/code 
 The plan: resolve them one by one, in discussion — no implementation issues until a discussion
 lands.
 
-1. **Volume depth writes.** Compute shaders cannot write a `D32Float` depth attachment, and
-   `Rgba8UnormSrgb` cannot be a storage texture. How does `VolumePass` contribute depth (and
-   sRGB-correct albedo) so that transparency, TAA, RT ray reconstruction, and the HZB see volumes?
-   Candidates: (a) fragment-shader raymarch over rasterized proxy geometry with `frag_depth`
-   export; (b) compute writes to `R32Float` depth-as-data + non-sRGB GBuffer formats, followed by
-   a depth-merge raster pass; (c) a hybrid, chosen per LOD tier. Volume **motion vectors** for
-   TAA belong to the same discussion — extracted-mesh tiers get velocity via `InstanceData`;
-   raymarched pixels currently produce none.
+1. **[RESOLVED 2026-08-11] Volume depth writes & motion vectors.** Fragment-shader raymarch over
+   rasterized per-object proxy AABBs with `frag_depth` export — one shader writes depth, the full
+   GBuffer, and velocity; its depth-only variant implements `ShadowCaster`. Full spec: "Volume
+   Rendering Mechanism" in the GBuffer stage. The compute visibility-buffer variant (64-bit
+   atomic min/max, `Capabilities::int64_atomic_min_max`) is the sanctioned capability-gated
+   upgrade tier, scheduled with the GPU-driven work (OQ 7); adoption trigger: profiling shows the
+   fragment path limiting on capable hardware, or variable-rate marching is needed.
 2. **RT-input binding mechanism.** WGSL has no optional bindings. Pipeline permutations of the
    lighting shader vs. always-bound dummy targets + uniform flags.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
