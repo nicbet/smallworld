@@ -2487,3 +2487,56 @@ surfaced as a missing subsystem, and large-world coordinates escalated from the 
     sprites/meshes; transparency ordering; froxel-lit particles), collision (depth-buffer +
     physics queries), a determinism stance, and the engine/game split (engine: simulation +
     rendering primitives + graph evaluator; games: effect graphs as assets).
+
+---
+
+## Deferred Ledger
+
+Everything the resolutions above defer, consolidated so the debt is one list instead of
+archaeology. Items *live* in their home entries (pointers given); this ledger is an index, and
+it must be updated whenever a resolution adds or discharges a deferral.
+
+### A. Open questions
+
+- **OQ 32 — Particles & particle system.** The only formally open entry. Scope framed above.
+
+### B. Committed future design rounds — stance exists, design doesn't
+
+Each of these is a full design session when its time comes:
+
+| Round | Home | Scope |
+|-------|------|-------|
+| GPU-driven phase 2 | OQ 7 (+ OQ 1 volumes tier, OQ 29 foliage) | GPU scene buffer → GPU culling → indirect draws → visibility-buffer geometry; hard additivity requirement |
+| The Lumen analog | OQ 4 | Mesh SDFs + surface cache; v2/v3 quality end-state; representation swap behind unchanged slots |
+| Task-graph scheduler | OQ 16 (+ OQ 6 threading notes) | crossbeam-based, declared dependencies + priorities; unifies parallel systems, physics, streaming decode |
+| Game-UI detail round | OQ 18 / UI Framework section | Widget catalog, theming, text shaping (cosmic-text-class), l10n, a11y |
+| Networking modules | OQ 19 | Transport + replication on the preserved hooks (fixed tick, component registry, generational IDs) |
+| The editor | UI Framework — Editor Consequence | An application on the engine; consumes UI framework + reflection + aux views + pick pass; no design until there is a runtime to edit |
+
+### C. Fully spec'd, implementation scheduled — work, not design
+
+Deferred decals (OQ 13) · volumetric clouds, skybox interim (OQ 31) · `ReflectionProbe`
+implementation (OQ 11) · serialization machinery + `EntityRef` (OQ 20) · FSR 2.2 WGSL port
+(OQ 12) · predictive tick pacing — *calibration methodology is honest TBD* (OQ 8) · HLOD
+generation tooling (OQ 17/29) · device-lost recovery walk (OQ 15) · sw-6dd982 GBuffer
+migration (OQ 22).
+
+### D. Triggered contingencies — may legitimately never happen
+
+Vertex-shader skinning fallback (OQ 14) · Surface Nets fallback if Transvoxel bites (plugin
+V3) · lighting-pipeline permutations on a profiling trigger (OQ 2) · Jolt/PhysX provider swap
+(OQ 16) · compute visibility-buffer volumes (OQ 1 → OQ 7) · audio middleware whole-subsystem
+replacement (OQ 26) · the hexasphere sibling plugin (plugin V1) · mod mounts (OQ 27).
+
+### E. Named-but-undesigned small items — the easiest to lose
+
+- **Cloth simulation** — registered as a future deformer (OQ 14); zero design anywhere.
+- **World-space light structure** for off-screen RT hit shading — the OQ 3 caveat;
+  prerequisite for bindless sharp reflections.
+- **Clip compression codec** — implementation decision under the cook pipeline (OQ 25 → OQ 27).
+- **HRTF spatialization** (OQ 26) · **MetaSounds-style audio graphs** (OQ 26, v2+) ·
+  **shipping telemetry** on the trace-export hook (OQ 24).
+- **Edit determinism under netcode** — parked with the OQ 19 era (plugin V8).
+- **Brick-size benchmark validation** — 16³ held as a constant pending profiling (plugin V7).
+- **Lua-in-fixed-tick determinism rules** — required before behaviors are ever admitted to
+  `fixed_update` (OQ 6 threading notes).
