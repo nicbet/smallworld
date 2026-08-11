@@ -3,7 +3,7 @@
 This project uses `xpo` (Exponential) via the MCP server registered in `.mcp.json`.
 Always use the MCP tools — never shell out to the `xpo` CLI.
 
-Issue IDs in this project use the prefix `sm-` (e.g. `sm-a1b2c3`).
+Issue IDs in this project use the prefix `sw-` (e.g. `sw-a1b2c3`).
 
 ## Hard Rules
 
