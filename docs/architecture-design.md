@@ -1433,6 +1433,16 @@ Entities can form parent-child trees. A character entity might parent its weapon
 
 This is equivalent to UE5's `SetupAttachment` component tree — but flattened into a simple parent ID on the entity rather than a component hierarchy.
 
+#### Serialization & Save Games
+
+*(OQ 20 resolution, 2026-08-11 — shape committed now, implemented when save games are first needed.)* Persistence follows the opt-in registry model — the same shape as Godot 4's exported properties + `PackedScene` and Bevy's `DynamicScene`:
+
+- **Opt-in component registry.** Components register for persistence under a **stable name + version**, with serde-derived (de)serialization and per-version migration hooks. The registry is shared infrastructure, not save-specific: replication (OQ 19) consumes the same component identity + codecs, and a future reflection layer (editor inspectors) backs the same registry without changing the save format. One registry, three consumers.
+- **Save documents.** Header (engine + save versions) + entity section (registered components over a chosen entity set) + game-defined sections. Format-agnostic via serde — RON in dev (diffable), binary + compression shipping.
+- **Loading spawns fresh entities.** `EntityId`s are never stable across sessions. Component fields that reference entities use the **`EntityRef` wrapper type**, so the loader knows every reference site and remaps automatically — the dangling-reference bug class is eliminated structurally, not documented around. Asset handles serialize as paths/UUIDs and re-resolve through the `AssetServer`.
+- **Transient state is rebuilt, never saved.** Transforms re-propagate, GPU resources re-upload, behaviors re-`init`. **Discipline rule (load-bearing):** persistent state lives in components; behaviors and VMs hold only transient state — which is why Lua state never needs serializing. A dev-mode audit warns when a save touches unregistered component types, so opt-in silence can't bite silently.
+- **Bulk world data is out of scope.** Voxel regions live in streaming-owned region files (OQ 17); a save *references* region state, never inlines it. Saves stay small; worlds stay on disk.
+
 ### 4. Assets & Resources
 
 #### AssetServer
@@ -1765,7 +1775,8 @@ lands.
 17. **Streaming.** Principle 5 promises budget arbitration; `BrickResidencyInfo` and
     `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
     full section of its own. The staging pool (OQ 5) is its upload backbone — brick uploads
-    ride dedicated rings in the same subsystem, not generic `ResourceOp`s.
+    ride dedicated rings in the same subsystem, not generic `ResourceOp`s. Also owns the
+    world-region files that saves reference (OQ 20).
 18. **[RESOLVED 2026-08-11] UI.** Two-track stance: **dev/debug tooling = egui**, integrated
     now as a final render-graph pass over the post-processed image; the **game-facing UI
     framework** (retained widgets, layout, theming) is a committed post-v1 subsystem that gets
@@ -1774,9 +1785,15 @@ lands.
     accounted for now: `fixed_update` is the deterministic tick (with the engine guarantee that
     no engine system introduces nondeterminism into fixed-tick simulation — see The App Trait),
     components are plain replicable data, entity IDs are generational. Networking arrives
-    post-v1 as transport + replication modules on those hooks.
-20. **Save / serialization.** Asset descriptors spawn entities; serializing a live `World`
-    (save games, editor scenes) is undesigned.
+    post-v1 as transport + replication modules on those hooks; replication consumes the OQ 20
+    component registry (stable identity + codecs) rather than growing its own.
+20. **[RESOLVED 2026-08-11] Save / serialization.** Option C — opt-in component registry
+    (stable name + version, serde codecs, migration hooks) + save documents + fresh-ID loading
+    with `EntityRef` auto-remapping; transient state rebuilt, never saved ("persistent state
+    lives in components" as a load-bearing rule); bulk world data fenced off to streaming's
+    region files. The registry is shared with replication (OQ 19) and future editor reflection.
+    Implementation scheduled with the first save-game need. Spec: Serialization & Save Games
+    (World Building).
 21. **Voxel Plugin data ownership.** `VolumeRenderer` holds `Box<dyn VolumeSource>` — behavior
     inside a "plain data" component — and `VolumeDrawCommand.brick_residency` is produced at
     extract while residency is streaming/GPU-side state. Decide which side owns residency; fold
