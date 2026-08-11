@@ -181,7 +181,7 @@ Before anything is drawn, the engine determines what each view can see. Culling 
 - **Deformers are an extension point.** Skinning is the built-in deformer; morph targets, cloth, and procedural deformation register as additional compute deformers writing the same output buffers (the UE5 Deformer Graph shape). Plugin-friendly by construction.
 - **Velocity via buffer aliasing — no shader permutations.** Geometry vertex shaders always read a `position_prev` attribute and multiply by `prev_world_matrix`. Rigid draws bind the *same* position buffer as `position_prev` (all motion comes from the matrix); deformed draws bind last frame's deformed output (pose motion), with the matrix carrying object motion. One shader, both cases, exact skinned motion vectors. Deformed outputs are double-buffered for this.
 - **Budgeted (Principle 5).** Deformed-output memory (~40 B/vertex × 2 buffers × instance) is a named budget; over budget → LOD down or cap deformed instances. There is deliberately **no vertex-shader fallback path** — one implementation, per the permutation-as-optimization-never-architecture rule; a fallback is added only if a shipped need demonstrates it.
-- **Animation sampling stays on the CPU** (worker pool): blend trees, IK, and clip evaluation are game-state logic. Bone palettes (~6 KB per character) upload per frame via the staging pool. The GPU deforms; it never runs animation logic.
+- **Animation sampling stays on the CPU** (worker pool): blend trees, IK, and clip evaluation are game-state logic (see the Animation section). Bone palettes (~6 KB per character) upload per frame via the staging pool. The GPU deforms; it never runs animation logic.
 
 ### 4. Depth Pre-Pass
 
@@ -1844,6 +1844,42 @@ trait PhysicsProvider: Send {
 
 ---
 
+## Animation
+
+*(OQ 25 resolution, 2026-08-11.)* The pose-computation half; the GPU half is the Deformation stage (OQ 14), and the seam between them is exactly one artifact: the bone palette. Engine/game split: the engine owns assets, sampling, blending primitives, palette production, events, and sockets; the game owns deciding *what plays* — parameters, logic, state.
+
+### Layered Architecture: Pose Primitives + Data Graphs
+
+Two public levels, deliberately — UE and Unity are both secretly this shape (AnimBP compiles to AnimNodes; Mecanim sits on Playables), but they retrofitted the layering; we design it:
+
+1. **Pose primitives (engine core, public).** Sample a clip at a time → pose; blend, additive, and masked-combine poses; IK solver nodes (two-bone, look-at; full-body deferred). Procedural animation and custom rigs build directly on this level.
+2. **`AnimGraph` assets (engine-provided standard).** Blend trees, layers, masks, and state machines as serde data — RON-editable, per the data-driven design section — evaluated by the engine on top of the primitives. Games drive graph *parameters* from behaviors (`speed`, `grounded`, `aiming`); the graph decides poses.
+
+### Assets
+
+- **`SkeletonAsset`** — joint hierarchy, bind pose, socket definitions. Imported from glTF.
+- **`AnimClipAsset`** — joint curves + a named event track. **Compressed at cook time** (keyframe reduction + quantization, ACL-inspired; the codec is an implementation decision under OQ 27's pipeline). Clips are among the largest asset classes; compression is not optional.
+- **`AnimGraphAsset`** — the data-driven graph: blend trees, layers, masks, state machines, parameter declarations.
+
+### The Animator Component
+
+```rust
+struct Animator {
+    graph:      AssetHandle<AnimGraphAsset>,
+    parameters: AnimParams,                  // name → f32 / bool / trigger — plain data
+}
+```
+
+Sampling and graph evaluation run on the **game worker pool in PostUpdate**, producing bone palettes that ride the staging pool into the `DeformPass`. Plain data throughout — the `Animator` serializes (OQ 20); pose state is transient and rebuilds on load.
+
+### Events, Root Motion, Sockets
+
+- **Animation events.** Clips carry named event tracks; sampling fires them into the double-buffered event bus — footsteps ride the same machinery as everything else.
+- **Root motion.** Extracted by the engine from the root track and *delivered* — a per-frame component field the game reads in Update — never auto-applied. The game routes it through the character controller or transform itself; UE and Unity both converged here after years of fighting the alternative.
+- **Sockets.** Bone-level attachment extends the existing hierarchy: `world.attach_to_bone(child, parent, joint)`. `WorldTransform` propagation consumes the sampled pose, so weapon-in-hand rides the same parent mechanism as everything else.
+
+---
+
 ## Lifecycle
 
 *(OQ 15 resolution, 2026-08-11.)* Engine-level lifecycle: surface events, device loss, and shutdown.
@@ -2163,11 +2199,15 @@ intermixes game and engine concerns, we deliberately do not.
     game-facing advisory path. Shipping telemetry out of scope v1 (trace export is its hook).
     In-engine-only rejected (rebuilds Insights); Tracy-only rejected (no always-on budget
     receipts). Spec: Profiling & Instrumentation section.
-25. **Animation runtime.** The pose-computation half feeding the DeformPass: skeleton + clip
-    assets, an animator component, blending architecture (trees, layers, masks, additive),
-    state machines, animation events, root motion, clip compression, bone sockets/attachment.
-    Engine provides sampling/blending primitives and the palette contract; games compose
-    graphs and logic.
+25. **[RESOLVED 2026-08-11] Animation runtime.** Option D — **layered: pose primitives as
+    public engine core** (sample/blend/mask/additive, two-bone + look-at IK nodes), **with the
+    data-driven `AnimGraph` evaluator built on them** (blend trees, layers, state machines as
+    serde/RON assets; games drive parameters from behaviors). UE/Unity are both secretly this
+    shape — we design the layering they retrofitted. Riders: `SkeletonAsset`/`AnimClipAsset`
+    from glTF with cook-time ACL-style compression (OQ 27); `Animator` plain-data component,
+    sampling on the game pool in PostUpdate, palette → staging → DeformPass; events into the
+    double-buffered bus; root motion delivered never auto-applied; bone sockets via
+    `attach_to_bone`. Spec: Animation section.
 26. **Audio engine.** Behind the `AudioCommands` surface: the build-vs-middleware decision,
     mixer/bus hierarchy, DSP effects (reverb, filters, occlusion), voice management and
     virtualization, streaming audio (music), the spatialization model. Currently the doc
