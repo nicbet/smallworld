@@ -707,12 +707,13 @@ The Voxel Plugin's custom-lane draw data — carried in its backend delta payloa
 
 ```rust
 struct VolumeDrawCommand {
-    volume_id:       EntityId,
-    bounds:          AABB,
-    lod_level:       u8,
-    brick_residency: BrickResidencyInfo,
+    volume_id: EntityId,
+    bounds:    AABB,
+    lod_level: u8,        // demand hint: the LOD the game side wants — never residency
 }
 ```
+
+*(OQ 21, 2026-08-11: the former `brick_residency` field is gone. Residency truth lives with the brick pool on the streaming side — the game thread structurally cannot know it (feedback is ≥2 frames stale by design). Draw data carries demand only; `VolumePass` reads residency from the pool it renders from and falls back to coarser SVO parents for not-yet-resident bricks — the virtual-texturing residency pattern.)*
 
 #### LightParams
 
@@ -1184,15 +1185,25 @@ struct MeshRenderer {
 }
 
 struct VolumeRenderer {
-    source:          Box<dyn VolumeSource>,
+    source:          VolumeSourceId,      // plain-data handle — generator registered with the Voxel Plugin
+    source_params:   VolumeSourceParams,  // per-entity generator inputs (seed, offset, …) — plain data
     bounds:          AABB,
     lod_policy:      LodPolicy,
     stream_priority: StreamPriority,
 }
 
+// Generators register once with the Voxel Plugin under a stable name; entities reference them
+// by handle — the same discipline as assets and behaviors. Saves reference sources by name,
+// exactly as they reference assets by path (OQ 20). One generator serves any number of entities.
+// (OQ 21, 2026-08-11: `source` was previously a `Box<dyn VolumeSource>` inside the component —
+// moved behind a handle to restore the plain-data component rule.)
+impl VoxelPlugin {
+    fn register_source(&mut self, name: &str, source: impl VolumeSource + 'static) -> VolumeSourceId;
+}
+
 trait VolumeSource: Send + Sync {
-    fn generate(&self, coord: BrickCoord, world_min: Vec3) -> Option<BrickData>;
-    fn bounds(&self) -> AABB;
+    fn generate(&self, params: &VolumeSourceParams, coord: BrickCoord, world_min: Vec3) -> Option<BrickData>;
+    fn bounds(&self, params: &VolumeSourceParams) -> AABB;
     fn lod_hint(&self) -> LodMeta;
 }
 ```
@@ -1776,7 +1787,9 @@ lands.
     `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
     full section of its own. The staging pool (OQ 5) is its upload backbone — brick uploads
     ride dedicated rings in the same subsystem, not generic `ResourceOp`s. Also owns the
-    world-region files that saves reference (OQ 20).
+    world-region files that saves reference (OQ 20). Inherited constraint (OQ 21): **residency
+    truth lives with the brick pool; the game thread expresses demand only** — the design must
+    specify the demand/fulfill protocol and the coarser-parent fallback behavior.
 18. **[RESOLVED 2026-08-11] UI.** Two-track stance: **dev/debug tooling = egui**, integrated
     now as a final render-graph pass over the post-processed image; the **game-facing UI
     framework** (retained widgets, layout, theming) is a committed post-v1 subsystem that gets
@@ -1794,10 +1807,13 @@ lands.
     region files. The registry is shared with replication (OQ 19) and future editor reflection.
     Implementation scheduled with the first save-game need. Spec: Serialization & Save Games
     (World Building).
-21. **Voxel Plugin data ownership.** `VolumeRenderer` holds `Box<dyn VolumeSource>` — behavior
-    inside a "plain data" component — and `VolumeDrawCommand.brick_residency` is produced at
-    extract while residency is streaming/GPU-side state. Decide which side owns residency; fold
-    into the Voxel Plugin / streaming design (with 17).
+21. **[RESOLVED 2026-08-11] Voxel Plugin data ownership.** Both halves resolved B: (1)
+    `VolumeRenderer.source` is a **`VolumeSourceId` handle** into a plugin-side generator
+    registry (stable names → serializable like asset paths; per-entity params as plain data) —
+    the plain-data component rule holds everywhere again. (2) **Residency truth lives with the
+    brick pool** (streaming side); the game thread expresses demand only; `brick_residency`
+    deleted from `VolumeDrawCommand`; `VolumePass` falls back through coarser SVO parents — the
+    virtual-texturing pattern. Demand/fulfill protocol design merged into OQ 17.
 22. **[RESOLVED 2026-08-11] GBuffer ID reconciliation.** The spec **cuts the per-frame ID
     target entirely** (GBuffer is six targets; ~4 B/px bandwidth saved). Gameplay picking = CPU
     BVH raycast; tools/editor = on-demand scissored pick pass writing tagged `PickId`s, returned
