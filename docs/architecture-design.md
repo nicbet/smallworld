@@ -41,13 +41,16 @@ Render:  │ render(N-1)         │ render(N)             │ render(N+1)
 
 ### Thread Model
 
-Three execution contexts, each with clear ownership boundaries:
+The execution contexts, each with clear ownership boundaries:
 
 | Context | Owns | Communicates via |
 |---------|------|------------------|
 | **Game Thread** (main) | World, Input, Time, Systems, AssetServer | Sends `FramePacket` (data) + lifecycle control channel (resize, quit — OQ 15) to Render Thread; receives `FrameFeedback` (N-2) |
 | **Render Thread** (dedicated) | GpuContext, RenderScene (retained draw data), RenderGraph, GPU resource pools, render targets | Receives `FramePacket`; sends `FrameFeedback` back |
 | **Worker Pools** (two: game + render, work-stealing) | Nothing persistent — borrow work items | Scoped tasks with `join()` / `parallel_for()`; split prevents priority inversion (OQ 16) |
+| **Streaming Coordinator** (dedicated, low-priority) | Demand priority queue, budget arbiter (OQ 17) | Demand channel in (Game); `UploadBatch` channel out (Render); dispatches tasks onto the worker/IO pools |
+| **Audio Thread** (dedicated) | Mixer, voices, output stream | Drains `AudioCommands` each frame |
+| **IO Pool** (blocking IO + decode) | Nothing persistent | Tasks from AssetServer and Streaming Coordinator; decodes directly into staging regions (OQ 5) |
 
 The worker pools are split (OQ 16): the **game pool** runs physics (the provider's internal parallelism binds here), animation sampling, and streaming demand computation; the **render pool** runs frustum culling, draw call sorting, and batch generation. The split prevents priority inversion — render-critical culling never queues behind physics islands — and costs little utilization because the 2-frame pipeline keeps both pools concurrently busy. A unified task-graph scheduler with declared dependencies and priorities is the v2 evolution (see Physics — Worker-Pool Split).
 
@@ -55,7 +58,7 @@ The worker pools are split (OQ 16): the **game pool** runs physics (the provider
 
 The pipeline is not one-directional. The Render Thread sends a `FrameFeedback` back to the Game Thread after each frame is submitted. This travels through a separate channel — the Game Thread typically reads feedback from frame N-2 while processing frame N. Never a synchronous wait.
 
-Feedback data has two ages. CPU-side data (cull statistics) describes the frame the feedback was sent after. GPU-derived data (timestamps, occlusion queries, compute readbacks) is older: at submit time the GPU has not yet executed the frame, so query results are collected through a **frames-in-flight readback ring** — 2–3 buffered query/readback sets, polled via `map_async` without blocking — and each GPU-derived datum is stamped with the frame it actually measures. The Render Thread never blocks on the GPU to assemble feedback.
+Feedback data has two ages. CPU-side data (cull statistics) describes the frame the feedback was sent after. GPU-derived data (timestamps, compute readbacks) is older: at submit time the GPU has not yet executed the frame, so query results are collected through a **frames-in-flight readback ring** — 2–3 buffered query/readback sets, polled via `map_async` without blocking — and each GPU-derived datum is stamped with the frame it actually measures. The Render Thread never blocks on the GPU to assemble feedback.
 
 ```
 time ──────────────────────────────────────────────────────▶
@@ -90,8 +93,9 @@ struct OcclusionFeedback {
 }
 
 enum ReadbackResult {
-    OcclusionQuery { source_frame: u64, entity: EntityId, visible_samples: u32 },
-    ComputeResult  { source_frame: u64, tag: u32, data: Vec<u8> },
+    // Generic tagged readback — pick results, exposure, debug captures. (A per-entity
+    // hardware-occlusion-query variant was cut: culling is HZB-based; nothing consumed it.)
+    ComputeResult { source_frame: u64, tag: u32, data: Vec<u8> },
 }
 ```
 
@@ -134,8 +138,15 @@ struct PacingConfig {
     vsync:                    bool,
     target_frame_time_ms:     Option<f32>,  // None = display refresh interval
     max_gpu_frames_in_flight: u8,           // default 1
-    drs:                      DrsConfig,    // { enabled, min_scale }
-    latency_mode:             LatencyMode,  // Standard | LowLatency (v2, tunable margins)
+    drs:                      DrsConfig,
+    latency_mode:             LatencyMode,
+}
+
+struct DrsConfig { enabled: bool, min_scale: f32 }
+
+enum LatencyMode {
+    Standard,    // v1: queue-depth throttle + DRS
+    LowLatency,  // v2: + predictive tick pacing (game-tunable margins)
 }
 ```
 
@@ -153,7 +164,7 @@ This is the only point where the Render Thread mutates its persistent state (GPU
 
 ### 2. Visibility & Culling
 
-Before anything is drawn, the engine determines what each view can see. Culling is CPU-driven in v1 (worker-pool parallel); GPU-driven culling with indirect draws is the sanctioned phase-2 path (OQ 7) and must slot in additively. Culling is **per-view**: the packet's main and auxiliary views, plus shadow views the Render Thread derives from the shadow-casting lights (cascade fitting against the main view — the equivalent of UE5's InitViews shadow setup). Each registered geometry renderer culls the retained scene per view via `renderer.cull()`, allowing geometry types to implement specialized strategies (e.g., octree traversal for volumes vs. flat AABB tests for meshes).
+Before anything is drawn, the engine determines what each view can see. Culling is CPU-driven in v1 (worker-pool parallel); GPU-driven culling with indirect draws is the sanctioned phase-2 path (OQ 7) and must slot in additively. Culling is **per-view**: the packet's main and auxiliary views, plus shadow views the Render Thread derives from the shadow-casting lights (cascade fitting against the main view — the equivalent of UE5's InitViews shadow setup). The **engine itself culls the shared mesh store** — it owns the store; flat AABB tests, worker-pool parallel. Each registered geometry renderer culls only its *custom-lane* retained data per view via `renderer.cull()`, allowing specialized strategies (e.g., octree traversal for volumes). `MeshBackend` therefore needs no renderer half at all — its geometry lives entirely in the engine-culled shared store.
 
 - **View setup.** Collect this frame's views: main camera, aux views (render-to-texture, probes), and one view per shadow cascade / shadowed local light.
 - **RT instance collection.** When RT is enabled, the TLAS instance list is gathered **before any per-view culling**, from the retained scene under its own, larger culling domain (an RT radius around the camera — off-screen geometry must still exist for shadows, reflections, and GI). See the Ray Tracing section.
@@ -166,7 +177,7 @@ Before anything is drawn, the engine determines what each view can see. Culling 
 
 *(OQ 14 resolution, 2026-08-11.)* All GPU vertex deformation — skinning first among it — runs once per frame in a compute stage before any geometry pass. Downstream, deformed geometry is indistinguishable from static geometry.
 
-- **Compute pre-skin (skin cache).** For each skinned instance visible in *any* view this frame (union of the per-view cull results), a compute dispatch applies the bone palette and writes deformed positions/normals/tangents into a per-instance output vertex buffer. Depth pre-pass, GBuffer, every shadow view, and BLAS refit all consume that buffer — skin once, consume everywhere; **one skinning implementation serves raster and RT.**
+- **Compute pre-skin (skin cache).** For each skinned instance in this frame's deformation domain — the union of the per-view cull results, **plus the RT-eligible set (inside the RT culling radius) when RT is active**, so BLAS refit never consumes stale vertices — a compute dispatch applies the bone palette and writes deformed positions/normals/tangents into a per-instance output vertex buffer. Depth pre-pass, GBuffer, every shadow view, and BLAS refit all consume that buffer — skin once, consume everywhere; **one skinning implementation serves raster and RT.**
 - **Deformers are an extension point.** Skinning is the built-in deformer; morph targets, cloth, and procedural deformation register as additional compute deformers writing the same output buffers (the UE5 Deformer Graph shape). Plugin-friendly by construction.
 - **Velocity via buffer aliasing — no shader permutations.** Geometry vertex shaders always read a `position_prev` attribute and multiply by `prev_world_matrix`. Rigid draws bind the *same* position buffer as `position_prev` (all motion comes from the matrix); deformed draws bind last frame's deformed output (pose motion), with the matrix carrying object motion. One shader, both cases, exact skinned motion vectors. Deformed outputs are double-buffered for this.
 - **Budgeted (Principle 5).** Deformed-output memory (~40 B/vertex × 2 buffers × instance) is a named budget; over budget → LOD down or cap deformed instances. There is deliberately **no vertex-shader fallback path** — one implementation, per the permutation-as-optimization-never-architecture rule; a fallback is added only if a shipped need demonstrates it.
@@ -234,7 +245,7 @@ Material identity has no dedicated storage anywhere — it is derivable: PickId 
 
 #### Deferred Decals (core feature, scheduled)
 
-*(OQ 13 resolution, 2026-08-11.)* Decals are a **core engine feature**, implemented as standard deferred GBuffer decals: projected box volumes rendered after opaque geometry and before lighting, reading depth to reconstruct the surface and blending albedo/normal/material contributions into the existing GBuffer targets (respecting `DrawFlags::RECEIVE_DECALS`). Normal blending decodes, blends, and re-encodes the octahedral normal target. The pass is purely additive over existing contracts — no new render targets, no downstream changes — which is why implementation is safely scheduled after the v1 rendering core lands without any design debt accruing in the meantime.
+*(OQ 13 resolution, 2026-08-11.)* Decals are a **core engine feature**, implemented as standard deferred GBuffer decals: projected box volumes rendered after opaque geometry and before lighting, reading depth to reconstruct the surface and blending albedo/normal/material contributions into the existing GBuffer targets (respecting `DrawFlags::RECEIVE_DECALS`). Albedo blending is **write-masked to RGB** — the alpha channel's shading-model/flag bits are never touched. Normal blending decodes, blends, and re-encodes the octahedral normal target. The pass is purely additive over existing contracts — no new render targets, no downstream changes — which is why implementation is safely scheduled after the v1 rendering core lands without any design debt accruing in the meantime.
 
 ### 6. Shadow Pass
 
@@ -413,10 +424,10 @@ Captures update amortized (one face or one prefilter mip per frame), so time-of-
 
 *(OQ 12 resolution, 2026-08-11.)* **Internal render resolution and display resolution are separate, first-class concepts.** All scene targets (GBuffer, HDR, froxels) allocate at internal resolution; the temporal resolve upscales; everything after it runs at display resolution. Dynamic resolution scaling is reserved in the contract: targets allocate at *maximum* internal resolution and render at a per-frame scale carried in `ViewParams` — the control loop that drives the scale is frame pacing's job (OQ 8).
 
-Pass order: temporal resolve/upscale → bloom → tone mapping → color grading → dev UI.
+Pass order: auto-exposure histogram → temporal resolve/upscale → bloom → tone mapping → color grading → dev UI. (The histogram reads the *pre-upscale* internal-res HDR buffer; its exposure output feeds both the temporal resolve and tone mapping.)
 
 - **Temporal resolve & upscale (TAAU).** TAA and upscaling are one pass: jittered internal-res samples accumulate into a display-res history via motion-vector reprojection. Native-res TAA is TAAU at scale 1.0 — one code path, not two. The resolve is a **replaceable render-graph node** with declared inputs (HDR color, depth, velocity, exposure, jitter sequence) — exactly the interface vendor upscalers expect. Roadmap: **FSR 2.2 (WGSL port) in v2** through this slot; **DLSS when wgpu support is practical** (third-party integration crates like `dlss_wgpu` exist today; NVIDIA + Vulkan only).
-- **Auto-exposure.** Histogram-based: a compute reduction over the *pre-upscale, internal-res* HDR buffer (same statistics, fewer pixels); average within percentile clamps — outlier-proof metering, a sun pixel or black corner can't hijack it; **asymmetric adaptation speeds** (dark-adaptation slower, matching eyes); EV compensation and metering mask as artist controls. `Exposure::Manual(ev)` is an explicit mode for cinematic control. The current exposure value rides `FrameFeedback` as an advisory (night-vision-style gameplay uses).
+- **Auto-exposure.** Histogram-based: a compute reduction over the *pre-upscale, internal-res* HDR buffer (same statistics, fewer pixels); average within percentile clamps — outlier-proof metering, a sun pixel or black corner can't hijack it; **asymmetric adaptation speeds** (dark-adaptation slower, matching eyes); EV compensation and metering mask as artist controls. `Exposure::Manual { ev }` is an explicit mode for cinematic control; the mode lives per-camera (`Camera::exposure`). The current exposure value rides `FrameFeedback` as an advisory (night-vision-style gameplay uses).
 - **Bloom.** Downsample bright regions (thresholds in exposed space), blur, composite back.
 - **Tone mapping.** HDR → SDR/display HDR via **ACES** (default filmic transform).
 - **Color grading.** Final LUT application.
@@ -458,7 +469,8 @@ trait GeometryRenderer: Send {
     // Apply this frame's delta payload to retained state; upload/update GPU resources.
     fn apply_delta(&mut self, delta: Box<dyn Any + Send>, state: &mut RenderState);
 
-    // Cull retained data for one view (frustum, HZB, distance). Called once per view.
+    // Cull this backend's CUSTOM-LANE retained data for one view. (The shared mesh store
+    // is culled by the engine itself — see Visibility & Culling.)
     fn cull(&self, view: &ViewParams, hzb: Option<&wgpu::TextureView>, out: &mut ViewDrawList);
 
     // Register the render passes this geometry type contributes.
@@ -469,8 +481,8 @@ trait GeometryRenderer: Send {
     fn tlas_contributor(&self) -> Option<&dyn TlasContributor> { None }
 }
 
-// Per-view culling output: visible members of the shared mesh stream, plus
-// backend-defined visible-set payloads consumed by the backend's own passes.
+// Per-view culling output. `mesh_draws` is filled by the ENGINE's shared-store culling;
+// `custom` is appended by each backend's cull() for its own passes to downcast.
 struct ViewDrawList {
     mesh_draws: Vec<DrawId>,               // indices into the shared mesh store
     custom:     Vec<Box<dyn Any + Send>>,  // downcast by the owning backend's passes
@@ -516,7 +528,7 @@ The set is intentionally small and grows only when a real backend needs a new in
 
 #### Built-in Backends
 
-The engine ships two backends. Both use the same extractor/renderer traits a game would.
+The engine ships two backends, using the same traits a game would. `MeshBackend` is the degenerate case: extractor-only — its geometry lives entirely in the engine-culled shared store, so it needs no renderer half.
 
 | Backend | Component | Shared mesh stream | Custom lane | Own passes | Shadow / RT participation |
 |---------|-----------|--------------------|-------------|------------|---------------------------|
@@ -652,13 +664,16 @@ struct FramePacket {
 }
 
 struct MeshDrawDelta {
-    upserts: Vec<(DrawId, MeshDrawCommand)>,  // spawned or changed draws
-    removes: Vec<DrawId>,                     // despawned draws
+    upserts:          Vec<(DrawId, MeshDrawCommand)>,     // spawned or changed draws
+    removes:          Vec<DrawId>,                        // despawned draws
+    instance_upserts: Vec<(InstanceSlot, InstanceData)>,  // transforms, fade — the hot lane
+    instance_removes: Vec<InstanceSlot>,
 }
 ```
 
 - **Owned and `Send`.** No references, no borrowed lifetimes. Once sent through the channel, the Game Thread is free to mutate the World.
 - **Delta-driven.** The extract step walks the `ChangeTracker`'s dirty sets; unchanged entities produce nothing. The retained `RenderScene` carries everything else across frames.
+- **The instance lane is the hot path.** `DrawId`s and `InstanceSlot`s are allocated game-side by the extract layer; a slot is stable for an instance's lifetime — the `PickId` contract depends on that stability. Transform changes and transition fades ride `instance_upserts` without touching commands; a moving entity costs one `InstanceData` write per frame, not a command rebuild.
 - **Read-only extraction.** The extract functions borrow `&World`, never `&mut World`.
 - **Extensible.** Each registered extractor writes into the shared mesh lane and/or its custom lane. The engine doesn't know what's inside a custom payload — it's opaque until the matching renderer half applies it.
 - **Shadow views are not in the packet.** The Render Thread derives them from `lights` + the main view during culling.
@@ -1083,6 +1098,7 @@ struct BehaviorContext<'a> {
     input:    &'a Input,
     time:     &'a Time,
     events:   &'a mut EventBus,
+    audio:    &'a mut AudioCommands,
     commands: &'a mut BehaviorCommands,  // deferred ops: the end-of-frame despawn queue
 }
 ```
@@ -1099,7 +1115,7 @@ Behavior instances live **outside** World component storage, in the `BehaviorHos
 | C/C++ | Dynamic library; stable **C ABI vtable** mirroring `Behavior` | Per-call accessor API (same surface as Lua) | No (trusted native code) | Same as Rust |
 | Lua (mlua, Lua 5.4) | VM owned by the `BehaviorHost`; instances are registry-keyed tables | Per-call accessor API | Yes | Serial — a property of the single VM, not of the contract |
 
-The **per-call accessor API** (`get`/`set` component, `spawn`, `despawn`, `emit`, queries) is one surface serving both foreign backends — C cannot borrow-check any more than Lua can hold borrows across calls, so every call is a fresh, checked borrow. **Soundness rule (Lua):** userdata only ever wraps plain handles and copies (`EntityId`, component values) — never borrowed references into the World.
+The **per-call accessor API** (`get`/`set` component, `spawn`, `despawn`, `emit`, audio commands, queries) is one surface serving both foreign backends — C cannot borrow-check any more than Lua can hold borrows across calls, so every call is a fresh, checked borrow. **Soundness rule (Lua):** userdata only ever wraps plain handles and copies (`EntityId`, component values) — never borrowed references into the World.
 
 #### Uniform Mutation Semantics (all backends)
 
@@ -1159,7 +1175,7 @@ struct EntityId {
 bitflags! {
     struct EntityFlags: u8 {
         const ACTIVE   = 0x01;  // participates in update
-        const VISIBLE  = 0x02;  // participates in rendering
+        const VISIBLE  = 0x02;  // participates in rendering — toggling emits draw upserts/removes through the delta stream
         const STATIC   = 0x04;  // hint: never moves (enables caching)
     }
 }
@@ -1212,6 +1228,7 @@ struct Camera {
     target:     RenderTargetRef,   // Screen, or an offscreen texture (RTT, probes)
     priority:   i32,               // ordering among active cameras (split-screen, PiP)
     active:     bool,
+    exposure:   Exposure,          // per-camera exposure (OQ 12)
 }
 
 enum Projection {
@@ -1220,6 +1237,11 @@ enum Projection {
 }
 
 enum RenderTargetRef { Screen, Texture(ResourceHandle<RenderTexture>) }
+
+enum Exposure {
+    Auto(AutoExposureParams),   // histogram metering — see Post-Processing
+    Manual { ev: f32 },         // cinematic / artistic control
+}
 ```
 
 A camera is an entity with a `Transform` and a `Camera` component — view matrices derive from its `WorldTransform`. Every active camera becomes a `ViewParams` entry in the `FramePacket`; multiple active cameras give split-screen and render-to-texture without special cases.
@@ -1292,6 +1314,27 @@ struct FogVolume {
     albedo:     Vec3,
     emission:   Vec3,
     anisotropy: f32,        // Henyey-Greenstein g, −1..1
+}
+```
+
+##### Physics
+
+Plain-data *descriptions* — the physics provider owns simulation state internally, linked by handle and rebuilt from these on load (see the Physics section).
+
+```rust
+struct RigidBody {
+    body_type: BodyType,   // Dynamic | Kinematic | Static
+    mass:      f32,
+    drag:      f32,
+    ccd:       bool,       // continuous collision detection for fast movers
+}
+
+struct Collider {
+    shape:       ColliderShape,   // Sphere | Capsule | Box | ConvexHull | TriMesh
+    friction:    f32,
+    restitution: f32,
+    layers:      CollisionLayers, // bitmask: collision filtering
+    sensor:      bool,            // trigger volume — events only, no collision response
 }
 ```
 
@@ -1397,9 +1440,8 @@ impl GameContext<'_> {
     fn register_system(&mut self, phase: Phase, system: impl System + 'static);
     fn set_draw_processor(&mut self, pass: &str, processor: impl DrawProcessor + 'static);
 
-    // Render feedback (see Frame Pipeline — Render-to-Game Feedback)
-    fn feedback(&self) -> Option<&FrameFeedback>;
-    fn gpu_frame_time(&self) -> f32;
+    // Render feedback — fn feedback(), fn gpu_frame_time(): defined in
+    // Frame Pipeline — Render-to-Game Feedback (not repeated here).
 }
 
 struct Time {
@@ -1489,7 +1531,7 @@ impl LoadedScene {
 }
 ```
 
-Compound assets (glTF, custom scene format) are loaded through the `AssetServer` and produce `LoadedScene` values that bulk-insert entities.
+Compound assets (glTF, custom scene format) are loaded through the `AssetServer` and produce `LoadedScene` values that bulk-insert entities. `LoadedScene` is an *import-time* product (DCC interchange); authored cells and saves use the OQ 20 document format — the two meet at spawn time, not on disk.
 
 #### Entity Hierarchy
 
@@ -1879,11 +1921,11 @@ The complete sequence of a single frame, showing which thread owns each phase.
 
 ## Open Questions
 
-The complete open-decision backlog from the 2026-08-11 review round. Items 1–6 are design
-decisions needing a follow-up discussion before implementation; items 7–20 need at least a
-documented stance (some are full subsystem designs); items 21–23 are doc/code reconciliation.
-The plan: resolve them one by one, in discussion — no implementation issues until a discussion
-lands.
+The decision backlog from the 2026-08-11 review round — **fully resolved as of 2026-08-11**.
+Entries are kept as decision records: each captures the choice, the rationale, the rejected
+alternatives, and where the spec lives. Deferred items *inside* resolutions (v2 tiers,
+capability-gated upgrades, scheduled hardening) carry their own explicit adoption triggers and
+need no separate tracking here.
 
 1. **[RESOLVED 2026-08-11] Volume depth writes & motion vectors.** Fragment-shader raymarch over
    rasterized per-object proxy AABBs with `frag_depth` export — one shader writes depth, the full
