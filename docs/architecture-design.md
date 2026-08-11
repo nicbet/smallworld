@@ -139,7 +139,7 @@ Before anything is drawn, the engine determines what each view can see. Culling 
 - **RT instance collection.** When RT is enabled, the TLAS instance list is gathered **before any per-view culling**, from the retained scene under its own, larger culling domain (an RT radius around the camera — off-screen geometry must still exist for shadows, reflections, and GI). See the Ray Tracing section.
 - **Frustum culling.** Test every draw command's world-space AABB against each view's frustum planes. Parallelized across the worker pool.
 - **Occlusion culling (HZB).** Using the Hierarchical Z-Buffer built from the previous frame's *final opaque depth* — all backends, not just meshes (see the GBuffer stage) — test remaining objects in the main view to discard those hidden behind large occluders.
-- **LOD selection.** For volumes and meshes with LOD levels, select the appropriate detail tier based on screen-space size or distance. Each backend owns its LOD strategy.
+- **LOD selection.** For volumes and meshes with LOD levels, select the appropriate detail tier based on screen-space size or distance. Each backend owns its LOD strategy. Selection uses **hysteresis** — separate up/down thresholds — so boundary-distance oscillation cannot ping-pong transitions; transitions themselves use the fade/dither contract (see the Mesh Drawing Pipeline) and **gate on residency** (see Streaming).
 - **Sort & batch.** Per view: opaque draws sorted front-to-back (minimize overdraw), transparent draws back-to-front. Draws sharing pipeline state are merged into instanced batches.
 
 ### 3. Deformation (`DeformPass`)
@@ -194,6 +194,11 @@ The lighting pass and everything downstream never knows which path produced a gi
 - **Camera inside a volume.** Rasterize proxy back faces; clamp the ray start to the near plane.
 - **Shadow casting.** The same shader compiled depth-only implements `ShadowCaster::render_shadow_depth` for each shadow view.
 - **Distant tiers** are extracted meshes on the shared mesh stream — no raymarching at all.
+
+**Volume LOD transitions (Voxel Plugin design — built entirely on public contracts, OQ 10):**
+
+- **Within the raymarched tier: distance-banded blending, clipmap-style.** LOD rings around the camera with fixed blend bands; inside a band the raymarcher samples both LOD levels and lerps density/material by the distance-derived factor. Stateless and continuous under camera motion — entirely private to the raymarch shader, no engine involvement. One time-based rider: a brick arriving *late* (residency-driven, not distance-driven) fades in over ~100–200 ms from its coarser parent, which the pinned-coarse invariant guarantees is present.
+- **The extracted↔raymarched handoff: convergence + complementary dither.** Convergence is a content rule — the extracted mesh for distance D is extracted *from the same coarse brick LOD* the raymarcher samples at D, so the handoff blends two renderings of nearly the same surface. The residual is hidden by a dithered cross-fade band: extracted-tier draws use the shared-stream `fade` field; the `VolumePass` dithers complementary via the public dither convention. Zero voxel-specific engine hooks — the API-sufficiency test passes again.
 
 **Capability-gated upgrade tier (deferred to the GPU-driven work, OQ 7).** A compute visibility-buffer variant — depth+payload packed via 64-bit atomic min/max (`Capabilities::int64_atomic_min_max`; on Metal this requires Apple M2-class "Nanite atomics") — is the sanctioned future optimization, not a rejected option. It is deferred because it needs its own coverage/binning and resolve machinery, the fragment path must exist for baseline hardware anyway, and its win is unproven for large-box proxies (Nanite's software raster exists to beat micro-triangle raster inefficiency, which volume proxies don't have). **Adoption trigger:** profiling shows the fragment path limiting on capable hardware, or variable-rate marching is needed.
 
@@ -696,10 +701,18 @@ struct MeshDrawCommand {
 struct InstanceData {
     world_matrix:      Mat4,
     prev_world_matrix: Mat4,       // for motion vectors
+    fade:              f32,        // 1.0 = fully present; < 1.0 = dithered LOD transition (OQ 10)
+    flags:             u32,        // bit 0: dither complement — inverts the screen-door pattern
 }
 ```
 
 This is the equivalent of UE5's `FMeshDrawCommand` — a fully stateless draw description that can be sorted, merged, and cached. Because the render side retains the mesh store across frames, static commands genuinely *are* cached: sorted batch lists for static geometry are rebuilt only when the store changes, not per frame. Unlike UE5, we don't have the intermediate `FMeshBatch` layer as a data structure — its cross-backend role is played by the shared mesh stream itself; the extract step produces final draw commands directly.
+
+#### LOD Transitions — the Fade/Dither Contract
+
+*(OQ 10 resolution, 2026-08-11 — core mechanism; transition policy belongs to each backend.)* Every pass that consumes the shared mesh stream (depth pre-pass, GBuffer, shadows) honors `InstanceData.fade` via **screen-door dithering**: a fragment is discarded when the dither threshold for its screen position exceeds `fade`, with the complement flag inverting the pattern. TAA resolves the stipple into a smooth cross-fade. A mesh LOD transition is therefore two temporary draws in the retained store — outgoing LOD fading out, incoming LOD fading in with the complement bit — upserted at transition start and collapsed to one when done (~150–300 ms window). Each screen pixel shows exactly one LOD at any instant, so depth and GBuffer stay consistent.
+
+**The dither convention (pattern + fade→threshold mapping) is public contract, not an engine internal** — plugin-owned passes must be able to dither *complementary to* shared-stream draws (the Voxel Plugin's tier handoff depends on this). Hard switches were tested and rejected (visible popping); geomorphing was tested and rejected (authoring-fragile, poor results unless perfect).
 
 #### VolumeDrawCommand
 
@@ -1413,7 +1426,7 @@ Engine-internal systems (transform propagation, streaming demand, change trackin
 
 #### Scenes & Levels
 
-A `World` contains all entities for the current level. Level transitions swap the entire World. For streaming open worlds, the engine supports region-based loading — entities within a geographic region are spawned and despawned based on camera distance.
+A `World` contains all entities for the current level. Level transitions swap the entire World. For streaming open worlds, the engine supports region-based loading — entities within a geographic region are spawned and despawned based on camera distance (see the Streaming section for the full two-layer design).
 
 ```rust
 struct LoadedScene {
@@ -1630,6 +1643,76 @@ Mutations through `World::get_mut<C>()` automatically mark the component dirty; 
 
 ---
 
+## Streaming
+
+*(OQ 17 resolution, 2026-08-11.)* Streaming is **two layers with different owners**, coordinated by demand signals and a single budget arbiter. Which *entities exist* is Game Thread World mutation; which *data is resident* is streaming-side truth (OQ 21). Conflating the two breaks the thread-ownership rules; splitting them is UE5's own shape (World Partition ∥ streaming pools).
+
+### Layer 1 — World Streaming (entities)
+
+The World Partition analog. Space divides into **uniform grid cells** — grids plural: independent grids per content class (e.g., 256 m gameplay entities, 1 km landmarks), each with its own cell size and load range; 2D partitioning by default, 3D as a config option. Uniformity is the point: O(1) cell lookup, stable cell identity (stable file names — what save references need), and predictable load sets (a source moving at speed *v* crosses a computable number of cell boundaries per second, so worst-case IO is budgetable).
+
+- **Entities auto-assign to cells by bounds**, with an `ALWAYS_LOADED` override for global entities.
+- **`StreamingSource` drives loading.** Players/cameras carry one; cells within range load (entities batch-spawn — per the existing load-time-spawn rule), cells out of range unload (batch-despawn). Range rings with hysteresis prevent boundary thrash.
+
+```rust
+struct StreamingSource {
+    range:    f32,   // load radius
+    priority: u8,    // arbiter class for demand originating from this source
+}
+```
+
+- **Cell content = OQ 20 documents: base + overlay.** The base is authored content or a generation cache; the overlay holds persistent runtime edits (destruction). Load = base ∪ overlay. Same serde document format as scenes and saves — one format for authored content, generated caches, and persistence. Cell files are named by grid coordinates: stable across sessions.
+- **HLOD proxies:** the contract is reserved (a cell may carry a far-proxy entity set); generation tooling is deferred.
+
+### Layer 2 — Detail Streaming (data residency)
+
+Which data for existing entities is resident, at what quality. **v1 client: voxel bricks.** Texture mip streaming and mesh LOD streaming are later clients of the *same* manager through the same thin client interface — designed for now, not retrofitted.
+
+#### The Demand/Fulfill Pipeline
+
+Every arrow is a channel; every stage uses machinery already specified:
+
+```
+Game LATE phase ── demand: (coord, wanted LOD, priority) ──▶ Streaming Coordinator
+Coordinator ── dispatch ──▶ io_pool: region-file read  |  worker pool: VolumeSource::generate
+tasks ── decode/write directly into ──▶ staging-pool regions (OQ 5)
+Coordinator ── UploadBatch ──▶ Render Thread PREPARE: record GPU copies, publish residency
+Render Thread ── FrameFeedback advisories (fulfilled / evicted / culled) ──▶ demand planner
+```
+
+- **The Streaming Coordinator is a dedicated low-priority thread** — it owns the priority queue and budget arbiter exclusively (thread-ownership applied, not excepted), and it is a *dispatcher, never a worker*: IO and decode run on the existing pools. Event-driven, parked when idle; completion-to-dispatch latency is microseconds, keeping the four-stage pipeline full instead of bubbling a frame per stage.
+- **Cancellation** is generation-stamped queue entries — when the camera turns, stale demand dies in the queue, not in flight.
+- **Residency publishes render-side** (brick pool tables) at copy-record time; the game thread only ever learns residency through advisory feedback, and never asserts it (OQ 21).
+
+#### The Residency Invariant
+
+**The coarse tier of everything is pinned resident** — SVO root/coarse bricks, lowest mips, far-tier extracted meshes. Every possible residency miss therefore has a rendering answer (fall back through coarser parents); the failure mode under any pressure is *blur, never holes, never stalls*. This is the virtual-texturing lesson applied engine-wide, and it is what makes every budget decision below safe to make.
+
+Eviction above the pinned tier: **priority classes** (pinned → active-view → shadow/aux-view → prefetch), **LRU within class**, hysteresis (freshly-uploaded and recently-requested entries are evict-protected for a cooldown).
+
+**LOD transitions gate on residency (OQ 10).** A fade-in never starts until the target LOD is resident; the demand rings *anticipate* transitions by requesting the next LOD one band before its transition distance. Fade-*down* is always possible unconditionally, courtesy of the pinned coarse tier. Transitions therefore never wait on IO and never pop because of it.
+
+#### Budgets
+
+Principle 5, cashed in: **GPU memory per pool, IO bandwidth, upload bytes per frame (= staging-ring capacity), and decode CPU time** are named budgets under one arbiter, allocated by priority class. Nothing streams "as fast as possible"; everything streams as fast as its budget.
+
+#### Generation Caching
+
+`VolumeSource` generation is deterministic, so caching is a per-source policy declared at registration — the cost profile belongs to the generator, not the engine (CPU PCG ranges from microseconds to seconds per brick, as prior experimentation showed):
+
+```rust
+enum GenerationPolicy {
+    Always,       // regenerate on demand — cheap sources outrun disk IO
+    CacheToDisk,  // generate once into region files — amortizes expensive generators
+}
+```
+
+- Cache key: `(source name, source version, params hash, brick coord)` — version bumps invalidate precisely and automatically.
+- **Contract rule:** `VolumeSource::generate` must be *pure* with respect to `(params, coord)` — required for cache coherence, and it keeps the fixed-tick determinism story (OQ 19) open for generated worlds.
+- **Edits are never cache.** Persistent modifications always live in the cell overlay, regardless of policy — the cache can be deleted wholesale at any time without losing player-visible state.
+
+---
+
 ## Frame Lifecycle
 
 The complete sequence of a single frame, showing which thread owns each phase.
@@ -1744,10 +1827,16 @@ lands.
    transparency stage near; the opaque `VolumePass` never renders media. Specs: Volumetrics and
    Transparency stages. Dependencies flagged into OQ 11 (env/fog params, translucent specular)
    and OQ 12 (upscaling vs. froxel/half-res media resolution).
-10. **Seamless LOD transitions.** LOD *selection* is specified; *transitions* are not:
-    cross-fade/dither for meshes, brick-resolution blending and the extracted-mesh↔raymarch
-    handoff for the Voxel Plugin. Decide whether the backend contract needs explicit transition
-    hooks or each backend owns it privately.
+10. **[RESOLVED 2026-08-11] Seamless LOD transitions.** Core/plugin split confirmed: **core
+    provides mechanism, backends own policy.** Core: per-instance `fade` + complement bit
+    honored by all shared-stream passes via a **public screen-door dither convention**, TAA as
+    resolver, selection hysteresis, and residency gating with demand anticipation (Streaming).
+    Mesh LODs: dithered cross-fade (hard switch and geomorphing both tested and rejected).
+    Voxel Plugin (private designs on public contracts): distance-banded dual-LOD blending in
+    the raymarched tier (clipmap-style, stateless) with late-arrival fade-in; handoff =
+    extract-from-same-LOD convergence + complementary dither band. Zero voxel-specific engine
+    hooks needed. Specs: LOD Transitions (Mesh Drawing Pipeline), Volume Rendering Mechanism,
+    Streaming.
 11. **[RESOLVED 2026-08-11] IBL & reflection probes.** Resolution "A′": environment pipeline
     (sky capture → GGX-prefiltered specular mips + SH9 irradiance + split-sum LUT, amortized
     updates) with **mandatory sky-visibility modulation** of the environment term — baseline
@@ -1783,13 +1872,15 @@ lands.
 16. **Physics architecture.** Engine choice (e.g., rapier), `Transform` sync, fixed-step
     ownership — plus worker-pool priorities: game physics jobs and render-critical culling jobs
     share one rayon pool today, with no protection against priority inversion.
-17. **Streaming.** Principle 5 promises budget arbitration; `BrickResidencyInfo` and
-    `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
-    full section of its own. The staging pool (OQ 5) is its upload backbone — brick uploads
-    ride dedicated rings in the same subsystem, not generic `ResourceOp`s. Also owns the
-    world-region files that saves reference (OQ 20). Inherited constraint (OQ 21): **residency
-    truth lives with the brick pool; the game thread expresses demand only** — the design must
-    specify the demand/fulfill protocol and the coarser-parent fallback behavior.
+17. **[RESOLVED 2026-08-11] Streaming.** Full two-layer design in the new **Streaming**
+    section. Six locked decisions: (1) two layers — World Streaming (entities, game side) ∥
+    Detail Streaming (data residency, streaming side); (2) uniform grid cells, grids plural,
+    2D default; (3) dedicated low-priority Streaming Coordinator thread — dispatcher, never a
+    worker, on the existing pools; (4) pinned coarse tier + class-LRU eviction with hysteresis
+    (blur, never holes); (5) cell content = OQ 20 documents, base + overlay; (6) per-source
+    `GenerationPolicy::Always | CacheToDisk` with pure-generation contract and cache keyed by
+    (name, version, params, coord). Upload backbone = staging pool (OQ 5); region files back
+    saves (OQ 20); residency truth with the brick pool, demand-only game side (OQ 21).
 18. **[RESOLVED 2026-08-11] UI.** Two-track stance: **dev/debug tooling = egui**, integrated
     now as a final render-graph pass over the post-processed image; the **game-facing UI
     framework** (retained widgets, layout, theming) is a committed post-v1 subsystem that gets
