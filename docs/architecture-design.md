@@ -47,9 +47,9 @@ Three execution contexts, each with clear ownership boundaries:
 |---------|------|------------------|
 | **Game Thread** (main) | World, Input, Time, Systems, AssetServer | Sends `FramePacket` (data) + lifecycle control channel (resize, quit — OQ 15) to Render Thread; receives `FrameFeedback` (N-2) |
 | **Render Thread** (dedicated) | GpuContext, RenderScene (retained draw data), RenderGraph, GPU resource pools, render targets | Receives `FramePacket`; sends `FrameFeedback` back |
-| **Worker Pool** (rayon, work-stealing) | Nothing persistent — borrows work items | Scoped tasks with `join()` / `parallel_for()` |
+| **Worker Pools** (two: game + render, work-stealing) | Nothing persistent — borrow work items | Scoped tasks with `join()` / `parallel_for()`; split prevents priority inversion (OQ 16) |
 
-The Worker Pool is shared between both threads. The Game Thread uses it for physics broadphase, animation sampling, and streaming demand computation. The Render Thread uses it for frustum culling, draw call sorting, and batch generation.
+The worker pools are split (OQ 16): the **game pool** runs physics (the provider's internal parallelism binds here), animation sampling, and streaming demand computation; the **render pool** runs frustum culling, draw call sorting, and batch generation. The split prevents priority inversion — render-critical culling never queues behind physics islands — and costs little utilization because the 2-frame pipeline keeps both pools concurrently busy. A unified task-graph scheduler with declared dependencies and priorities is the v2 evolution (see Physics — Worker-Pool Split).
 
 ### Render-to-Game Feedback
 
@@ -1753,6 +1753,55 @@ enum GenerationPolicy {
 
 ---
 
+## Physics
+
+*(OQ 16 resolution, 2026-08-11.)*
+
+### Provider Model
+
+Physics is a **provider behind one engine-shaped interface** — the same replaceable-node philosophy as the temporal resolve and the behavior backends. v1 provider: **rapier** (pure Rust, zero FFI, deterministic mode). Named up/side-grade candidates: **Jolt** (quality and scale headroom; C++ FFI) and PhysX. Swapping providers is a port of one module, never a rip-and-replace — because the interface obeys three rules that keep the swap real:
+
+1. **Shaped by engine consumption, never by provider wrapping.** Descriptions in (`RigidBody`/`Collider` components), transforms + events + query answers out. The interface covers what the engine *uses*, not the union of provider features.
+2. **No lowest-common-denominator bloat.** Provider-specific capability goes through a typed extension escape hatch (`provider.extension::<JoltExt>()`) — games use it knowingly, at their own portability cost; the core interface never grows to accommodate one provider.
+3. **Determinism is part of the contract.** A provider must offer a deterministic mode to be certified for fixed-tick use (the OQ 19 guarantee).
+
+```rust
+trait PhysicsProvider: Send {
+    // Lifecycle from component descriptions (change-tracker driven)
+    fn create_body(&mut self, entity: EntityId, body: &RigidBody, collider: &Collider,
+                   transform: &Transform) -> PhysicsHandle;
+    fn update_body(&mut self, handle: PhysicsHandle, body: &RigidBody);
+    fn destroy_body(&mut self, handle: PhysicsHandle);
+
+    // Simulation
+    fn step(&mut self, fixed_dt: f32);
+
+    // Sync-back: fixed-tick transforms + events out
+    fn drain_transforms(&mut self, out: &mut Vec<(EntityId, Transform)>);
+    fn drain_events(&mut self, out: &mut Vec<PhysicsEvent>);  // contacts, triggers
+
+    // Queries — the game-thread read API
+    fn raycast(&self, ray: Ray, filter: QueryFilter) -> Option<RayHit>;
+    fn sweep(&self, shape: &Shape, motion: &Motion, filter: QueryFilter) -> Option<SweepHit>;
+    fn overlap(&self, shape: &Shape, filter: QueryFilter) -> Vec<EntityId>;
+}
+```
+
+### Integration
+
+- **Physics steps exclusively in `fixed_update`** — determinism and solver stability both demand it. This closes the other half of OQ 6's interpolation contract: physics writes fixed-tick transforms; extract interpolates them.
+- **The physics world is a side structure.** `RigidBody` and `Collider` are plain-data *descriptions*; the provider owns simulation state internally, linked by handle, created/destroyed from the change tracker's spawn/dirty sets. Components stay serializable (OQ 20) — simulation state rebuilds from descriptions on load.
+- **Sync-back** after each fixed step goes through the normal `get_mut` path (change tracking fires naturally), storing prev-tick state for interpolation. `PhysicsEvent`s enter the double-buffered event bus.
+- **Queries** are the game-thread read API — OQ 22's gameplay raycasts ride this for collider-bearing entities.
+
+### Worker-Pool Split
+
+**v1: two pools** — a render pool and a game pool, sized by core count (configurable). Culling never waits on physics: with no preemption in any Rust task system, isolation is the only *guaranteed* fix for priority inversion. The classic utilization objection evaporates under our own architecture — the 2-frame pipeline runs game frame N+1 and render frame N concurrently, so both pools stay busy in steady state. The physics provider's internal parallelism binds to the game pool.
+
+**v2: a task-graph scheduler** — declared dependencies + priorities (the UE Task Graph analog), built on crossbeam's work-stealing primitives (`crossbeam-deque`, the same foundation rayon stands on). One future scheduler serves parallel systems (OQ 6), physics, and streaming decode alike.
+
+---
+
 ## Lifecycle
 
 *(OQ 15 resolution, 2026-08-11.)* Engine-level lifecycle: surface events, device loss, and shutdown.
@@ -1962,9 +2011,16 @@ lands.
     protocol** (simulate-stop → producer-quiesce with region-file flush → pipeline drain +
     GPU idle → services → destroy), channel-closure backstop, per-stage deadlines, never
     hangs. Staging pool and readback ring drain in stage 3 as required by OQ 5.
-16. **Physics architecture.** Engine choice (e.g., rapier), `Transform` sync, fixed-step
-    ownership — plus worker-pool priorities: game physics jobs and render-critical culling jobs
-    share one rayon pool today, with no protection against priority inversion.
+16. **[RESOLVED 2026-08-11] Physics architecture.** **Provider model**: one engine-shaped
+    `PhysicsProvider` interface (shaped by engine consumption, typed extension escape hatch,
+    determinism required for certification) — **rapier v1**, Jolt/PhysX as named up/side-grade
+    candidates, swap = one-module port. Integration: fixed-tick-only stepping (closes OQ 6's
+    interpolation contract), physics world as side structure with plain-data
+    `RigidBody`/`Collider` descriptions (OQ 20-serializable), sync-back via `get_mut`, events
+    into the double-buffered bus, queries as the game-thread read API (OQ 22 rides it).
+    **Worker pools: split game/render pools in v1** (isolation beats non-existent preemption;
+    the 2-frame pipeline keeps both busy); **crossbeam-based task-graph scheduler in v2**,
+    unified with parallel systems and streaming decode. Spec: Physics section.
 17. **[RESOLVED 2026-08-11] Streaming.** Full two-layer design in the new **Streaming**
     section. Six locked decisions: (1) two layers — World Streaming (entities, game side) ∥
     Detail Streaming (data residency, streaming side); (2) uniform grid cells, grids plural,
