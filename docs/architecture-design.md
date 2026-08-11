@@ -283,6 +283,7 @@ A full-screen compute dispatch evaluates deferred shading by reading the GBuffer
 - **Geometry and lighting are separate steps.** Direct light injects into voxels each frame (sun via the shadow cascades, locals via the cluster grid), so time-of-day *relights* without re-voxelizing; destruction re-voxelizes only touched clipmap regions.
 - **Consumers.** Cone-traced indirect diffuse feeds the GI slot (half-res + temporal, same dispatch pattern as RT GI). **Cone-traced sky visibility** from the same structure upgrades the OQ 11 baseline for *all* games (the bent-normal floor remains beneath it). **Rough-specular cones** slot into the reflection chain between SSR and the sky term — a middle rung it previously lacked.
 - **Costs, on the record.** Thin-wall light leaking is the classic VCT artifact (finer near cascades and occlusion cones mitigate it; nothing eliminates it); clipmap memory is a named budget (~100–200 MB across cascades); quality sits below Lumen-class GI.
+- **World-radiance role (OQ 3).** The clipmap is also the hit-radiance source for hardware RT (GI rays always; reflection rays when rough/distant), so it is maintained whenever *either* the software tier or RT effects are active — one representation, both paths, exactly the role Lumen's surface cache plays. The v2/v3 surface cache inherits this role for both paths in the same swap.
 
 The indirect-diffuse ladder in full: **hardware RT GI → screen traces + GI clipmap → sky SH × visibility floor** — every rung feeds the same public slots; changing rungs never touches a shader contract.
 
@@ -322,17 +323,17 @@ For each pixel in the GBuffer, cast one shadow ray toward each light source thro
 
 ##### RT Global Illumination (`RTGIPass`)
 
-Indirect lighting from light bounces. Cast rays outward from each GBuffer pixel based on a cosine-weighted hemisphere around the surface normal. `ray_query` returns instance and primitive indices on a hit; the shader then fetches the hit point's surface data manually — via a **surface cache** (radiance cached per surface texel, Lumen-style) or bindless vertex/material buffer access. There are no hit shaders under wgpu; this fetch path is a required piece of the design (see Open Questions).
+Indirect lighting from light bounces. Cast rays outward from each GBuffer pixel based on a cosine-weighted hemisphere around the surface normal. There are no hit shaders under wgpu — `ray_query` returns instance and primitive indices on a hit — so hit-point radiance comes from **sampling the GI clipmap at the hit position** *(OQ 3 resolution, 2026-08-11)*: the lit clipmap is the engine's world-radiance representation, serving hardware RT and software GI alike (the Lumen surface-cache role at voxel fidelity). Coarse radiance is fine here — the cosine integration blurs it regardless. **Rule: the GI clipmap is maintained whenever either the software GI tier *or* hardware RT effects are active.**
 
-- **Input:** GBuffer, TLAS, material data (surface cache or bindless fetch).
+- **Input:** GBuffer, TLAS, GI clipmap (hit radiance).
 - **Output:** `rt_gi` — Rgba16Float, indirect diffuse irradiance per pixel.
 - **Dispatch:** Half-resolution (one ray per 2×2 quad), spatially and temporally denoised, then upsampled. Full-resolution GI is too expensive for real-time; the denoiser fills in.
 
 ##### RT Reflections (`RTReflectionPass`)
 
-For pixels with low roughness, cast a reflection ray based on the GBuffer normal. Hit points are shaded and composited over the specular term.
+For pixels with low roughness, cast a reflection ray based on the GBuffer normal. Hit radiance is hybrid by ray character *(OQ 3)*: **rough or distant reflections sample the GI clipmap** (v1 — zero extra machinery); **sharp near reflections upgrade to bindless hit-shading** later — vertex/material fetch via binding arrays (capability-gated: `BUFFER_BINDING_ARRAY` / `TEXTURE_BINDING_ARRAY`), texture LOD via ray cones, with the noted caveat that off-screen hit points cannot use the view-space cluster grid and need a world-space light structure (or sun + IBL only) — deferred until sharp mirror quality demands it.
 
-- **Input:** GBuffer (normal, roughness, depth), TLAS.
+- **Input:** GBuffer (normal, roughness, depth), TLAS, GI clipmap (hit radiance).
 - **Output:** `rt_reflections` — Rgba16Float, reflected radiance per pixel.
 - **Dispatch:** Selective — only pixels below a roughness threshold. SSR runs regardless (it is always-on in the specular chain); RT results replace SSR where rays were traced. Rough surfaces and non-RT hardware resolve through SSR → probes → sky × visibility (see the Lighting Pass specular chain).
 
@@ -1815,9 +1816,13 @@ lands.
    optional-input-slot mechanism**: the implementation of every public input slot (GI, shadow
    masks, sky visibility, future slots). Pipeline permutations remain a targeted optimization
    behind a profiling trigger. Spec: Render Graph — Optional Input Slots.
-3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
-   reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
-   vertex/material access. Required before RT GI/reflections can be implemented.
+3. **[RESOLVED 2026-08-11] Hit-point radiance (was: surface cache).** Hybrid by ray character,
+   staged: **v1 — all RT hits sample the GI clipmap** (the lit clipmap is the engine's
+   world-radiance representation, maintained whenever software GI *or* RT is active; Lumen's
+   surface-cache role at voxel fidelity, zero marginal machinery). **Later — bindless
+   hit-shading for sharp near reflections** (binding arrays, ray-cone LOD; capability-gated),
+   with the world-space-light-structure caveat noted for off-screen hits. The v2/v3 surface
+   cache inherits the role for both paths. Spec: RT GI / RT Reflections / Software GI Tier.
 4. **[RESOLVED 2026-08-11] Core software-GI tier.** Technique: **screen traces + cascaded
    voxel cone tracing over an engine-owned lighting-domain GI clipmap** (SVOGI family; KCD 1/2
    precedent). Geometry via conservative raster of the shared mesh stream; plugins inject
