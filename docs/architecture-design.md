@@ -119,6 +119,26 @@ EngineConfig {
 
 In lockstep mode, CPU-side feedback arrives from the immediately preceding frame instead of N-2 (GPU-derived data still trails by the readback ring depth), but the game thread stalls until the render thread finishes — the same bottleneck UE5 documents with `r.OneFrameThreadLag 0`.
 
+### Frame Pacing & Latency Control
+
+*(OQ 8 resolution, 2026-08-11.)* Three control loops, all consuming machinery that already exists — `GpuTimingFeedback`, the readback ring's completion tracking, and `ViewParams.resolution_scale`. No new cross-thread channels.
+
+1. **GPU queue-depth throttle (v1).** The Render Thread waits on the GPU-completion signal for frame N−1 before submitting N+1, capping GPU frames in flight at `max_gpu_frames_in_flight` (default 1). Worst-case input latency becomes bounded and deterministic instead of driver-dependent — the Maximum Frame Latency analog. A correctness floor with no downside.
+2. **Dynamic resolution controller (v1).** Consumes GPU frame time vs. `target_frame_time` and adjusts `resolution_scale` within `[min_scale, 1.0]`: **asymmetric response** (drop resolution fast on overrun, recover slowly), a **hysteresis band** (no oscillation around the target), **step-limited** changes (TAAU history stays valid). Strategic effect: the GPU stays inside budget, so loop 1 rarely engages and pacing stays smooth rather than reactive.
+3. **Predictive tick pacing (v2 — `LatencyMode::LowLatency`, game-tunable).** Delays the game tick so input sampling happens as late as possible: a computed sleep before the INPUT phase from predicted GPU time + safety margin (Reflex-style). Tuning-sensitive — an optimistic margin misses vsync — hence flag-gated, with margins exposed to games, shipped once real content exists to calibrate against.
+
+`PipelineMode::Lockstep` remains the blunt instrument for genuinely latency-critical applications; with these loops, Overlapped mode is latency-competitive for everything else.
+
+```rust
+struct PacingConfig {
+    vsync:                    bool,
+    target_frame_time_ms:     Option<f32>,  // None = display refresh interval
+    max_gpu_frames_in_flight: u8,           // default 1
+    drs:                      DrsConfig,    // { enabled, min_scale }
+    latency_mode:             LatencyMode,  // Standard | LowLatency (v2, tunable margins)
+}
+```
+
 ---
 
 ## The Render Thread
@@ -1390,9 +1410,9 @@ struct WindowState {
 struct EngineConfig {
     title:           String,
     window_mode:     WindowMode,
-    vsync:           bool,
     fixed_timestep:  f32,        // default 1/60
     pipeline_mode:   PipelineMode,
+    pacing:          PacingConfig,   // vsync, target frame time, DRS, latency mode (OQ 8)
     render_budget:   RenderBudget,
     log_level:       LogLevel,
 }
@@ -1742,7 +1762,7 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | **PREPARE** | Apply `ResourceOp`s and scene deltas — upload resources, update the retained `RenderScene` |
 | **CULL** | Derive shadow views; collect TLAS instances (pre-cull); per-view frustum + occlusion culling; produce sorted, batched draw lists |
 | **RECORD** | Render graph executes: each pass records GPU commands |
-| **SUBMIT** | `queue.submit()` — command buffers sent to hardware |
+| **SUBMIT** | Throttle on GPU queue depth (`max_gpu_frames_in_flight` — OQ 8), then `queue.submit()` |
 | **PRESENT** | Swapchain present. Send `FrameFeedback`. Loop back to RECEIVE |
 
 ### Ownership Boundaries
@@ -1821,9 +1841,13 @@ lands.
    design turns out to demand contract rework, that rework returns to discussion before
    implementation. Adoption trigger: profiling shows CPU culling or draw submission limiting at
    target scene scales.
-8. **Frame pacing & latency control.** Beyond `PipelineMode::Lockstep` there is no story: no
-   GPU-bound throttling policy, no maximum-frames-in-flight control at the present layer, no
-   Reflex-style pacing. Decide what v1 ships and what the config surface looks like.
+8. **[RESOLVED 2026-08-11] Frame pacing & latency control.** Three control loops on existing
+   machinery: (1) **GPU queue-depth throttle** (v1 — bounded deterministic latency, default 1
+   frame in flight); (2) **DRS controller** (v1 — GPU time vs. target drives
+   `resolution_scale`; asymmetric, hysteresis-banded, step-limited); (3) **predictive tick
+   pacing** (v2 — Reflex-style, `LatencyMode::LowLatency`, margins game-tunable, calibrated
+   against real content). `PacingConfig` in `EngineConfig`; Lockstep remains the blunt
+   instrument. Spec: Frame Pacing & Latency Control (Frame Pipeline).
 9. **[RESOLVED 2026-08-11] Translucency lighting & volumetrics.** Three-part resolution:
    (1) transparent surfaces shade via Clustered Forward+ reusing the deferred light grid, shadow
    atlas, and shading models, with refraction from `scene_color_copy` and no OIT in v1;
