@@ -377,11 +377,14 @@ Captures update amortized (one face or one prefilter mip per frame), so time-of-
 
 ### 12. Post-Processing
 
-Camera-lens effects applied to the HDR image:
+*(OQ 12 resolution, 2026-08-11.)* **Internal render resolution and display resolution are separate, first-class concepts.** All scene targets (GBuffer, HDR, froxels) allocate at internal resolution; the temporal resolve upscales; everything after it runs at display resolution. Dynamic resolution scaling is reserved in the contract: targets allocate at *maximum* internal resolution and render at a per-frame scale carried in `ViewParams` — the control loop that drives the scale is frame pacing's job (OQ 8).
 
-- **Temporal Anti-Aliasing (TAA).** Jittered projection + motion vectors + history buffer to resolve sub-pixel detail and reduce aliasing.
-- **Bloom.** Downsample bright regions, blur, composite back.
-- **Tone mapping.** HDR → SDR/display HDR via ACES or Reinhard.
+Pass order: temporal resolve/upscale → bloom → tone mapping → color grading → dev UI.
+
+- **Temporal resolve & upscale (TAAU).** TAA and upscaling are one pass: jittered internal-res samples accumulate into a display-res history via motion-vector reprojection. Native-res TAA is TAAU at scale 1.0 — one code path, not two. The resolve is a **replaceable render-graph node** with declared inputs (HDR color, depth, velocity, exposure, jitter sequence) — exactly the interface vendor upscalers expect. Roadmap: **FSR 2.2 (WGSL port) in v2** through this slot; **DLSS when wgpu support is practical** (third-party integration crates like `dlss_wgpu` exist today; NVIDIA + Vulkan only).
+- **Auto-exposure.** Histogram-based: a compute reduction over the *pre-upscale, internal-res* HDR buffer (same statistics, fewer pixels); average within percentile clamps — outlier-proof metering, a sun pixel or black corner can't hijack it; **asymmetric adaptation speeds** (dark-adaptation slower, matching eyes); EV compensation and metering mask as artist controls. `Exposure::Manual(ev)` is an explicit mode for cinematic control. The current exposure value rides `FrameFeedback` as an advisory (night-vision-style gameplay uses).
+- **Bloom.** Downsample bright regions (thresholds in exposed space), blur, composite back.
+- **Tone mapping.** HDR → SDR/display HDR via **ACES** (default filmic transform).
 - **Color grading.** Final LUT application.
 - **Dev/debug UI.** egui renders as a final render-graph pass over the post-processed image (dev tooling — OQ 18).
 
@@ -639,6 +642,7 @@ struct ViewParams {
     near:            f32,
     far:             f32,
     jitter:          Vec2,       // TAA sub-pixel jitter (main view only)
+    resolution_scale: f32,       // dynamic-resolution scale for internal-res targets (1.0 = full; OQ 12)
 }
 
 enum ViewKind {
@@ -891,6 +895,8 @@ struct GpuMaterialEntry {
 
 ```rust
 struct RenderTargets {
+    // Scene targets allocate at MAXIMUM internal resolution; DRS renders at
+    // ViewParams.resolution_scale via viewport. Post-upscale targets are display-res. (OQ 12)
     // Core
     depth:            wgpu::Texture,  // D32Float
     depth_mesh_copy:  wgpu::Texture,  // R32Float — mesh pre-pass depth snapshot (VolumePass early-out)
@@ -1847,11 +1853,15 @@ lands.
     height-fog rider); transparent env term paid; `ReflectionProbe` spec'd but deferred —
     trigger: *authored* interiors. Specs: Environment Capture & IBL (Sky stage), Lighting Pass
     chains, Core Engine Components.
-12. **Post chain completeness.** Auto-exposure (eye adaptation) and temporal upscaling
-    (TSR/FSR-class — the biggest per-pixel performance lever for expensive raymarching) are both
-    absent; both restructure the post-processing section (internal vs. display resolution). The
-    upscaling decision must account for the froxel grid and half-res hero-media reconstruction
-    (OQ 9 rider).
+12. **[RESOLVED 2026-08-11] Post chain completeness.** Internal vs. display resolution split
+    made first-class (scene targets at internal res; DRS reserved via
+    `ViewParams.resolution_scale`, control loop owed to OQ 8). **TAAU in-house for v1** — TAA
+    and upscaling as one temporal resolve, native = scale 1.0, spec'd as a replaceable graph
+    node; **FSR 2.2 (WGSL) in v2** through that slot; **DLSS when practical in wgpu**
+    (`dlss_wgpu`-style interop; NVIDIA + Vulkan). **Auto-exposure**: histogram with percentile
+    clamps + asymmetric adaptation, `Manual(ev)` mode, advisory via feedback. Tone mapping
+    defaults to **ACES**. Froxel and hero-media buffers count as internal-res scene targets
+    (the OQ 9 rider resolves with the split). Spec: Post-Processing stage.
 13. **[RESOLVED 2026-08-11] Decals.** Core engine feature, shipped as standard **deferred
     GBuffer decals** — projected boxes after opaque geometry, before lighting, blending into
     existing targets. Contract touches done now: `DrawFlags::RECEIVE_DECALS` reserved;
