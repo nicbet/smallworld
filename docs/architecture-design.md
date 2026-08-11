@@ -1190,7 +1190,7 @@ These are the components the engine defines and understands. Games can define ad
 
 ```rust
 struct Transform {
-    position: Vec3,
+    position: DVec3,   // f64 — large-world coordinates (OQ 30)
     rotation: Quat,
     scale:    Vec3,
 }
@@ -1796,6 +1796,19 @@ enum GenerationPolicy {
 
 ---
 
+## Large-World Coordinates
+
+*(OQ 30 resolution, 2026-08-11.)* f32 breaks at planet scale — ~1 mm ULP at 10 km, ~1 cm at 100 km: vertex crawl, physics jitter, quantized gameplay truth. The answer is **f64 world space CPU-side with cell-anchored rendering** — UE5 LWC's direction, refined by our own streaming grid:
+
+- **`Transform.position` is f64** (`DVec3`); rotation and scale stay f32 (their magnitudes never grow). `WorldTransform` translation is f64. View matrices are camera-relative (zero translation); the camera position rides `ViewParams` in f64.
+- **Cell-anchored rendering preserves the retained scene.** Instance translations are stored **cell-local f32**, relative to their streaming cell's anchor — static, retained forever. Each frame, extract computes one f64 `(cell_anchor − camera)` offset **per cell**, not per instance; the vertex shader adds `pos_cell_local + cell_offset`, both bounded by streaming range and f32-safe. Naive per-instance camera-relative extraction was rejected — it would rewrite the entire retained instance buffer every frame, destroying the static-costs-zero property. The streaming grid provides anchors for free; integer cell coordinates are exact by construction.
+- **Origin rebasing rejected:** a rebase rewrites every retained instance, cached bound, and physics body in one atomic event — a guaranteed hitch or smeared complexity — and it is hostile to future netcode (per-client origins vs. one canonical server frame). **Camera-relative-only with f32 world rejected:** it fixes rendering but leaves gameplay and physics truth quantized.
+- **Physics runs the provider's double-precision mode** (rapier's f64 feature; Jolt's double-precision build) — f64 support joins determinism as a provider certification requirement (Physics — Provider Model, rule 3).
+- **Cost honesty:** f64 halves SIMD lanes for transform propagation and culling math; mitigated by keeping only translations wide and using SoA layouts.
+- **Always-on — no precision mode.** UE5 made LWC unconditional for the right reason: a precision *mode* is a permanently under-tested code path. Flat-world games pay a negligible cost; the engine has one coordinate story.
+
+---
+
 ## Resource Pipeline & Filesystem
 
 *(OQ 27 resolution, 2026-08-11.)* The offline half of assets; the runtime half (AssetServer, staging pool, streaming) is specified elsewhere. Engine/game split: the pipeline, database, VFS, and caches are pure engine; games contribute custom importers and cooked formats.
@@ -1881,7 +1894,7 @@ Physics is a **provider behind one engine-shaped interface** — the same replac
 
 1. **Shaped by engine consumption, never by provider wrapping.** Descriptions in (`RigidBody`/`Collider` components), transforms + events + query answers out. The interface covers what the engine *uses*, not the union of provider features.
 2. **No lowest-common-denominator bloat.** Provider-specific capability goes through a typed extension escape hatch (`provider.extension::<JoltExt>()`) — games use it knowingly, at their own portability cost; the core interface never grows to accommodate one provider.
-3. **Determinism is part of the contract.** A provider must offer a deterministic mode to be certified for fixed-tick use (the OQ 19 guarantee).
+3. **Determinism and precision are part of the contract.** A provider must offer a deterministic mode to be certified for fixed-tick use (the OQ 19 guarantee), and a double-precision mode for large-world coordinates (OQ 30).
 
 ```rust
 trait PhysicsProvider: Send {
@@ -2346,14 +2359,16 @@ surfaced as a missing subsystem, and large-world coordinates escalated from the 
     `EnvironmentParams::wind`, deliberately not the DeformPass. Persistence per OQ 17/20.
     `ScatterSurface` trait engine-owned; the Voxel Plugin implements it via V6. Spec:
     Vegetation & PCG section.
-30. **Large-world coordinates.** Escalated from Voxel Plugin V2: planet-scale worlds break
-    `f32` — visible transform jitter beyond ~10 km from origin (UE5 built Large World
-    Coordinates for exactly this). Candidate shape: **f64 world-space transforms CPU-side +
-    camera-relative rendering GPU-side** — extract subtracts the camera position, so shaders
-    see camera-local f32 and GPU cost never doubles. Touches `WorldTransform`, extract,
-    physics (provider f64 support), streaming cell coordinates, and listener math.
-    Alternatives to weigh: UE-style LWC doubles throughout vs. periodic origin rebasing vs.
-    camera-relative-only with f32 world space.
+30. **[RESOLVED 2026-08-11] Large-world coordinates.** **B′ — f64 world space CPU-side +
+    cell-anchored rendering**: `Transform.position` is `DVec3`; instance translations stored
+    cell-local f32 (static, retained); one f64 `(anchor − camera)` offset per cell per frame —
+    the retained scene's static-costs-zero property survives, which naive camera-relative
+    extraction would have destroyed. Origin rebasing rejected (rewrites the retained world
+    atomically; netcode-hostile); camera-relative-only rejected (gameplay truth stays
+    quantized). Physics providers must offer double-precision (certification rule 3 amended).
+    Always-on — no precision mode (the UE5 LWC lesson). Spec: Large-World Coordinates
+    section.
+31. **Atmosphere, clouds & weather.** Opened 2026-08-11 — see the discussion in flight.
 19. **[RESOLVED 2026-08-11] Networking.** Explicitly **out of scope for v1**, with the hooks
     accounted for now: `fixed_update` is the deterministic tick (with the engine guarantee that
     no engine system introduces nondeterminism into fixed-tick simulation — see The App Trait),
