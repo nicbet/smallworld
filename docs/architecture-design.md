@@ -203,16 +203,31 @@ Light types:
 - **Point and spot lights** render into atlas sub-regions.
 - **Virtual shadow maps** (future) would cache static shadow pages and only re-render where dynamic objects move.
 
-### 6. Lighting Pass (Deferred Shading)
+### 6. Volumetrics (Froxel Media)
+
+*(OQ 9 resolution, 2026-08-11.)* Participating media — global fog, local fog volumes, plugin-injected media — is computed in a frustum-aligned voxel grid (**froxels**) and applied wherever depth is known. Pure compute, no capability gates. The classic four-stage pipeline (Assassin's Creed 4 / Frostbite / UE5 Volumetric Fog):
+
+1. **Density injection.** Global exponential height fog (from `EnvironmentParams`) and `FogVolume` entities are splatted into the grid (density, albedo, emission, phase). Injection is a **public contract**: plugins and games register injector passes that add density/emission — the Voxel Plugin's far-tier smoke uses exactly this.
+2. **Froxel lighting.** Per froxel: sample the clustered light grid + shadow atlas, evaluate in-scattering with a Henyey-Greenstein phase function.
+3. **Temporal blend.** Reproject and blend with the previous frame's froxel volume (jittered sampling).
+4. **Integration.** Front-to-back accumulation into a scattering/transmittance volume.
+
+Consumers sample the integrated volume by pixel depth: the lighting pass applies it to all opaque pixels (meshes and raymarched volumes alike — both are in the GBuffer), the sky pass applies the far-field value, and translucent draws sample it in their forward shaders. Default grid ~160×90×64, quality-tiered, Rgba16Float. The froxel volume is **always bound** (cheap when empty), sidestepping the optional-binding question of OQ 2 for fog.
+
+### 7. Lighting Pass (Deferred Shading)
 
 A full-screen compute dispatch evaluates deferred shading by reading the GBuffer, shadow atlas, and light buffer. Each pixel's lighting response is selected by its GBuffer shading model ID — `Standard` is Cook-Torrance PBR; other registered models (toon, foliage, unlit) branch here.
 
 - **Clustered light assignment.** Screen-space tiles × depth slices. Lights are assigned to clusters on the CPU. Each cluster stores up to 32 light indices.
 - **Shadow evaluation.** Percentage-closer filtering (PCF) samples the shadow atlas per light.
-- **Pluggable indirect inputs.** The lighting pass declares public input slots for an indirect-diffuse (GI) texture and per-light shadow masks. Engine RT passes feed them when hardware RT is available — but they are a **public render-graph contract**: a plugin (e.g., the Voxel Plugin's SVO-traced GI) or a future software-GI tier can feed the same slots without touching the lighting pass.
+- **Pluggable indirect inputs.** The lighting pass declares public input slots for an indirect-diffuse (GI) texture, per-light shadow masks, and **sky visibility**. Engine RT passes feed the first two when hardware RT is available — but all are a **public render-graph contract**: a plugin (e.g., the Voxel Plugin's SVO-traced GI and sky visibility) or a future software-GI tier feeds the same slots without touching the lighting pass. This is the GI upgrade path: each slot progressively supersedes the fallback below it.
+- **Indirect diffuse chain** *(OQ 11)*: GI input slot when fed (RT GI, plugin GI) → sky SH9 irradiance × AO × sky visibility → constant ambient.
+- **Indirect specular chain** *(OQ 11)*: RT reflections → SSR (**always-on**, not RT-gated) → local reflection probes (when present — deferred feature) → prefiltered sky cubemap × sky visibility.
+- **Sky visibility is mandatory.** The environment term — specular *and* diffuse — is always modulated by a sky-visibility factor, so interiors go dark instead of sky-mirrored. Baseline (core): bent-normal/SSAO-derived specular occlusion — screen-space, no authoring, works for any game. Upgrade (public slot): the Voxel Plugin traces directional sky visibility against the SVO — exact and destruction-proof (carve the roof open; visibility updates the same frame).
+- **Fog application.** Sample the integrated froxel volume at each pixel's depth and apply scattering/transmittance (see Volumetrics).
 - **Output.** HDR lighting result written to an Rgba16Float texture.
 
-### 7. Ray Tracing (Secondary Effects)
+### 8. Ray Tracing (Secondary Effects)
 
 Smallworld follows UE5's hybrid rendering model: rasterization handles primary visibility (what the camera sees), ray tracing handles secondary effects (how light bounces, reflects, and casts shadows). Rasterization writes the GBuffer; ray tracing reads it.
 
@@ -258,7 +273,7 @@ For pixels with low roughness, cast a reflection ray based on the GBuffer normal
 
 - **Input:** GBuffer (normal, roughness, depth), TLAS.
 - **Output:** `rt_reflections` — Rgba16Float, reflected radiance per pixel.
-- **Dispatch:** Selective — only pixels below a roughness threshold. Fallback to screen-space reflections (SSR) for rough surfaces or when RT is unavailable.
+- **Dispatch:** Selective — only pixels below a roughness threshold. SSR runs regardless (it is always-on in the specular chain); RT results replace SSR where rays were traced. Rough surfaces and non-RT hardware resolve through SSR → probes → sky × visibility (see the Lighting Pass specular chain).
 
 #### Compositing into Lighting
 
@@ -308,15 +323,31 @@ If the RT passes aren't registered (because `ray_query` is false), the lighting 
 
 The GI fallback is a **conscious v1 quality cliff**: UE5's Lumen degrades through a *software* ray-tracing tier (distance fields) before reaching this point. Smallworld core does not assume any particular scene structure — the SVO belongs to the Voxel Plugin, which core cannot depend on — so a general software-GI tier (SDF scene or screen-space GI) is deferred; see Open Questions. Voxel-heavy games get a better fallback from the Voxel Plugin's SVO-traced GI, delivered through the lighting pass's public input slots.
 
-### 8. Sky & Atmosphere
+### 9. Sky & Atmosphere
 
-Rendered into the HDR target where depth equals the far plane. Atmosphere scattering, procedural sky, or skybox cubemap.
+Rendered into the HDR target where depth equals the far plane. Atmosphere scattering, procedural sky, or skybox cubemap. Applies the froxel volume's far-field scattering for atmospheric consistency with fogged geometry.
 
-### 9. Transparency
+#### Environment Capture & IBL
 
-Objects with alpha blending are rendered in a forward pass, sorted back-to-front. They sample the HDR lighting buffer for correct compositing but cannot write to the GBuffer.
+*(OQ 11 resolution, 2026-08-11.)* The sky is also the engine's image-based light source. The environment pipeline maintains three artifacts:
 
-### 10. Post-Processing
+- **Prefiltered specular cubemap.** The sky (procedural or HDRI, per `EnvironmentParams::sky`) is captured to a cubemap and GGX-prefiltered into a roughness → mip chain.
+- **SH9 irradiance.** The same capture projected onto 9 spherical-harmonic coefficients — the diffuse ambient term.
+- **Split-sum BRDF LUT.** Generated once at startup.
+
+Captures update amortized (one face or one prefilter mip per frame), so time-of-day costs a bounded slice of the frame budget. Consumers: the lighting pass (indirect chains), forward transparents (same prefiltered set), and the froxel lighting's ambient term. Local `ReflectionProbe`s (deferred — see Core Engine Components) reuse this exact capture/prefilter machinery at probe positions via aux views.
+
+### 10. Transparency
+
+*(OQ 9 resolution, 2026-08-11.)* Objects with alpha blending render in a forward pass over the completed opaque image (lighting + sky). They cannot write to the GBuffer.
+
+- **Clustered Forward+ lighting.** Transparent fragments shade with the same Cook-Torrance BRDF, the same clustered light grid, the same shadow atlas, and the same registered shading models as the deferred path — one light structure, two consumers, so lighting matches across the opaque/transparent boundary. The specular environment term is the same prefiltered sky set × sky visibility (see Environment Capture & IBL).
+- **Refraction.** Glass and water sample `scene_color_copy` — an HDR snapshot taken after lighting + sky. A pass cannot sample the target it blends into.
+- **Fog.** Each transparent fragment samples the integrated froxel volume at its depth.
+- **Sorting.** Back-to-front per draw. No OIT in v1 — interpenetration artifacts are accepted (the shipped-game norm); weighted-blended OIT is a future quality knob.
+- **Translucent media ≠ surface transparency.** Smoke/fire-like media renders in this stage but through different machinery: near-field hero media in plugin-owned raymarch passes (front-to-back march lit by the cluster grid + shadow atlas, composited by transmittance against scene depth — reads `depth`, never writes it), far-field media injected into the froxel grid. The opaque `VolumePass` is never used for media.
+
+### 11. Post-Processing
 
 Camera-lens effects applied to the HDR image:
 
@@ -325,7 +356,7 @@ Camera-lens effects applied to the HDR image:
 - **Tone mapping.** HDR → SDR/display HDR via ACES or Reinhard.
 - **Color grading.** Final LUT application.
 
-### 11. Present
+### 12. Present
 
 The final image is blitted to the swapchain surface. The Render Thread loops back to receive the next `FramePacket`.
 
@@ -652,6 +683,37 @@ struct LightParams {
 }
 ```
 
+#### EnvironmentParams
+
+*(Defined as part of the OQ 11 resolution; carries the OQ 9 height-fog rider.)*
+
+```rust
+struct EnvironmentParams {
+    sky:        SkyMode,
+    ambient:    AmbientMode,
+    height_fog: HeightFogParams,
+}
+
+enum SkyMode {
+    Procedural { turbidity: f32, ground_albedo: Vec3 },  // driven by the sun directional light
+    Cubemap    { texture: AssetHandle<TextureAsset> },   // authored HDRI
+    Color      (Vec3),                                   // flat (debug / stylized)
+}
+
+enum AmbientMode {
+    Sky,             // SH9 irradiance projected from the sky capture
+    Constant(Vec3),
+}
+
+struct HeightFogParams {
+    density:        f32,
+    height:         f32,   // fog base height (world Y)
+    falloff:        f32,   // exponential falloff with altitude
+    inscatter:      Vec3,  // fog color / inscatter tint
+    start_distance: f32,
+}
+```
+
 #### DrawFlags
 
 ```rust
@@ -780,8 +842,11 @@ struct RenderTargets {
     gbuffer_velocity: wgpu::Texture,  // Rg16Float
     gbuffer_id:       wgpu::Texture,  // R32Uint
     hdr:              wgpu::Texture,  // Rgba16Float
+    scene_color_copy: wgpu::Texture,  // Rgba16Float — HDR snapshot after lighting + sky (refraction)
     shadow_atlas:     wgpu::Texture,  // D32Float
     hzb:              wgpu::Texture,  // R32Float mip chain — built from final opaque depth (all backends)
+    froxel_volume:    wgpu::Texture,  // Rgba16Float 3D (~160×90×64) — integrated scattering/transmittance
+    froxel_history:   wgpu::Texture,  // Rgba16Float 3D — temporal accumulation
 
     // Ray tracing (allocated only when Capabilities::ray_query is true)
     rt:               Option<RTTargets>,
@@ -838,14 +903,16 @@ Backends converge at two points.
 
 The Voxel Plugin's `VolumeBackend` is itself pluggable in how it renders — proxy-raster fragment raymarching (the v1 mechanism — see the GBuffer stage), mesh extraction (marching cubes / dual contouring fed into rasterization), or a hybrid where nearby volumes get full-resolution raymarching and distant volumes get extracted meshes. This is an internal detail of the backend, invisible to the rest of the pipeline — except that extracted tiers ride the shared mesh stream and therefore participate in engine passes automatically.
 
+Translucent voxel *media* (smoke, fire) is handled separately from solid volumes: far-field media injects into the froxel grid via the public injector contract; near-field hero media renders in a plugin-owned raymarch pass in the transparency stage (see Volumetrics and Transparency). The opaque `VolumePass` never renders media.
+
 When RT is available, the full pipeline including optional RT passes looks like:
 
 ```
-  Backends ──▶ GBuffer ──▶ Shadows ──┐
-                   │                  │
-                   ├──▶ RT Shadows ───┤
-                   ├──▶ RT GI ────────┼──▶ Lighting ──▶ Sky ──▶ Transparency ──▶ Post ──▶ Present
-                   └──▶ RT Reflect ───┘
+  Backends ──▶ GBuffer ──▶ Shadows ──▶ Volumetrics ──┐
+                   │                                  │
+                   ├──▶ RT Shadows ───────────────────┤
+                   ├──▶ RT GI ────────────────────────┼──▶ Lighting ──▶ Sky ──▶ Transparency ──▶ Post ──▶ Present
+                   └──▶ RT Reflect ───────────────────┘
 ```
 
 RT passes are optional nodes in the graph. The lighting pass consumes their outputs through its public input slots when present, and falls back to rasterized shadows / SSAO / SSR when absent (via the binding mechanism chosen in Open Questions — WGSL itself has no optional bindings).
@@ -1062,6 +1129,33 @@ enum LightKind {
 }
 
 enum Falloff { InverseSquare, Linear }
+```
+
+##### Fog & Media
+
+Local participating media is an entity with a `Transform` and a `FogVolume` component, injected into the froxel grid each frame. Global height fog lives in `EnvironmentParams` (OQ 11).
+
+```rust
+struct FogVolume {
+    shape:      FogShape,   // Box | Sphere — local bounds derive from Transform
+    density:    f32,
+    albedo:     Vec3,
+    emission:   Vec3,
+    anisotropy: f32,        // Henyey-Greenstein g, −1..1
+}
+```
+
+##### Reflection Probes (spec'd, deferred)
+
+Not v1. Trigger: **authored** interior content (buildings, ships). Probes are deliberately *not* the answer for procedural voxel interiors — a static capture goes stale on destruction; the SVO sky-visibility and voxel-traced specular slots cover those. Captured via aux views, prefiltered by the Environment/IBL machinery, assigned per cluster like lights, sampled with parallax box projection.
+
+```rust
+struct ReflectionProbe {
+    shape:          ProbeShape,   // Box | Sphere — extents from Transform
+    blend_distance: f32,
+    resolution:     u32,          // cubemap face size
+    update:         ProbeUpdate,  // Static (capture once) | Dynamic { interval_frames: u32 }
+}
 ```
 
 ##### Materials
@@ -1488,9 +1582,11 @@ lands.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
    reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
    vertex/material access. Required before RT GI/reflections can be implemented.
-4. **Core software-GI tier.** v1 ships the SSAO + ambient-probe fallback as a conscious cliff.
-   Does core eventually grow a scene-agnostic software tier (SDF scene, screen-space GI), or does
-   plugin-provided GI (the Voxel Plugin's SVO tracing) cover the cases that matter?
+4. **Core software-GI tier.** v1 ships the SSAO + sky-IBL-with-visibility fallback as a conscious
+   cliff (per OQ 11). Does core eventually grow a scene-agnostic software tier (SDF scene,
+   screen-space GI), or does plugin-provided GI (the Voxel Plugin's SVO tracing) cover the cases
+   that matter? The lighting chains from OQ 11 already reserve the public slots (GI, sky
+   visibility, reflections) this tier would feed — whatever the answer, no shader rework.
 5. **Asset payload transport.** `ResourceOp` currently deep-copies vertex/pixel data into the
    channel. Options: `Arc<[u8]>` of immutable asset bytes (thread-safe — the ownership rule
    targets shared *mutable* state), or pre-populated staging buffers handed off by handle.
@@ -1506,20 +1602,34 @@ lands.
 8. **Frame pacing & latency control.** Beyond `PipelineMode::Lockstep` there is no story: no
    GPU-bound throttling policy, no maximum-frames-in-flight control at the present layer, no
    Reflex-style pacing. Decide what v1 ships and what the config surface looks like.
-9. **Translucency lighting & volumetrics.** The lighting model for transparent surfaces is
-   unspecified (clustered forward over the light grid?); there is no fog / participating-media
-   story; and translucent volumes (smoke-like media) fit neither the opaque `VolumePass` nor
-   mesh transparency. For an engine shipping a Voxel Plugin, participating media needs a home.
+9. **[RESOLVED 2026-08-11] Translucency lighting & volumetrics.** Three-part resolution:
+   (1) transparent surfaces shade via Clustered Forward+ reusing the deferred light grid, shadow
+   atlas, and shading models, with refraction from `scene_color_copy` and no OIT in v1;
+   (2) participating media lives in a core froxel volumetric system with a **public injector
+   contract** (`FogVolume` component + `EnvironmentParams` height fog); (3) translucent voxel
+   media is plugin-side, two tiers — froxel injection far, raymarched media pass in the
+   transparency stage near; the opaque `VolumePass` never renders media. Specs: Volumetrics and
+   Transparency stages. Dependencies flagged into OQ 11 (env/fog params, translucent specular)
+   and OQ 12 (upscaling vs. froxel/half-res media resolution).
 10. **Seamless LOD transitions.** LOD *selection* is specified; *transitions* are not:
     cross-fade/dither for meshes, brick-resolution blending and the extracted-mesh↔raymarch
     handoff for the Voxel Plugin. Decide whether the backend contract needs explicit transition
     hooks or each backend owns it privately.
-11. **IBL & reflection probes.** `EnvironmentParams` is referenced but never defined. PBR
-    without an image-based specular term looks flat; probe capture maps naturally onto aux
-    views. Define the environment/sky-lighting contract.
+11. **[RESOLVED 2026-08-11] IBL & reflection probes.** Resolution "A′": environment pipeline
+    (sky capture → GGX-prefiltered specular mips + SH9 irradiance + split-sum LUT, amortized
+    updates) with **mandatory sky-visibility modulation** of the environment term — baseline
+    bent-normal/SSAO specular occlusion in core; upgraded via the public `sky_visibility` input
+    slot, fed by the Voxel Plugin's SVO-traced directional visibility (destruction-proof). SSR
+    is always-on; specular chain: RT → SSR → probes → sky × visibility. GI upgrade path runs
+    through the same public slots (OQ 4). `EnvironmentParams` defined (including the OQ 9
+    height-fog rider); transparent env term paid; `ReflectionProbe` spec'd but deferred —
+    trigger: *authored* interiors. Specs: Environment Capture & IBL (Sky stage), Lighting Pass
+    chains, Core Engine Components.
 12. **Post chain completeness.** Auto-exposure (eye adaptation) and temporal upscaling
     (TSR/FSR-class — the biggest per-pixel performance lever for expensive raymarching) are both
-    absent; both restructure the post-processing section (internal vs. display resolution).
+    absent; both restructure the post-processing section (internal vs. display resolution). The
+    upscaling decision must account for the froxel grid and half-res hero-media reconstruction
+    (OQ 9 rider).
 13. **Decals.** No story. Deferred decals interact directly with the GBuffer contract; decide
     in or out for v1.
 14. **Skinning.** Where skinning runs (compute pre-skin vs. vertex shader) and how skinned
