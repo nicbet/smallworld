@@ -133,7 +133,7 @@ This is the only point where the Render Thread mutates its persistent state (GPU
 
 ### 2. Visibility & Culling
 
-Before anything is drawn, the engine determines what each view can see. Culling is **per-view**: the packet's main and auxiliary views, plus shadow views the Render Thread derives from the shadow-casting lights (cascade fitting against the main view — the equivalent of UE5's InitViews shadow setup). Each registered geometry renderer culls the retained scene per view via `renderer.cull()`, allowing geometry types to implement specialized strategies (e.g., octree traversal for volumes vs. flat AABB tests for meshes).
+Before anything is drawn, the engine determines what each view can see. Culling is CPU-driven in v1 (worker-pool parallel); GPU-driven culling with indirect draws is the sanctioned phase-2 path (OQ 7) and must slot in additively. Culling is **per-view**: the packet's main and auxiliary views, plus shadow views the Render Thread derives from the shadow-casting lights (cascade fitting against the main view — the equivalent of UE5's InitViews shadow setup). Each registered geometry renderer culls the retained scene per view via `renderer.cull()`, allowing geometry types to implement specialized strategies (e.g., octree traversal for volumes vs. flat AABB tests for meshes).
 
 - **View setup.** Collect this frame's views: main camera, aux views (render-to-texture, probes), and one view per shadow cascade / shadowed local light.
 - **RT instance collection.** When RT is enabled, the TLAS instance list is gathered **before any per-view culling**, from the retained scene under its own, larger culling domain (an RT radius around the camera — off-screen geometry must still exist for shadows, reflections, and GI). See the Ray Tracing section.
@@ -142,7 +142,17 @@ Before anything is drawn, the engine determines what each view can see. Culling 
 - **LOD selection.** For volumes and meshes with LOD levels, select the appropriate detail tier based on screen-space size or distance. Each backend owns its LOD strategy.
 - **Sort & batch.** Per view: opaque draws sorted front-to-back (minimize overdraw), transparent draws back-to-front. Draws sharing pipeline state are merged into instanced batches.
 
-### 3. Depth Pre-Pass
+### 3. Deformation (`DeformPass`)
+
+*(OQ 14 resolution, 2026-08-11.)* All GPU vertex deformation — skinning first among it — runs once per frame in a compute stage before any geometry pass. Downstream, deformed geometry is indistinguishable from static geometry.
+
+- **Compute pre-skin (skin cache).** For each skinned instance visible in *any* view this frame (union of the per-view cull results), a compute dispatch applies the bone palette and writes deformed positions/normals/tangents into a per-instance output vertex buffer. Depth pre-pass, GBuffer, every shadow view, and BLAS refit all consume that buffer — skin once, consume everywhere; **one skinning implementation serves raster and RT.**
+- **Deformers are an extension point.** Skinning is the built-in deformer; morph targets, cloth, and procedural deformation register as additional compute deformers writing the same output buffers (the UE5 Deformer Graph shape). Plugin-friendly by construction.
+- **Velocity via buffer aliasing — no shader permutations.** Geometry vertex shaders always read a `position_prev` attribute and multiply by `prev_world_matrix`. Rigid draws bind the *same* position buffer as `position_prev` (all motion comes from the matrix); deformed draws bind last frame's deformed output (pose motion), with the matrix carrying object motion. One shader, both cases, exact skinned motion vectors. Deformed outputs are double-buffered for this.
+- **Budgeted (Principle 5).** Deformed-output memory (~40 B/vertex × 2 buffers × instance) is a named budget; over budget → LOD down or cap deformed instances. There is deliberately **no vertex-shader fallback path** — one implementation, per the permutation-as-optimization-never-architecture rule; a fallback is added only if a shipped need demonstrates it.
+- **Animation sampling stays on the CPU** (worker pool): blend trees, IK, and clip evaluation are game-state logic. Bone palettes (~6 KB per character) upload per frame via the staging pool. The GPU deforms; it never runs animation logic.
+
+### 4. Depth Pre-Pass
 
 Establishes the scene's depth early to prevent overdraw in the full GBuffer pass.
 
@@ -150,7 +160,7 @@ Establishes the scene's depth early to prevent overdraw in the full GBuffer pass
 
 The HZB is deliberately *not* built here — a pre-pass HZB would contain only mesh depth, and geometry from other backends (raymarched volumes, custom plugins) would never act as occluders. It is built after the GBuffer stage, once every backend has contributed depth.
 
-### 4. GBuffer Pass (Geometry)
+### 5. GBuffer Pass (Geometry)
 
 Visible opaque surfaces write their material properties to the Geometry Buffer. Smallworld uses deferred rendering, separating geometry from lighting.
 
@@ -197,7 +207,11 @@ The lighting pass and everything downstream never knows which path produced a gi
 
 Material identity has no dedicated storage anywhere — it is derivable: PickId → draw → `material_gpu_id`.
 
-### 5. Shadow Pass
+#### Deferred Decals (core feature, scheduled)
+
+*(OQ 13 resolution, 2026-08-11.)* Decals are a **core engine feature**, implemented as standard deferred GBuffer decals: projected box volumes rendered after opaque geometry and before lighting, reading depth to reconstruct the surface and blending albedo/normal/material contributions into the existing GBuffer targets (respecting `DrawFlags::RECEIVE_DECALS`). Normal blending decodes, blends, and re-encodes the octahedral normal target. The pass is purely additive over existing contracts — no new render targets, no downstream changes — which is why implementation is safely scheduled after the v1 rendering core lands without any design debt accruing in the meantime.
+
+### 6. Shadow Pass
 
 The engine renders depth from the perspective of each shadow-casting light into a shadow atlas, using the per-shadow-view draw lists produced during culling — shadow views see geometry the main camera culled.
 
@@ -212,7 +226,7 @@ Light types:
 - **Point and spot lights** render into atlas sub-regions.
 - **Virtual shadow maps** (future) would cache static shadow pages and only re-render where dynamic objects move.
 
-### 6. Volumetrics (Froxel Media)
+### 7. Volumetrics (Froxel Media)
 
 *(OQ 9 resolution, 2026-08-11.)* Participating media — global fog, local fog volumes, plugin-injected media — is computed in a frustum-aligned voxel grid (**froxels**) and applied wherever depth is known. Pure compute, no capability gates. The classic four-stage pipeline (Assassin's Creed 4 / Frostbite / UE5 Volumetric Fog):
 
@@ -223,7 +237,7 @@ Light types:
 
 Consumers sample the integrated volume by pixel depth: the lighting pass applies it to all opaque pixels (meshes and raymarched volumes alike — both are in the GBuffer), the sky pass applies the far-field value, and translucent draws sample it in their forward shaders. Default grid ~160×90×64, quality-tiered, Rgba16Float. The froxel volume is **always bound** (cheap when empty), sidestepping the optional-binding question of OQ 2 for fog.
 
-### 7. Lighting Pass (Deferred Shading)
+### 8. Lighting Pass (Deferred Shading)
 
 A full-screen compute dispatch evaluates deferred shading by reading the GBuffer, shadow atlas, and light buffer. Each pixel's lighting response is selected by its GBuffer shading model ID — `Standard` is Cook-Torrance PBR; other registered models (toon, foliage, unlit) branch here.
 
@@ -236,7 +250,7 @@ A full-screen compute dispatch evaluates deferred shading by reading the GBuffer
 - **Fog application.** Sample the integrated froxel volume at each pixel's depth and apply scattering/transmittance (see Volumetrics).
 - **Output.** HDR lighting result written to an Rgba16Float texture.
 
-### 8. Ray Tracing (Secondary Effects)
+### 9. Ray Tracing (Secondary Effects)
 
 Smallworld follows UE5's hybrid rendering model: rasterization handles primary visibility (what the camera sees), ray tracing handles secondary effects (how light bounces, reflects, and casts shadows). Rasterization writes the GBuffer; ray tracing reads it.
 
@@ -246,7 +260,7 @@ This section is conditional on `Capabilities::ray_query`. **The design targets w
 
 Ray tracing requires a spatial index on the GPU so rays can efficiently find intersections. This is a two-level hierarchy maintained by the Render Thread as part of `RenderState` (see Data Structures for the `AccelerationStructure` definition):
 
-- **Bottom-Level Acceleration Structure (BLAS).** One per unique mesh geometry. Built from the vertex/index buffers already in `GpuMeshPool`. Rebuilt only when geometry changes (rare for static meshes, per-frame for skinned/deformable).
+- **Bottom-Level Acceleration Structure (BLAS).** One per unique mesh geometry. Built from the vertex/index buffers already in `GpuMeshPool`. Rebuilt only when geometry changes — rare for static meshes; deformed geometry refits per frame against the `DeformPass` output buffers, the same skinned vertices the raster passes consume.
 - **Top-Level Acceleration Structure (TLAS).** One per frame. References all BLAS instances with their world transforms. **Built before any per-view culling, from the retained scene** — never from a culled draw list. Rays need geometry the camera cannot see: off-screen shadow casters, the room behind the camera in a mirror. The TLAS therefore uses its own culling domain — an **RT culling radius** around the camera, larger than any view frustum (the same reason UE5 has a separate ray-tracing culling radius). `TlasContributor` backends add their instances here.
 
 The TLAS build is a GPU operation — the Render Thread records it as a command before the RT passes execute. Cost is proportional to instance count, not triangle count, so it scales well.
@@ -332,7 +346,7 @@ If the RT passes aren't registered (because `ray_query` is false), the lighting 
 
 The GI fallback is a **conscious v1 quality cliff**: UE5's Lumen degrades through a *software* ray-tracing tier (distance fields) before reaching this point. Smallworld core does not assume any particular scene structure — the SVO belongs to the Voxel Plugin, which core cannot depend on — so a general software-GI tier (SDF scene or screen-space GI) is deferred; see Open Questions. Voxel-heavy games get a better fallback from the Voxel Plugin's SVO-traced GI, delivered through the lighting pass's public input slots.
 
-### 9. Sky & Atmosphere
+### 10. Sky & Atmosphere
 
 Rendered into the HDR target where depth equals the far plane. Atmosphere scattering, procedural sky, or skybox cubemap. Applies the froxel volume's far-field scattering for atmospheric consistency with fogged geometry.
 
@@ -346,7 +360,7 @@ Rendered into the HDR target where depth equals the far plane. Atmosphere scatte
 
 Captures update amortized (one face or one prefilter mip per frame), so time-of-day costs a bounded slice of the frame budget. Consumers: the lighting pass (indirect chains), forward transparents (same prefiltered set), and the froxel lighting's ambient term. Local `ReflectionProbe`s (deferred — see Core Engine Components) reuse this exact capture/prefilter machinery at probe positions via aux views.
 
-### 10. Transparency
+### 11. Transparency
 
 *(OQ 9 resolution, 2026-08-11.)* Objects with alpha blending render in a forward pass over the completed opaque image (lighting + sky). They cannot write to the GBuffer.
 
@@ -356,7 +370,7 @@ Captures update amortized (one face or one prefilter mip per frame), so time-of-
 - **Sorting.** Back-to-front per draw. No OIT in v1 — interpenetration artifacts are accepted (the shipped-game norm); weighted-blended OIT is a future quality knob.
 - **Translucent media ≠ surface transparency.** Smoke/fire-like media renders in this stage but through different machinery: near-field hero media in plugin-owned raymarch passes (front-to-back march lit by the cluster grid + shadow atlas, composited by transmittance against scene depth — reads `depth`, never writes it), far-field media injected into the froxel grid. The opaque `VolumePass` is never used for media.
 
-### 11. Post-Processing
+### 12. Post-Processing
 
 Camera-lens effects applied to the HDR image:
 
@@ -364,8 +378,9 @@ Camera-lens effects applied to the HDR image:
 - **Bloom.** Downsample bright regions, blur, composite back.
 - **Tone mapping.** HDR → SDR/display HDR via ACES or Reinhard.
 - **Color grading.** Final LUT application.
+- **Dev/debug UI.** egui renders as a final render-graph pass over the post-processed image (dev tooling — OQ 18).
 
-### 12. Present
+### 13. Present
 
 The final image is blitted to the swapchain surface. The Render Thread loops back to receive the next `FramePacket`.
 
@@ -753,6 +768,7 @@ bitflags! {
         const DOUBLE_SIDED   = 0x04;
         const ALPHA_MASK     = 0x08;
         const TRANSPARENT    = 0x10;
+        const RECEIVE_DECALS = 0x20;  // reserved now; consumed by the deferred decal pass (OQ 13)
     }
 }
 ```
@@ -996,27 +1012,50 @@ struct EnemyDescriptor {
 
 The engine loads these descriptors, resolves asset paths to handles, and spawns entities with the appropriate components. Artists and designers edit the data files; programmers define the descriptor schemas and the systems that process them.
 
-### Scripting Runtime
+### Behavior & Scripting
 
-For gameplay logic that needs to be iterable without recompilation, smallworld provides a sandboxed scripting runtime. Scripts attach to entities as components and receive lifecycle callbacks.
+*(OQ 6 resolution, 2026-08-11.)* Game behavior attaches to entities through **one contract with three backends**: Rust (native, first-class), C/C++ (native, via a stable C ABI), and Lua (sandboxed gameplay-iteration tier). A prototype scripted in Lua and later ported to Rust behaves identically — the tier changes performance, never semantics.
 
 ```rust
-trait ScriptInstance: Send {
-    fn init(&mut self, entity: EntityId, ctx: &mut ScriptContext);
-    fn update(&mut self, entity: EntityId, ctx: &mut ScriptContext, dt: f32);
-    fn on_event(&mut self, entity: EntityId, ctx: &mut ScriptContext, event: &dyn Event);
-    fn shutdown(&mut self, entity: EntityId, ctx: &mut ScriptContext);
+trait Behavior: Send {
+    fn init(&mut self, entity: EntityId, ctx: &mut BehaviorContext);
+    fn update(&mut self, entity: EntityId, ctx: &mut BehaviorContext, dt: f32);
+    fn on_event(&mut self, entity: EntityId, ctx: &mut BehaviorContext, event: &dyn Event);
+    fn shutdown(&mut self, entity: EntityId, ctx: &mut BehaviorContext);
 }
 
-struct ScriptContext<'a> {
-    world:  &'a mut World,
-    input:  &'a Input,
-    time:   &'a Time,
-    events: &'a mut EventBus,
+struct BehaviorContext<'a> {
+    world:    &'a mut World,
+    input:    &'a Input,
+    time:     &'a Time,
+    events:   &'a mut EventBus,
+    commands: &'a mut BehaviorCommands,  // deferred ops: the end-of-frame despawn queue
 }
 ```
 
-Scripts can read and write components, query the world, and emit events — but they cannot access GPU resources, raw pointers, or unsafe Rust. The script runtime (Rhai, Lua, or WASM) provides the sandbox; the engine provides the `ScriptContext` API surface.
+#### The BehaviorHost
+
+Behavior instances live **outside** World component storage, in the `BehaviorHost` — a Game Thread side structure holding native Rust instances, C-ABI plugin instances, and the Lua VM. The entity carries only a plain-data `BehaviorRef` component (a behavior id). This dissolves the aliasing problem structurally — iterating the host mutably while borrowing the World is two disjoint borrows — and honors the plain-data component rule: behavior objects are not data.
+
+#### The Three Backends
+
+| Backend | Linkage | World access | Sandbox | Threading |
+|---------|---------|--------------|---------|-----------|
+| Rust | Static; implements `Behavior` directly | Direct `&mut World` via context — zero overhead | No (trusted) | Serial in v1; contract permits future parallelism via declared component access |
+| C/C++ | Dynamic library; stable **C ABI vtable** mirroring `Behavior` | Per-call accessor API (same surface as Lua) | No (trusted native code) | Same as Rust |
+| Lua (mlua, Lua 5.4) | VM owned by the `BehaviorHost`; instances are registry-keyed tables | Per-call accessor API | Yes | Serial — a property of the single VM, not of the contract |
+
+The **per-call accessor API** (`get`/`set` component, `spawn`, `despawn`, `emit`, queries) is one surface serving both foreign backends — C cannot borrow-check any more than Lua can hold borrows across calls, so every call is a fresh, checked borrow. **Soundness rule (Lua):** userdata only ever wraps plain handles and copies (`EntityId`, component values) — never borrowed references into the World.
+
+#### Uniform Mutation Semantics (all backends)
+
+- **Spawn, add/remove component: immediate.** The returned `EntityId` is real and usable in the same call. (Borrow-sound because behaviors iterate from the host, not the World.)
+- **Despawn: deferred to end of frame.** Entities are marked, then reaped after the frame's phases — the Unity `Destroy` / Godot `queue_free` convention that kills use-after-free ordering bugs. Generational IDs make any stale handle a clean miss regardless.
+- **Behaviors spawned this frame start next frame** (`init` + first `update`).
+
+#### Threading & Phase Placement
+
+Behavior callbacks run in the variable-rate **Update** phase, sequentially on the Game Thread in v1. Serialization is scoped to where it is forced: the Lua backend is inherently serial (one VM; parallel Lua means multiple VMs with partitioned entities — deferred), while native backends may gain parallel execution later via declared component access, additively. Bulk per-frame logic belongs in **Systems** over component queries, not per-entity behaviors — that is the performance-first home and the first candidate for a parallel scheduler. One guard for the future: Lua's `pairs()` iteration order is nondeterministic, so admitting behaviors into `fixed_update` would require Lua-specific determinism rules first (the fixed-tick determinism guarantee currently covers engine systems).
 
 ### Gameplay Tags
 
@@ -1102,6 +1141,14 @@ impl World {
     fn parent(&self, child: EntityId) -> Option<EntityId>;
 }
 ```
+
+##### Fixed-Timestep Interpolation
+
+*(OQ 6 resolution, 2026-08-11.)* Entities driven by fixed-tick simulation (physics bodies) store their previous fixed-tick transform; the extract step samples `lerp(prev_tick, curr_tick, alpha)` at the fixed-step accumulator's blend factor. Smooth motion at any refresh rate, for ≤ 1 fixed tick of visual latency. Extrapolation is rejected — it predicts through collisions and pops.
+
+- **Two distinct "previous transforms" exist and must not be conflated.** The previous *fixed-tick* transform (interpolation input, stored per simulated entity) is not `WorldTransform.prev_matrix` (the previous *rendered frame's* matrix — the motion-vector input, derived at extract). They differ whenever render rate ≠ tick rate.
+- **Only fixed-tick-driven entities interpolate.** `update()`-driven entities — notably the camera — pass through directly, so look input pays zero added latency.
+- **Teleports snap.** The teleport API sets prev = curr, so a teleport never smears across a tick.
 
 ##### Camera
 
@@ -1259,7 +1306,7 @@ trait App {
 
 - `init` — called once after the engine initializes the World. Load assets, spawn initial entities, set up game state.
 - `update` — called once per frame with variable delta time. Process input, run gameplay logic, animate.
-- `fixed_update` — called at a fixed rate (default 60 Hz, configurable). Physics integration, network tick, anything that needs deterministic timestep. May run 0–N times per frame depending on accumulated time.
+- `fixed_update` — called at a fixed rate (default 60 Hz, configurable). Physics integration, network tick, anything that needs deterministic timestep. May run 0–N times per frame depending on accumulated time. **Engine guarantee (OQ 19):** no engine system introduces nondeterminism into fixed-tick simulation — this keeps lockstep/rollback netcode viable when networking arrives.
 - `shutdown` — called once before exit. Save state, clean up.
 
 #### GameContext
@@ -1525,7 +1572,7 @@ struct PlayParams {
 
 ### 7. Events
 
-A typed event bus for decoupled communication between game systems. Events live for one frame and are cleared automatically.
+A typed event bus for decoupled communication between game systems. The bus is **double-buffered** *(OQ 6, 2026-08-11)*: events sent during frame N become readable during frame N+1 and are dropped at its end. `read<E>()` always returns the previous frame's events, so results are deterministic regardless of system ordering — no send-before-read hazards within a frame.
 
 ```rust
 struct EventBus {
@@ -1574,7 +1621,7 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | **FIXED** | `App::fixed_update()` runs 0–N times at fixed timestep |
 | **UPDATE** | `App::update()` runs once. Game systems mutate World |
 | **LATE** | Engine systems: hierarchy propagation, bounds recomputation, streaming demand |
-| **EXTRACT** | Diff `&World` via `&ChangeTracker` into a `FramePacket` (views, lights, deltas, resource ops), send through channel |
+| **EXTRACT** | Diff `&World` via `&ChangeTracker` into a `FramePacket` (views, lights, deltas, resource ops), interpolating fixed-tick transforms at the accumulator alpha; send through channel |
 | **CLEAR** | Clear change tracker. Game thread free for next frame |
 
 ### Render Thread
@@ -1628,11 +1675,15 @@ lands.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
    reflections need a hit-point material fetch — surface cache (Lumen-style) vs. bindless
    vertex/material access. Required before RT GI/reflections can be implemented.
-4. **Core software-GI tier.** v1 ships the SSAO + sky-IBL-with-visibility fallback as a conscious
-   cliff (per OQ 11). Does core eventually grow a scene-agnostic software tier (SDF scene,
-   screen-space GI), or does plugin-provided GI (the Voxel Plugin's SVO tracing) cover the cases
-   that matter? The lighting chains from OQ 11 already reserve the public slots (GI, sky
-   visibility, reflections) this tier would feed — whatever the answer, no shader rework.
+4. **Core software-GI tier.** *Stance decided 2026-08-11:* core **will** provide a software GI
+   tier — hardware-RT GI cannot be the only quality rung above the SSAO + sky-IBL × visibility
+   floor. The remaining question is the technique: SSGI (screen-space only — cheapest,
+   view-limited), DDGI-style dynamic probe grids (needs a world proxy to trace against),
+   cascaded SDFGI (Godot-style — needs SDF generation for arbitrary geometry), or voxel cone
+   tracing over an engine-owned *lighting-domain* voxelization of all geometry (VXGI-style —
+   distinct from the Voxel Plugin's content SVO). Whatever the pick, it feeds the existing
+   GI/sky-visibility slots (no shader rework), and plugin GI can still supersede it for
+   voxel-native content.
 5. **[RESOLVED 2026-08-11] Asset payload transport.** Option B — the engine-owned **staging
    pool**: decode threads write directly into mapped staging regions (no payload memcpy on any
    hot thread); `ResourceOp` carries `StagingRef` handles; the Render Thread records GPU copies
@@ -1642,15 +1693,24 @@ lands.
    staging off-thread. Small payloads stay by-value; `Arc` transport remains legal internally.
    The pool is shared with OQ 17 streaming and joins the OQ 15 teardown protocol. Spec: Staging
    Pool & Upload Path (Data Structures).
-6. **Gameplay-layer semantics.** Event bus buffering (same-frame visibility vs. double-buffered),
-   script access to `World` (command buffers vs. exclusive storage), and fixed-timestep transform
-   interpolation for rendering. None block the render architecture; all block gameplay API
-   stability.
-7. **GPU-driven rendering.** Adopt or consciously defer GPU culling, indirect draws, and
-   bindless resources. The contracts no longer preclude it (`MeshDrawCommand` is
-   instancing-capable, pools are dense), but the decision itself was never made — and
-   "Nanite-for-bricks" (GPU brick culling, per-brick LOD on GPU) is the Voxel Plugin's stake in
-   it.
+6. **[RESOLVED 2026-08-11] Gameplay-layer semantics.** (1) **Events: double-buffered** — sent
+   frame N, readable frame N+1, deterministic under any system order. (2) **Behavior model:**
+   one `Behavior` contract, three backends — Rust (native, direct `&mut World`), C/C++ (stable
+   C ABI vtable), Lua via mlua (sandboxed) — instances living in the `BehaviorHost` outside
+   World storage (aliasing dissolved structurally); both foreign backends share one per-call
+   accessor API; uniform semantics everywhere: spawn/add/remove immediate, despawn deferred to
+   frame end; Lua's serialization is a backend property, not a contract property. (3)
+   **Fixed-step interpolation at extract** — lerp of the last two fixed-tick states at
+   accumulator alpha; camera passes through; teleports snap; distinct from the motion-vector
+   prev-frame matrix. Specs: Behavior & Scripting, Fixed-Timestep Interpolation, Events.
+7. **[RESOLVED 2026-08-11] GPU-driven rendering.** v1 is CPU-driven by design; GPU-driven
+   (GPU scene buffer → GPU frustum+HZB culling → indirect draws → visibility-buffer geometry)
+   is the **sanctioned phase-2 direction**. **Hard requirement: phase 2 must be additive.** The
+   prepared contracts (instancing-capable `MeshDrawCommand`, dense pools, retained scene,
+   per-view culling, 64-bit-atomic capability flags) are shaped so it slots in; if any phase-2
+   design turns out to demand contract rework, that rework returns to discussion before
+   implementation. Adoption trigger: profiling shows CPU culling or draw submission limiting at
+   target scene scales.
 8. **Frame pacing & latency control.** Beyond `PipelineMode::Lockstep` there is no story: no
    GPU-bound throttling policy, no maximum-frames-in-flight control at the present layer, no
    Reflex-style pacing. Decide what v1 ships and what the config surface looks like.
@@ -1682,10 +1742,19 @@ lands.
     absent; both restructure the post-processing section (internal vs. display resolution). The
     upscaling decision must account for the froxel grid and half-res hero-media reconstruction
     (OQ 9 rider).
-13. **Decals.** No story. Deferred decals interact directly with the GBuffer contract; decide
-    in or out for v1.
-14. **Skinning.** Where skinning runs (compute pre-skin vs. vertex shader) and how skinned
-    vertices feed the depth pre-pass, motion vectors, and per-frame BLAS refit consistently.
+13. **[RESOLVED 2026-08-11] Decals.** Core engine feature, shipped as standard **deferred
+    GBuffer decals** — projected boxes after opaque geometry, before lighting, blending into
+    existing targets. Contract touches done now: `DrawFlags::RECEIVE_DECALS` reserved;
+    octahedral normal decode/blend/re-encode noted. Purely additive pass, so implementation is
+    scheduled after the v1 rendering core with zero design debt. Spec: Deferred Decals (GBuffer
+    stage).
+14. **[RESOLVED 2026-08-11] Skinning.** Option B, generalized into a **Deformation stage**
+    (`DeformPass`, render pipeline stage 3): compute pre-skin into per-instance buffers — skin
+    once, consumed identically by depth, GBuffer, shadows, and BLAS refit — with skinning as
+    the built-in deformer and morphs/cloth/procedural as registered deformers. Velocity via the
+    `position_prev` buffer-aliasing rule (no shader permutations anywhere). Named memory
+    budget; deliberately no vertex-shader fallback in v1. Animation sampling stays CPU-side;
+    palettes ride the staging pool. Spec: Deformation stage.
 15. **Resize / device-lost / teardown.** Swapchain recreation crosses the thread boundary;
     `Engine::run() -> !` plus `App::shutdown` implies a drain/GPU-idle ordering that is
     unspecified. Define the lifecycle protocol. Participants now include the staging pool
@@ -1697,10 +1766,15 @@ lands.
     `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
     full section of its own. The staging pool (OQ 5) is its upload backbone — brick uploads
     ride dedicated rings in the same subsystem, not generic `ResourceOp`s.
-18. **UI.** No story (immediate-mode overlay, egui integration, retained widget tree?). A
-    complete game engine needs at least a stance.
-19. **Networking.** Not mentioned anywhere — even "out of scope for v1" needs saying, with the
-    architectural implications named (determinism, fixed-tick replication hooks).
+18. **[RESOLVED 2026-08-11] UI.** Two-track stance: **dev/debug tooling = egui**, integrated
+    now as a final render-graph pass over the post-processed image; the **game-facing UI
+    framework** (retained widgets, layout, theming) is a committed post-v1 subsystem that gets
+    its own design round — not rushed, and not blocking engine v1.
+19. **[RESOLVED 2026-08-11] Networking.** Explicitly **out of scope for v1**, with the hooks
+    accounted for now: `fixed_update` is the deterministic tick (with the engine guarantee that
+    no engine system introduces nondeterminism into fixed-tick simulation — see The App Trait),
+    components are plain replicable data, entity IDs are generational. Networking arrives
+    post-v1 as transport + replication modules on those hooks.
 20. **Save / serialization.** Asset descriptors spawn entities; serializing a live `World`
     (save games, editor scenes) is undesigned.
 21. **Voxel Plugin data ownership.** `VolumeRenderer` holds `Box<dyn VolumeSource>` — behavior
