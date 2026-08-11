@@ -3,10 +3,11 @@
 **Date:** 2026-08-11 (revised after positioning discussion; disposition added after the same-day
 architecture update)
 **Scope:** Internal consistency, technical validity, design flaws, adherence to `notes/research/ue5/architecture.md`, gaps/omissions.
-**Status:** Review record + disposition tracker. The findings below (§§1–8) describe
-`architecture-design.md` **as reviewed on 2026-08-11**, kept intact as the record of that
-discussion. The same-day architecture update resolved §§1–3 and most of §4 — current status of
-every finding is in the Disposition section.
+**Status:** **CLOSED** (2026-08-11). Every finding is dispositioned — resolved in
+`architecture-design.md` or promoted to its Open Questions (see Disposition section). This
+document is a durable record of the review round; ongoing work happens against the Open
+Questions in `docs/architecture-design.md`. The findings below (§§1–8) describe the architecture
+**as reviewed on 2026-08-11**, kept intact as the record of that discussion.
 **Positioning baseline:** smallworld is "UE5 in Rust, minus visual Blueprints." Voxel worlds are
 supported out-of-the-box via a first-class **Voxel Plugin** built on the public plugin API. Voxel
 findings below are therefore framed as plugin-API sufficiency tests, never as engine-core
@@ -48,29 +49,33 @@ motivations.
 | §5.2 Asset payload deep copies | OQ 5 |
 | §5.1 script world access, §5.3 event semantics, §5.4 fixed-step interpolation | OQ 6 |
 
-### Still standing — no disposition yet
+### Promoted to Open Questions (second batch, same day)
 
-Needs at least a documented stance (design-doc Open Questions entry, roadmap note, or xpo issue):
+Everything that remained standing was added to the design doc's Open Questions as OQ 7–23.
+**Nothing from this review round is left without a disposition** — every finding is either
+resolved in `architecture-design.md` or tracked as a numbered open question there.
 
-- **§6 — GPU-driven rendering stance.** Instancing contracts landed, but GPU culling / indirect
-  draws / bindless still needs a conscious adopt-or-defer decision ("Nanite-for-bricks" being the
-  Voxel Plugin's stake in it).
-- **§6 — Frame pacing / latency control.** Nothing beyond Lockstep mode; no GPU-bound throttling
-  policy, no max-frame-latency story.
-- **§6 — Translucency lighting + volumetrics.** Transparency section untouched: lighting model
-  for transparents unspecified; no fog / participating media; translucent volumes fit neither the
-  opaque VolumePass nor mesh transparency.
-- **§7 — Rendering:** seamless LOD *transitions* (backend contract is silent on them), IBL /
-  reflection probes (`EnvironmentParams` still undefined), auto-exposure, upscaling (TSR-class),
-  decals, skinning design (compute vs. vertex, BLAS refit), resize / device-lost / teardown
-  ordering.
-- **§7 — Engine systems:** physics architecture + worker-pool priorities, streaming section
-  (World Partition analog), UI, networking, save/serialization.
-- **§4.8** — `Box<dyn VolumeSource>` inside a component; `brick_residency` ownership (fold into
-  Voxel Plugin / streaming design).
-- **§4.11** — GBuffer ID row vs. the implemented GBuffer contract (velocity + source flag +
-  material ID); reconcile doc with code.
-- **§4.12** — CLAUDE.md entity-model text vs. the doc's ECS-style model; reconcile.
+| Finding | Open Question |
+|---------|---------------|
+| §6 GPU-driven rendering stance | OQ 7 |
+| §6 Frame pacing / latency control | OQ 8 |
+| §6 Translucency lighting + volumetrics | OQ 9 |
+| §7 Seamless LOD transitions | OQ 10 |
+| §7 IBL / reflection probes (`EnvironmentParams`) | OQ 11 |
+| §7 Auto-exposure + temporal upscaling | OQ 12 |
+| §7 Decals | OQ 13 |
+| §7 Skinning design | OQ 14 |
+| §7 Resize / device-lost / teardown ordering | OQ 15 |
+| §7 Physics architecture + worker-pool priorities | OQ 16 |
+| §7 Streaming section (World Partition analog) | OQ 17 |
+| §7 UI stance | OQ 18 |
+| §7 Networking stance | OQ 19 |
+| §7 Save / serialization | OQ 20 |
+| §4.8 `VolumeSource` in component / `brick_residency` ownership | OQ 21 |
+| §4.11 GBuffer ID row vs. implemented contract (sw-6dd982) | OQ 22 |
+| §4.12 CLAUDE.md entity-model text vs. this doc | OQ 23 |
+
+(Volume motion vectors, previously noted as a rider, are now explicitly folded into OQ 1.)
 
 ---
 

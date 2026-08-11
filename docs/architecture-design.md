@@ -1454,14 +1454,20 @@ The complete sequence of a single frame, showing which thread owns each phase.
 
 ## Open Questions
 
-Decisions consciously deferred; each needs a follow-up design discussion before implementation.
+The complete open-decision backlog from the 2026-08-11 review round. Items 1–6 are design
+decisions needing a follow-up discussion before implementation; items 7–20 need at least a
+documented stance (some are full subsystem designs); items 21–23 are doc/code reconciliation.
+The plan: resolve them one by one, in discussion — no implementation issues until a discussion
+lands.
 
 1. **Volume depth writes.** Compute shaders cannot write a `D32Float` depth attachment, and
    `Rgba8UnormSrgb` cannot be a storage texture. How does `VolumePass` contribute depth (and
    sRGB-correct albedo) so that transparency, TAA, RT ray reconstruction, and the HZB see volumes?
    Candidates: (a) fragment-shader raymarch over rasterized proxy geometry with `frag_depth`
    export; (b) compute writes to `R32Float` depth-as-data + non-sRGB GBuffer formats, followed by
-   a depth-merge raster pass; (c) a hybrid, chosen per LOD tier.
+   a depth-merge raster pass; (c) a hybrid, chosen per LOD tier. Volume **motion vectors** for
+   TAA belong to the same discussion — extracted-mesh tiers get velocity via `InstanceData`;
+   raymarched pixels currently produce none.
 2. **RT-input binding mechanism.** WGSL has no optional bindings. Pipeline permutations of the
    lighting shader vs. always-bound dummy targets + uniform flags.
 3. **Surface cache.** `ray_query` hits return instance/primitive indices only; RT GI and
@@ -1477,3 +1483,54 @@ Decisions consciously deferred; each needs a follow-up design discussion before 
    script access to `World` (command buffers vs. exclusive storage), and fixed-timestep transform
    interpolation for rendering. None block the render architecture; all block gameplay API
    stability.
+7. **GPU-driven rendering.** Adopt or consciously defer GPU culling, indirect draws, and
+   bindless resources. The contracts no longer preclude it (`MeshDrawCommand` is
+   instancing-capable, pools are dense), but the decision itself was never made — and
+   "Nanite-for-bricks" (GPU brick culling, per-brick LOD on GPU) is the Voxel Plugin's stake in
+   it.
+8. **Frame pacing & latency control.** Beyond `PipelineMode::Lockstep` there is no story: no
+   GPU-bound throttling policy, no maximum-frames-in-flight control at the present layer, no
+   Reflex-style pacing. Decide what v1 ships and what the config surface looks like.
+9. **Translucency lighting & volumetrics.** The lighting model for transparent surfaces is
+   unspecified (clustered forward over the light grid?); there is no fog / participating-media
+   story; and translucent volumes (smoke-like media) fit neither the opaque `VolumePass` nor
+   mesh transparency. For an engine shipping a Voxel Plugin, participating media needs a home.
+10. **Seamless LOD transitions.** LOD *selection* is specified; *transitions* are not:
+    cross-fade/dither for meshes, brick-resolution blending and the extracted-mesh↔raymarch
+    handoff for the Voxel Plugin. Decide whether the backend contract needs explicit transition
+    hooks or each backend owns it privately.
+11. **IBL & reflection probes.** `EnvironmentParams` is referenced but never defined. PBR
+    without an image-based specular term looks flat; probe capture maps naturally onto aux
+    views. Define the environment/sky-lighting contract.
+12. **Post chain completeness.** Auto-exposure (eye adaptation) and temporal upscaling
+    (TSR/FSR-class — the biggest per-pixel performance lever for expensive raymarching) are both
+    absent; both restructure the post-processing section (internal vs. display resolution).
+13. **Decals.** No story. Deferred decals interact directly with the GBuffer contract; decide
+    in or out for v1.
+14. **Skinning.** Where skinning runs (compute pre-skin vs. vertex shader) and how skinned
+    vertices feed the depth pre-pass, motion vectors, and per-frame BLAS refit consistently.
+15. **Resize / device-lost / teardown.** Swapchain recreation crosses the thread boundary;
+    `Engine::run() -> !` plus `App::shutdown` implies a drain/GPU-idle ordering that is
+    unspecified. Define the lifecycle protocol.
+16. **Physics architecture.** Engine choice (e.g., rapier), `Transform` sync, fixed-step
+    ownership — plus worker-pool priorities: game physics jobs and render-critical culling jobs
+    share one rayon pool today, with no protection against priority inversion.
+17. **Streaming.** Principle 5 promises budget arbitration; `BrickResidencyInfo` and
+    `StreamPriority` are name-dropped; a World Partition-analog design is missing. Deserves a
+    full section of its own.
+18. **UI.** No story (immediate-mode overlay, egui integration, retained widget tree?). A
+    complete game engine needs at least a stance.
+19. **Networking.** Not mentioned anywhere — even "out of scope for v1" needs saying, with the
+    architectural implications named (determinism, fixed-tick replication hooks).
+20. **Save / serialization.** Asset descriptors spawn entities; serializing a live `World`
+    (save games, editor scenes) is undesigned.
+21. **Voxel Plugin data ownership.** `VolumeRenderer` holds `Box<dyn VolumeSource>` — behavior
+    inside a "plain data" component — and `VolumeDrawCommand.brick_residency` is produced at
+    extract while residency is streaming/GPU-side state. Decide which side owns residency; fold
+    into the Voxel Plugin / streaming design (with 17).
+22. **GBuffer ID reconciliation.** The doc's `Entity ID (R32Uint)` target vs. the implemented
+    GBuffer contract (velocity + source flag + material ID, sw-6dd982). Reconcile doc with code
+    and decide entity-vs-material ID for picking/debug.
+23. **CLAUDE.md entity-model reconciliation.** CLAUDE.md still describes "SlotMap + side
+    structs, ECS deferred" while this doc specifies per-type dense component stores (ECS decided
+    2026-08-09). Align the two so there is one source of truth.
