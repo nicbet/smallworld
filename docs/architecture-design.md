@@ -1662,7 +1662,7 @@ struct ControllerState {
 
 ### 6. Audio
 
-Game code issues audio commands; the audio system runs on a dedicated thread. No direct API access from game code — same server pattern as the rendering thread.
+Game code issues audio commands; the audio system runs on a dedicated thread. No direct API access from game code — same server pattern as the rendering thread. (The audio engine itself — mixer graph, voices, DSP, streaming — is specified in the top-level Audio section.)
 
 ```rust
 struct AudioCommands {
@@ -1877,6 +1877,27 @@ Sampling and graph evaluation run on the **game worker pool in PostUpdate**, pro
 - **Animation events.** Clips carry named event tracks; sampling fires them into the double-buffered event bus — footsteps ride the same machinery as everything else.
 - **Root motion.** Extracted by the engine from the root track and *delivered* — a per-frame component field the game reads in Update — never auto-applied. The game routes it through the character controller or transform itself; UE and Unity both converged here after years of fighting the alternative.
 - **Sockets.** Bone-level attachment extends the existing hierarchy: `world.attach_to_bone(child, parent, joint)`. `WorldTransform` propagation consumes the sampled pose, so weapon-in-hand rides the same parent mechanism as everything else.
+
+---
+
+## Audio
+
+*(OQ 26 resolution, 2026-08-11.)* The audio engine is **in-house** — the mixer is engine identity, not an outsourced dependency. UE5's reinvestment in its own Audio Mixer + MetaSounds is the modern precedent; Unity's built-in audio being licensed FMOD internals is the cautionary tale. Middleware (Wwise/FMOD) is deliberately not designed for: if a shipping need ever demands it, the path would be a whole-subsystem replacement plugin — noted as possible, intentionally unspec'd.
+
+Engine/game split: the engine owns the device layer, mixer graph, voices, DSP, and streaming; the game owns *what plays and why* — behaviors emit through `AudioCommands`, and game logic computes judgments like occlusion, writing engine-provided per-voice knobs.
+
+### Architecture
+
+- **Device layer: `cpal`** (the Rust ecosystem standard). The audio thread runs the mixer at a fixed block size (~512 samples), draining `AudioCommands` once per game frame.
+- **Mixer graph as data.** Buses with sends and inserts, defined by a `MixerLayout` asset (the same serde philosophy as `AnimGraph`): e.g., master → music / SFX / dialogue / ambience, with per-bus volume and effect chains.
+- **Voice management.** A voice pool with priorities and **virtualization**: over-limit voices keep advancing their playheads silently and resume audibly when a slot frees — 200 logical sounds stay affordable.
+- **Spatialization.** Distance attenuation + stereo/surround panning in v1, driven by `set_listener` and per-voice positions. HRTF explicitly deferred.
+- **DSP.** Per-voice pitch/volume/lowpass built in; one algorithmic reverb as a send-bus effect in v1; an effect-insert trait for custom DSP later.
+- **Occlusion — the split, showcased.** The engine primitive is a per-voice filter/gain knob. The *game* computes occlusion (physics raycasts through the `PhysicsProvider` query API, from a behavior or system) and writes the knob. The engine never decides what is occluded.
+- **Streaming music.** Long clips decode on the IO pool into ring buffers — never fully resident. `AudioClip` remains the in-memory format for short SFX.
+- **Instrumented.** The audio thread has its profiling lane; voice counts and buffer underruns join the standard counter set (OQ 24).
+
+**v2+:** MetaSounds-style procedural audio graphs — the same data-graph philosophy as `AnimGraph`, applied to DSP.
 
 ---
 
@@ -2208,10 +2229,14 @@ intermixes game and engine concerns, we deliberately do not.
     sampling on the game pool in PostUpdate, palette → staging → DeformPass; events into the
     double-buffered bus; root motion delivered never auto-applied; bone sockets via
     `attach_to_bone`. Spec: Animation section.
-26. **Audio engine.** Behind the `AudioCommands` surface: the build-vs-middleware decision,
-    mixer/bus hierarchy, DSP effects (reverb, filters, occlusion), voice management and
-    virtualization, streaming audio (music), the spatialization model. Currently the doc
-    specifies an API and a thread, not an audio engine.
+26. **[RESOLVED 2026-08-11] Audio engine.** **In-house** (Option B): `cpal` device layer;
+    audio thread mixing at fixed block size; data-defined mixer/bus graph (`MixerLayout`
+    asset); voice pool with priorities + virtualization; distance/pan spatialization (HRTF
+    deferred); per-voice DSP knobs + one send-bus reverb + an effect-insert trait; streaming
+    music via IO-pool ring buffers; occlusion = engine knob, game computation via physics
+    queries. Middleware deliberately unspec'd — a whole-subsystem replacement plugin remains a
+    possible future path if a shipping need demands it. v2+: MetaSounds-style procedural
+    graphs. Spec: Audio section.
 27. **Resource pipeline & filesystem.** The offline half of assets: cooking/conditioning
     pipeline (import → engine-native formats), filesystem abstraction (mounts, archives/paks,
     platform paths), asset identity (GUID vs. path), inter-asset dependency management,
