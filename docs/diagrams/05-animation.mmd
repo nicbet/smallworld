@@ -1,0 +1,47 @@
+classDiagram
+    direction LR
+
+    class PosePrimitives {
+        engine core, public API level
+        +sample(clip, time) Pose
+        +blend(a, b, t) Pose
+        +blend_masked(a, b, mask, t) Pose
+        +additive(base, add, weight) Pose
+        +two_bone_ik(pose, chain, target) Pose
+        +look_at(pose, joint, target) Pose
+    }
+
+    class AnimGraphAsset {
+        <<asset>>
+        blend trees, layers, masks, state machines
+        parameter declarations
+    }
+
+    class GraphEvaluator {
+        engine-provided standard, built on primitives
+        +evaluate(graph, params, dt) Pose
+    }
+
+    class SkeletonAsset {
+        <<asset>>
+        joint hierarchy, bind pose, sockets
+    }
+    class AnimClipAsset {
+        <<asset>>
+        compressed curves + event track
+    }
+
+    class Deformer {
+        <<trait>>
+        compute deformers in the DeformPass
+        +deform(ctx DeformContext)
+    }
+    class SkinningDeformer {
+        built-in: bone palette to deformed buffers
+    }
+
+    GraphEvaluator ..> PosePrimitives
+    GraphEvaluator ..> AnimGraphAsset
+    AnimClipAsset ..> SkeletonAsset : targets joints
+    SkinningDeformer ..|> Deformer
+    GraphEvaluator ..> SkinningDeformer : palettes via staging

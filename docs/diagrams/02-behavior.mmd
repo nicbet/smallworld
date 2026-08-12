@@ -1,0 +1,56 @@
+classDiagram
+    direction LR
+
+    class Behavior {
+        <<trait>>
+        +init(entity, ctx BehaviorContext)
+        +update(entity, ctx BehaviorContext, dt f32)
+        +on_event(entity, ctx BehaviorContext, event)
+        +shutdown(entity, ctx BehaviorContext)
+    }
+
+    class BehaviorContext {
+        +world World
+        +input Input
+        +time Time
+        +events EventBus
+        +audio AudioCommands
+        +commands BehaviorCommands
+    }
+
+    class BehaviorHost {
+        game-thread side structure
+        native instances + C-ABI plugins + Lua VM
+        +register(behavior) BehaviorId
+    }
+
+    class BehaviorCommands {
+        deferred structural ops
+        +despawn_end_of_frame(entity)
+    }
+
+    class RustBehavior {
+        static link, direct World access
+    }
+    class CAbiBehavior {
+        dylib, stable C vtable
+        per-call accessor API
+    }
+    class LuaBehavior {
+        mlua, sandboxed
+        per-call accessor API
+        userdata = handles and copies only
+    }
+
+    class System {
+        <<trait>>
+        bulk per-frame logic over queries
+        +run(world World, dt f32)
+    }
+
+    RustBehavior ..|> Behavior
+    CAbiBehavior ..|> Behavior
+    LuaBehavior ..|> Behavior
+    BehaviorHost o-- Behavior : owns instances outside World
+    Behavior ..> BehaviorContext
+    BehaviorContext o-- BehaviorCommands

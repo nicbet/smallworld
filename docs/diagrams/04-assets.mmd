@@ -1,0 +1,71 @@
+classDiagram
+    direction LR
+
+    class AssetServer {
+        +load~T~(path) AssetHandle~T~
+        +state~T~(handle) AssetState
+        +get~T~(handle) Option~T~
+        +unload~T~(handle)
+    }
+
+    class AssetHandle~T~ {
+        immutable shared asset
+        +id AssetId
+        +generation u32
+    }
+    class ResourceHandle~T~ {
+        mutable resource (materials)
+    }
+
+    class AssetLoader {
+        <<trait>>
+        importer - runs at COOK time, never ship load
+        +extensions() Slice~str~
+        +load(bytes, path) CookedArtifact
+    }
+
+    class AssetDatabase {
+        GUID identity, sidecar .meta
+        dependency edges recorded at import
+        +resolve(guid) Path
+        +dependencies(guid) Set~Guid~
+    }
+
+    class DerivedDataCache {
+        key = source hash x importer version
+        +get_or_cook(source) CookedArtifact
+    }
+
+    class Vfs {
+        +mount(scheme, backend)
+        +open(url) Reader
+        content:// user:// temp://
+    }
+
+    class StagingPool {
+        CPU-visible mapped buffers
+        ring, fence-reclaimed, budgeted
+        +alloc(size, align) StagingRef
+    }
+
+    class StagingRef {
+        +buffer StagingBufferId
+        +offset u64
+        +size u64
+    }
+
+    class ResourceOp {
+        <<enumeration>>
+        UploadMesh
+        UploadTexture
+        UpdateMaterial
+        Free
+    }
+
+    AssetServer o-- AssetHandle
+    AssetServer --> AssetDatabase
+    AssetDatabase --> DerivedDataCache
+    DerivedDataCache ..> AssetLoader : cook-on-demand (dev)
+    AssetServer --> Vfs
+    AssetLoader ..> StagingPool : decode-direct
+    ResourceOp *-- StagingRef : bulk payloads

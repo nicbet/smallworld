@@ -1,0 +1,76 @@
+classDiagram
+    direction LR
+
+    class GeometryExtractor {
+        <<trait>>
+        engine contract
+    }
+    class GeometryRenderer {
+        <<trait>>
+        engine contract
+    }
+    class ShadowCaster {
+        <<trait>>
+        engine contract
+    }
+    class TlasContributor {
+        <<trait>>
+        engine contract
+    }
+    class RenderPass {
+        <<trait>>
+        engine contract
+    }
+    class ScatterSurface {
+        <<trait>>
+        engine contract (PCG)
+    }
+    class Deformer {
+        <<trait>>
+        engine contract
+    }
+
+    class VoxelExtractor {
+        emits extracted-mesh tiers to shared lane
+        custom lane: VolumeDrawCommand demand hints
+    }
+
+    class VoxelRenderer {
+        retained brick pool + residency truth
+        distance-banded LOD blending (V3/V10)
+    }
+
+    class VolumePass {
+        proxy-raster fragment raymarch (OQ 1)
+        frag_depth + GBuffer + velocity
+        complementary dither at tier handoff
+    }
+
+    class MeshExtractor {
+        MC + Transvoxel (V3)
+        collision ring variant for physics (V9)
+        extract-from-same-LOD convergence
+    }
+
+    class VoxelScatterSampler {
+        analytic graph for pristine cells
+        realized voxels where edited (V6)
+        gravity-aligned frames
+    }
+
+    class GiInjector {
+        SVO data into GI clipmap (OQ 4)
+    }
+    class FroxelInjector {
+        far-tier media density (OQ 9)
+    }
+
+    VoxelExtractor ..|> GeometryExtractor
+    VoxelRenderer ..|> GeometryRenderer
+    VoxelRenderer ..|> ShadowCaster : depth-only raymarch
+    VoxelRenderer ..|> TlasContributor : extracted-mesh BLAS
+    VolumePass ..|> RenderPass
+    VoxelScatterSampler ..|> ScatterSurface
+    VoxelRenderer *-- VolumePass
+    VoxelRenderer ..> MeshExtractor
+    VoxelExtractor ..> MeshExtractor : far tiers

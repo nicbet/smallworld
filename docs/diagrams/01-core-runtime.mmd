@@ -1,0 +1,111 @@
+classDiagram
+    direction LR
+
+    class Engine {
+        +run(config EngineConfig, app App) never
+    }
+
+    class App {
+        <<trait>>
+        +init(ctx GameContext)
+        +update(ctx GameContext, dt f32)
+        +fixed_update(ctx GameContext, fixed_dt f32)
+        +shutdown()
+    }
+
+    class GameContext {
+        +world World
+        +input Input
+        +time Time
+        +assets AssetServer
+        +audio AudioCommands
+        +events EventBus
+        +window WindowState
+        +register_geometry_backend(extractor, renderer)
+        +register_system(phase Phase, system System)
+        +set_draw_processor(pass, processor DrawProcessor)
+        +begin_world_load(scene) WorldLoadHandle
+        +world_load_progress(handle) LoadProgress
+        +swap_world(handle)
+        +set_paused(paused bool)
+        +set_time_scale(scale f32)
+        +set_pacing(pacing PacingConfig)
+        +set_window_mode(mode WindowMode)
+        +feedback() Option~FrameFeedback~
+        +gpu_frame_time() f32
+    }
+
+    class Time {
+        +dt f32 scaled, 0 when paused
+        +real_dt f32 unscaled, for UI
+        +elapsed f64
+        +frame u64
+        +fixed_dt f32
+        +scale f32
+        +paused bool
+    }
+
+    class WindowState {
+        +width u32
+        +height u32
+        +scale_factor f64
+        +focused bool
+        +mode WindowMode
+    }
+
+    class EngineConfig {
+        +title String
+        +window_mode WindowMode
+        +fixed_timestep f32
+        +pipeline_mode PipelineMode
+        +pacing PacingConfig
+        +render_budget RenderBudget
+        +log_level LogLevel
+    }
+
+    class PacingConfig {
+        +vsync bool
+        +target_frame_time_ms Option~f32~
+        +max_gpu_frames_in_flight u8
+        +drs DrsConfig
+        +latency_mode LatencyMode
+    }
+
+    class PipelineMode {
+        <<enumeration>>
+        Overlapped
+        Lockstep
+    }
+
+    class Input {
+        raw polling (tools, debug)
+        +key_held(key) bool
+        +mouse_delta() Vec2
+        +controller(index) Option~ControllerState~
+        actions (game-facing standard)
+        +action_held(name) bool
+        +action_pressed(name) bool
+        +axis1(name) f32
+        +axis2(name) Vec2
+        +push_map(map)
+        +pop_map()
+    }
+
+    class ActionMap {
+        <<asset>>
+        named rebindable bindings
+        context stack, block or passthrough
+        rebinds persist to user url
+    }
+
+    Input o-- ActionMap : active stack
+
+    Engine ..> App : drives lifecycle
+    Engine ..> EngineConfig
+    App ..> GameContext : receives per call
+    GameContext o-- Time
+    GameContext o-- Input
+    GameContext o-- WindowState
+    EngineConfig *-- PacingConfig
+    EngineConfig *-- PipelineMode
+

@@ -1,0 +1,59 @@
+classDiagram
+    direction LR
+
+    class VoxelPlugin {
+        +register_source(name, source VolumeSource) VolumeSourceId
+        +edit(volume, brush Brush, op Op)
+    }
+
+    class VolumeSource {
+        <<trait>>
+        pure over (params, coord) - V4 contract
+        +generate(params, coord, world_min) Option~BrickData~
+        +bounds(params) AABB
+        +lod_hint() LodMeta
+    }
+
+    class GraphSource {
+        density graph asset evaluator
+        batch-per-brick, SIMD-friendly
+    }
+
+    class DensityGraphAsset {
+        <<asset>>
+        primitives + noise + CSG ops + transforms
+        outputs: density, material, named channels
+    }
+
+    class BrickTree {
+        16^3 bricks at every level
+        demand-driven adaptive depth (V7)
+        pinned shallow levels always resident
+        +realize(node, level) Brick
+        +coarse_from_source(node) Brick
+        +filter_up_edited(node) Brick
+    }
+
+    class Brick {
+        density u8 narrow band or block id
+        palette 1-8 bit indices to u16 volume ids
+    }
+
+    class MaterialRules {
+        <<asset>>
+        AUTO assignment: slope/height/curvature
+        evaluated identically in raymarch + extract
+    }
+
+    class SurfaceMode {
+        <<enumeration>>
+        Blocky
+        Smooth
+    }
+
+    GraphSource ..|> VolumeSource
+    GraphSource ..> DensityGraphAsset
+    VoxelPlugin o-- VolumeSource : registry
+    BrickTree ..> VolumeSource : pristine generate at any spacing
+    BrickTree o-- Brick
+    Brick ..> MaterialRules : AUTO sentinel

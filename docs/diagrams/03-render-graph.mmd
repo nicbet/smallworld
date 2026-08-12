@@ -1,0 +1,99 @@
+classDiagram
+    direction LR
+
+    class RenderGraph {
+        optional input slots: dummies + uniform flags (OQ 2)
+        +add_pass(pass RenderPass)
+        +remove_pass(name)
+        +execute(packet, state)
+    }
+
+    class RenderPass {
+        <<trait>>
+        +name() str
+        +declare(builder PassBuilder)
+        +prepare(packet, state)
+        +execute(ctx PassContext)
+    }
+
+    class DrawProcessor {
+        <<trait>>
+        shared mesh stream only
+        +filter(cmd, pass) bool
+        +sort_key(cmd, pass) u64
+        +bind(cmd, pass, ctx)
+    }
+
+    class GpuContext {
+        +instance +adapter +device +queue +surface
+        +caps Capabilities
+    }
+
+    class Capabilities {
+        +ray_query bool
+        +int64_atomic_min_max bool
+        +texture_int64_atomic bool
+        +timestamp_query bool
+        +max_texture_dim u32
+    }
+
+    class GpuMeshPool {
+        dense generational SlotMap keyed by GpuId
+        +budget MemoryBudget
+    }
+    class GpuTexturePool
+    class GpuMaterialPool
+
+    class RenderTargets {
+        internal-res scene targets, DRS via viewport
+        +depth +depth_mesh_copy
+        +gbuffer_albedo/normal/material/emissive/velocity
+        +hdr +scene_color_copy
+        +shadow_atlas +hzb
+        +froxel_volume +froxel_history
+        +rt Option~RTTargets~
+    }
+
+    class AccelerationStructure {
+        TLAS pre-cull, RT culling radius
+        +blas_cache SecondaryMap keyed by GpuId
+        +tlas
+    }
+
+    class ViewParams {
+        +kind ViewKind
+        +view_projection Mat4
+        +frustum_planes
+        +jitter Vec2
+        +resolution_scale f32
+    }
+
+    class ViewKind {
+        <<enumeration>>
+        Main
+        Aux
+        Shadow
+    }
+
+    class GBufferPass
+    class VolumePass {
+        Voxel Plugin: proxy-raster fragment raymarch
+    }
+    class LightingPass {
+        shading-model switch, indirect chains
+        public slots: gi, shadow masks, sky visibility
+    }
+    class TemporalResolvePass {
+        TAAU, replaceable node (FSR/DLSS slot)
+    }
+
+    GBufferPass ..|> RenderPass
+    VolumePass ..|> RenderPass
+    LightingPass ..|> RenderPass
+    TemporalResolvePass ..|> RenderPass
+    RenderGraph o-- RenderPass
+    RenderGraph ..> DrawProcessor : per-pass hook
+    GpuContext *-- Capabilities
+    RenderTargets *-- AccelerationStructure : when ray_query
+    ViewParams *-- ViewKind
+    RenderPass ..> ViewParams

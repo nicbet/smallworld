@@ -1,0 +1,32 @@
+classDiagram
+    direction LR
+
+    class EditQueue {
+        brush ops, batched, budgeted
+        applied end of Update
+    }
+
+    class Brush {
+        <<enumeration>>
+        Sphere
+        Box
+        Capsule
+    }
+    class Op {
+        <<enumeration>>
+        Dig
+        Place
+        Paint
+    }
+
+    class Propagation {
+        same frame: GPU brick re-upload, GI re-voxelize
+        async 1-3f: local re-mesh (dither-faded)
+        priority: collider ring under-feet rule
+        lazy: overlay write via Coordinator
+        async: scatter invalidation in footprint
+    }
+
+    EditQueue *-- Brush
+    EditQueue *-- Op
+    EditQueue ..> Propagation : one edit, six systems

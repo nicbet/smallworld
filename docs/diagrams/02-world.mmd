@@ -1,0 +1,35 @@
+classDiagram
+    direction TB
+
+    class World {
+        +spawn() EntityId
+        +despawn(entity)
+        +add~C~(entity, component)
+        +get~C~(entity) Option~C~
+        +get_mut~C~(entity) Option~C~
+        +set_parent(child, parent)
+        +children(parent) Slice~EntityId~
+        +attach_to_bone(child, parent, joint)
+    }
+
+    class EntityId {
+        +index u32
+        +generation u32
+    }
+
+    class ChangeTracker {
+        +is_dirty~C~(entity) bool
+        +dirty_set~C~() Set~EntityId~
+        +spawned() Set~EntityId~
+        +despawned() Set~EntityId~
+        +dirty_resources Set~ResourceId~
+    }
+
+    class EventBus {
+        double-buffered: sent N, readable N+1
+        +send~E~(event)
+        +read~E~() Slice~E~
+    }
+
+    World o-- EntityId : SlotMap arena
+    World *-- ChangeTracker : drives delta extract

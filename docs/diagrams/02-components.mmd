@@ -1,0 +1,88 @@
+classDiagram
+    direction LR
+
+    class Transform {
+        <<component>>
+        +position DVec3
+        +rotation Quat
+        +scale Vec3
+    }
+    class WorldTransform {
+        <<component>>
+        engine-computed, read-only
+        +matrix Mat4
+        +prev_matrix Mat4
+    }
+    class Camera {
+        <<component>>
+        +projection Projection
+        +target RenderTargetRef
+        +priority i32
+        +active bool
+        +exposure Exposure
+    }
+    class MeshRenderer {
+        <<component>>
+        +mesh AssetHandle~MeshAsset~
+        +material ResourceHandle~MaterialDef~
+        +cast_shadows bool
+        +lod_bias f32
+    }
+    class VolumeRenderer {
+        <<component>>
+        +source VolumeSourceId
+        +source_params VolumeSourceParams
+        +lod_policy LodPolicy
+        +stream_priority StreamPriority
+    }
+    class LightSource {
+        <<component>>
+        +kind LightKind
+        +color Vec3
+        +intensity f32
+        +cast_shadow bool
+    }
+    class FogVolume {
+        <<component>>
+        +shape FogShape
+        +density f32
+        +anisotropy f32
+    }
+    class RigidBody {
+        <<component>>
+        +body_type BodyType
+        +mass f32
+        +ccd bool
+    }
+    class Collider {
+        <<component>>
+        +shape ColliderShape
+        +layers CollisionLayers
+        +sensor bool
+    }
+    class Joint {
+        <<component>>
+        +other EntityRef
+        +kind JointKind
+        +breakable Option~f32~
+    }
+    class CharacterController {
+        <<component>>
+        +capsule Capsule
+        +step_height f32
+        +slope_limit f32
+    }
+    class Animator {
+        <<component>>
+        +graph AssetHandle~AnimGraphAsset~
+        +parameters AnimParams
+    }
+    class BehaviorRef {
+        <<component>>
+        +behavior BehaviorId
+    }
+    class StreamingSource {
+        <<component>>
+        +range f32
+        +priority u8
+    }

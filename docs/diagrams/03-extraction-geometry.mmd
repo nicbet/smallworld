@@ -1,0 +1,84 @@
+classDiagram
+    direction LR
+
+    class GeometryExtractor {
+        <<trait>>
+        game thread, no GPU types
+        +component_id() TypeId
+        +extract(world, changes, out SceneDeltaWriter)
+    }
+
+    class GeometryRenderer {
+        <<trait>>
+        render thread, may use wgpu
+        +apply_delta(delta, state RenderState)
+        +cull(view ViewParams, hzb, out ViewDrawList)
+        +register_passes(graph RenderGraph)
+        +shadow_caster() Option~ShadowCaster~
+        +tlas_contributor() Option~TlasContributor~
+    }
+
+    class ShadowCaster {
+        <<trait>>
+        +render_shadow_depth(view, ctx PassContext)
+    }
+    class TlasContributor {
+        <<trait>>
+        +tlas_instances(out TlasInstanceList)
+    }
+
+    class SceneDeltaWriter {
+        two lanes per extractor
+        +upsert_mesh_draw(id DrawId, cmd MeshDrawCommand)
+        +remove_mesh_draw(id DrawId)
+        +custom(payload)
+    }
+
+    class ViewDrawList {
+        +mesh_draws Vec~DrawId~
+        +custom Vec~BackendPayload~
+    }
+
+    class MeshDrawCommand {
+        +mesh_gpu_id GpuId
+        +material_gpu_id GpuId
+        +instances Range~u32~
+        +bounds AABB
+        +flags DrawFlags
+    }
+
+    class InstanceData {
+        cell-local translation (OQ 30)
+        +world_matrix Mat4
+        +prev_world_matrix Mat4
+        +fade f32
+        +flags u32
+    }
+
+    class RenderScene {
+        retained, render-thread owned
+        shared mesh store + instance buffer
+        + per-backend retained state
+    }
+
+    class MeshBackendExtractor {
+        extractor-only: shared store is engine-culled
+    }
+    class VoxelExtractor {
+        Voxel Plugin
+    }
+    class VoxelRenderer {
+        Voxel Plugin
+    }
+
+    MeshBackendExtractor ..|> GeometryExtractor
+    VoxelExtractor ..|> GeometryExtractor
+    VoxelRenderer ..|> GeometryRenderer
+    VoxelRenderer ..|> ShadowCaster
+    VoxelRenderer ..|> TlasContributor
+    GeometryExtractor ..> SceneDeltaWriter
+    GeometryRenderer ..> ViewDrawList
+    SceneDeltaWriter ..> MeshDrawCommand : shared lane
+    RenderScene o-- MeshDrawCommand : retained store
+    RenderScene o-- InstanceData : slot-stable buffer
+    GeometryRenderer --> RenderScene : applies deltas

@@ -1,0 +1,22 @@
+classDiagram
+    direction LR
+
+    class SerializationRegistry {
+        stable name + version per component
+        +register~C~(name, version, migrations)
+        consumers: saves, replication, editor reflection
+    }
+
+    class SaveDocument {
+        header + entity section + game sections
+        RON dev, binary+zstd ship
+    }
+
+    class EntityRef {
+        wrapper for entity references in components
+        auto-remapped on load
+    }
+
+    SaveDocument ..> SerializationRegistry
+    SaveDocument ..> EntityRef : remap sites known
+    Cell ..> SaveDocument : same document format

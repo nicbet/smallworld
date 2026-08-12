@@ -1,0 +1,47 @@
+classDiagram
+    direction LR
+
+    class PhysicsProvider {
+        <<trait>>
+        engine-shaped: descriptions in, transforms/events out
+        certification: deterministic mode + f64 mode
+        +create_body(entity, body, collider, transform) PhysicsHandle
+        +update_body(handle, body)
+        +destroy_body(handle)
+        +create_joint(a, b, joint) JointHandle
+        +destroy_joint(handle)
+        +step(fixed_dt)
+        +drain_transforms(out)
+        +drain_events(out)
+        +raycast(ray, filter) Option~RayHit~
+        +sweep(shape, motion, filter) Option~SweepHit~
+        +overlap(shape, filter) Vec~EntityId~
+        +extension~E~() Option~E~
+    }
+
+    class RapierProvider {
+        v1 provider - pure Rust, f64 feature
+    }
+    class JoltProvider {
+        named candidate (C++ FFI)
+    }
+
+    class KinematicCharacterController {
+        engine-owned, query-API only
+        provider-invariant game feel
+        +move(controller, desired, dt) MoveResult
+    }
+
+    class JointKind {
+        <<enumeration>>
+        Fixed
+        Revolute
+        Prismatic
+        Spherical
+        Distance
+        SixDof
+    }
+
+    RapierProvider ..|> PhysicsProvider
+    JoltProvider ..|> PhysicsProvider
+    KinematicCharacterController ..> PhysicsProvider : shape casts + overlaps only

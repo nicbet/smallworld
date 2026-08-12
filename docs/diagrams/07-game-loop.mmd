@@ -1,0 +1,37 @@
+sequenceDiagram
+    participant App as Your App (game code)
+    participant GT as Game Thread (engine)
+    participant RT as Render Thread (engine)
+    participant AT as Audio Thread
+    participant GPU as GPU
+
+    Note over App,GPU: BOOT — the only moment the game hands anything over
+    App->>GT: Engine::run(config, app)
+    GT->>GT: window · GpuContext · Capabilities · World · spawn threads
+    GT->>App: app.init(ctx) — spawn entities, load assets (handles back)
+
+    Note over GT,RT: steady state — frame N on the game thread WHILE render draws N-1
+    par game thread, frame N
+        GT->>GT: INPUT — pump events into Input snapshot
+        loop 0..N fixed ticks (accumulator on scaled tim. 0 while paused)
+            GT->>App: app.fixed_update(ctx)
+            GT->>GT: physics provider steps, sync-back via get_mut
+        end
+        GT->>App: app.update(ctx, dt)
+        App->>GT: mutate World via ctx · send events · ctx.audio.play(...)
+        GT->>GT: behaviors (BehaviorHost) + systems by phase
+        GT->>GT: LATE — transform propagation, bounds, streaming demand
+        GT->>RT: EXTRACT — FramePacket (views, lights, deltas, resource ops), bounded send
+        GT->>AT: drain AudioCommands
+        GT->>GT: CLEAR change tracker → start frame N+1
+    and render thread, frame N-1
+        RT->>RT: RECEIVE — drain control channel, recv packet
+        RT->>RT: PREPARE — apply deltas to RenderScene, record staged uploads
+        RT->>RT: CULL — derive shadow views, per-view frustum+HZB, TLAS pre-cull
+        RT->>GPU: RECORD render graph + SUBMIT (queue-depth throttle)
+        Note over GPU: Deform → Depth → GBuffer/VolumePass → Shadows →<br/>Froxels → Lighting → RT fx → Sky → Transparency → Post/TAAU
+        RT->>GT: FrameFeedback (advisory, readback ring)
+        RT->>RT: PRESENT
+    and audio thread, continuous
+        AT->>AT: mix fixed-size blocks (voices → buses) → cpal device
+    end

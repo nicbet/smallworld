@@ -1,0 +1,38 @@
+flowchart LR
+    subgraph GAME["What a GAME holds — all of it"]
+        APP["impl App<br/>your logic + your state"]
+        HANDLES["handles only:<br/>EntityId · AssetHandle · ResourceHandle · SoundHandle"]
+        CFG["EngineConfig<br/>built once at boot"]
+        CONTENT["data assets:<br/>descriptors · anim/scatter/density graphs · Lua scripts · themes"]
+    end
+
+    subgraph ENGINE["What the ENGINE owns"]
+        subgraph GT["game-thread side — LENT to the game per call, via GameContext"]
+            WORLD["World + components"]
+            ASSETS["AssetServer"]
+            EVENTS["EventBus"]
+            AUDIOC["AudioCommands"]
+            ITW["Input · Time · WindowState"]
+            BH["BehaviorHost (Lua VM, native behaviors)"]
+        end
+        subgraph RT["render-thread side — the game can NEVER touch"]
+            SCENE["RenderScene (retained draw data)"]
+            GRAPH["RenderGraph + passes"]
+            GPU["GpuContext · pools · targets · wgpu"]
+        end
+        subgraph SVC["service side — reached only through commands/queries"]
+            MIX["audio mixer + voices"]
+            COORD["Streaming Coordinator"]
+            PHYSW["physics world (provider-internal)"]
+        end
+    end
+
+    CFG ==>|"Engine::run(config, app) — handed over ONCE"| ENGINE
+    GT ==>|"engine calls YOU:<br/>init / fixed_update / update (ctx)"| APP
+    HANDLES -.->|"name things inside"| WORLD
+    HANDLES -.-> ASSETS
+    CONTENT -.->|"loaded via AssetServer"| ASSETS
+    WORLD -->|"extract: owned delta packet"| SCENE
+    AUDIOC -->|"drained each frame"| MIX
+    WORLD -->|"RigidBody/Collider descriptions"| PHYSW
+    PHYSW -->|"fixed-tick transforms, events"| WORLD

@@ -1,0 +1,60 @@
+classDiagram
+    direction LR
+
+    class WorldStreaming {
+        Layer 1: which entities exist
+        uniform grid cells, grids plural
+        +update(sources) load/unload cells
+    }
+
+    class Cell {
+        base document + overlay
+        stable id = grid coords
+        +load() spawns entities
+    }
+
+    class StreamingCoordinator {
+        Layer 2 brain: dedicated thread
+        dispatcher, never worker
+        +submit(demand)
+        +cancel(generation)
+    }
+
+    class BudgetArbiter {
+        GPU memory, IO bandwidth,
+        upload bytes/frame, decode CPU
+        priority classes, LRU within class
+    }
+
+    class BrickPoolResidency {
+        residency TRUTH lives here
+        pinned coarse tier invariant
+        +publish(brick, level)
+        +evict(brick)
+    }
+
+    class VolumeSource {
+        <<trait>>
+        pure over (params, coord)
+        +generate(params, coord, world_min) Option~BrickData~
+        +bounds(params) AABB
+        +lod_hint() LodMeta
+    }
+
+    class GenerationPolicy {
+        <<enumeration>>
+        Always
+        CacheToDisk
+    }
+
+    class UploadBatch {
+        staged regions to record in PREPARE
+    }
+
+    WorldStreaming o-- Cell
+    StreamingCoordinator *-- BudgetArbiter
+    StreamingCoordinator ..> VolumeSource : generate on workers
+    StreamingCoordinator ..> UploadBatch
+    UploadBatch ..> BrickPoolResidency : publish at copy-record
+    VolumeSource ..> GenerationPolicy : declared at registration
+    Cell ..> StreamingCoordinator : detail demand

@@ -1,0 +1,66 @@
+flowchart TD
+    subgraph GAME["game crates (consumers)"]
+        SANDBOX["sandbox / games<br/>impl App · behaviors · scatter graphs"]
+    end
+
+    subgraph PLUGINS["plugin crates"]
+        VOXEL["voxel-plugin<br/>VolumeSource · VolumePass · SVO"]
+        HEX["hexasphere-plugin<br/>(scoped, future)"]
+    end
+
+    subgraph ENGINE["crates/engine"]
+        CORE["core<br/>Engine · App · GameContext<br/>Time · Input · Window · Lifecycle"]
+        WORLD["world<br/>World · components · ChangeTracker<br/>EventBus · BehaviorHost"]
+        RENDER["render<br/>RenderScene · RenderGraph · passes<br/>pools · targets · slots"]
+        ASSETS["assets<br/>AssetServer · importers · VFS<br/>staging pool · serialization registry"]
+        STREAM["streaming<br/>WorldStreaming (cells)<br/>Coordinator · budgets"]
+        PHYS["physics<br/>PhysicsProvider · KCC · joints"]
+        ANIM["animation<br/>pose primitives · AnimGraph · Deformers"]
+        AUDIO["audio<br/>mixer · voices · AudioCommands"]
+        UIWK["ui<br/>widgets-as-entities · layout · egui dev overlay"]
+        PCG["pcg<br/>scatter graphs · ScatterSurface · foliage"]
+        PROF["profiling<br/>scopes · counters · BudgetRegistry · sinks"]
+    end
+
+    subgraph TOOLS["tool crates"]
+        COOK["smallworld-cook (CLI)"]
+    end
+
+    subgraph EXT["key external crates"]
+        WGPU["wgpu"]
+        WINIT["winit"]
+        RAPIER["rapier (f64)"]
+        MLUA["mlua"]
+        CPAL["cpal"]
+        RAYON["rayon / crossbeam"]
+        TAFFY["taffy"]
+    end
+
+    SANDBOX -->|"App · GameContext · components"| CORE
+    SANDBOX --> WORLD
+    VOXEL -->|"GeometryExtractor/Renderer · slots<br/>ShadowCaster · injectors · ScatterSurface"| RENDER
+    VOXEL --> STREAM
+    HEX -.->|"same contracts"| RENDER
+
+    CORE --> WORLD
+    CORE --> RENDER
+    CORE --> PROF
+    WORLD --> PROF
+    RENDER --> WGPU
+    CORE --> WINIT
+    RENDER --> STREAM
+    STREAM --> ASSETS
+    ASSETS --> WGPU
+    PHYS --> RAPIER
+    ANIM --> RENDER
+    AUDIO --> CPAL
+    WORLD --> MLUA
+    UIWK --> WORLD
+    UIWK --> TAFFY
+    PCG --> STREAM
+    PCG --> WORLD
+    CORE --> RAYON
+    COOK --> ASSETS
+
+    classDef future stroke-dasharray: 5 5
+    class HEX future

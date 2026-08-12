@@ -1,0 +1,43 @@
+classDiagram
+    direction LR
+
+    class AudioCommands {
+        game-facing command surface
+        +play(clip, params PlayParams) SoundHandle
+        +stop(handle)
+        +set_listener(position, forward, up)
+        +set_volume(handle, v)
+        +set_position(handle, p)
+    }
+
+    class AudioEngine {
+        audio thread, cpal device
+        fixed block size ~512
+        +process_block()
+    }
+
+    class MixerLayout {
+        <<asset>>
+        buses, sends, insert chains
+    }
+
+    class VoicePool {
+        priorities + virtualization
+        silent voices keep playheads
+    }
+
+    class Bus {
+        +volume f32
+        +inserts Vec~Effect~
+    }
+
+    class Effect {
+        <<trait>>
+        +process(block)
+    }
+
+    AudioCommands ..> AudioEngine : drained per frame
+    AudioEngine *-- VoicePool
+    AudioEngine o-- Bus
+    AudioEngine ..> MixerLayout : builds buses from data
+    Bus o-- Effect

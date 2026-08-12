@@ -1,0 +1,37 @@
+flowchart LR
+    subgraph GTHREAD["game thread"]
+        WORLD["World<br/>(components, f64 positions)"]
+        CT["ChangeTracker<br/>dirty sets"]
+        EXTRACT["EXTRACT<br/>interpolate fixed-tick transforms<br/>cell-anchor camera-relative offsets"]
+    end
+
+    subgraph PACKET["owned values through channels"]
+        FP["FramePacket<br/>views · lights · environment<br/>mesh_delta + instance lane · resource ops"]
+        UB["UploadBatch<br/>(from Streaming Coordinator)"]
+    end
+
+    subgraph RTHREAD["render thread"]
+        RS["RenderScene<br/>retained mesh store + InstanceData"]
+        CULL["per-view culling<br/>main + shadow + aux"]
+        DL["ViewDrawLists"]
+        RG["render graph"]
+    end
+
+    subgraph GPUX["GPU passes"]
+        DEFORM["Deform"] --> DEPTH["Depth pre-pass"] --> GEO["GBuffer + VolumePass<br/>(+ HZB build after)"] --> SHAD["Shadow atlas"] --> FROX["Froxels"] --> LIT["Lighting<br/>(slots: GI · masks · sky-vis)"] --> SKY["Sky/IBL"] --> TRANS["Transparency + media"] --> POST["TAAU → bloom → exposure →<br/>ACES → grading → dev UI"]
+    end
+
+    SWAP["swapchain<br/>(pixels)"]
+    SPK["cpal device<br/>(sound)"]
+
+    WORLD --> CT --> EXTRACT --> FP --> RS
+    UB --> RS
+    RS --> CULL --> DL --> RG --> DEFORM
+    POST --> SWAP
+
+    AC["AudioCommands"] --> VMIX["voice pool → buses → mix block"] --> SPK
+    WORLD -.->|"game logic: ctx.audio.play (one-shots, music)"| AC
+    WORLD -->|"AudioEmitter components<br/>engine-managed lifecycle, follows WorldTransform"| VMIX
+
+    FB["FrameFeedback<br/>advisory, readback ring"]
+    RG -.-> FB -.-> WORLD

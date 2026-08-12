@@ -131,6 +131,8 @@ _(OQ 8 resolution, 2026-08-11.)_ Three control loops, all consuming machinery th
 2. **Dynamic resolution controller (v1).** Consumes GPU frame time vs. `target_frame_time` and adjusts `resolution_scale` within `[min_scale, 1.0]`: **asymmetric response** (drop resolution fast on overrun, recover slowly), a **hysteresis band** (no oscillation around the target), **step-limited** changes (TAAU history stays valid). Strategic effect: the GPU stays inside budget, so loop 1 rarely engages and pacing stays smooth rather than reactive.
 3. **Predictive tick pacing (v2 — `LatencyMode::LowLatency`, game-tunable).** Delays the game tick so input sampling happens as late as possible: a computed sleep before the INPUT phase from predicted GPU time + safety margin (Reflex-style). Tuning-sensitive — an optimistic margin misses vsync — hence flag-gated, with margins exposed to games, shipped once real content exists to calibrate against.
 
+**Vsync & present modes.** `PacingConfig.vsync` maps to wgpu present modes: `true` → `Fifo` (vblank-paced, universal), `false` → `Mailbox` if available else `Immediate`. Vsync paces the _whole pipeline_ through designed backpressure — present blocks the Render Thread, the bounded packet channel fills, the Game Thread blocks on send — while the queue-depth throttle (loop 1) keeps the driver from hiding 2–3 frames of latency inside that blocking. The simulation is untouched: the fixed accumulator absorbs any render cadence. A **vsync-off frame cap** is a software limiter in the pacing module — sleep-to-target at tick start against `target_frame_time_ms` (v1-trivial; v2's predictive pacing subsumes it). Runtime toggles ride `set_pacing()` → surface reconfigure at a frame boundary, the same path as resize.
+
 `PipelineMode::Lockstep` remains the blunt instrument for genuinely latency-critical applications; with these loops, Overlapped mode is latency-competitive for everything else.
 
 ```rust
@@ -1339,6 +1341,26 @@ struct Collider {
 }
 ```
 
+##### Audio
+
+`AudioListener` marks the ears (typically the camera or player head; exactly one active).
+`AudioEmitter` is the **declarative complement** to the imperative `AudioCommands`: persistent, entity-attached sound whose _mechanical lifecycle_ the engine manages — starts/stops with the entity and its range, position follows `WorldTransform`, virtualized by distance through the voice pool — while _what_ it emits stays game-declared data. Commands remain the tool for one-shots and music control; emitters for stateful sources (campfire, machinery, ambience). Serializes like any component (OQ 20): a saved campfire keeps crackling.
+
+```rust
+struct AudioListener;
+
+struct AudioEmitter {
+    clip:     AssetHandle<AudioClip>,
+    volume:   f32,
+    pitch:    f32,
+    spatial:  bool,
+    looping:  bool,
+    range:    f32,     // audibility / virtualization radius
+    autoplay: bool,    // start when spawned or entering range
+    bus:      BusId,   // MixerLayout routing
+}
+```
+
 ##### Reflection Probes (spec'd, deferred)
 
 Not v1. Trigger: **authored** interior content (buildings, ships). Probes are deliberately _not_ the answer for procedural voxel interiors — a static capture goes stale on destruction; the SVO sky-visibility and voxel-traced specular slots cover those. Captured via aux views, prefiltered by the Environment/IBL machinery, assigned per cluster like lights, sampled with parallax box projection.
@@ -1414,7 +1436,7 @@ trait App {
 
 - `init` — called once after the engine initializes the World. Load assets, spawn initial entities, set up game state.
 - `update` — called once per frame with variable delta time. Process input, run gameplay logic, animate.
-- `fixed_update` — called at a fixed rate (default 60 Hz, configurable). Physics integration, network tick, anything that needs deterministic timestep. May run 0–N times per frame depending on accumulated time. **Engine guarantee (OQ 19):** no engine system introduces nondeterminism into fixed-tick simulation — this keeps lockstep/rollback netcode viable when networking arrives.
+- `fixed_update` — called at a fixed rate (default 60 Hz, configurable). Physics integration, network tick, anything that needs deterministic timestep. May run 0–N times per frame depending on accumulated time; runs **zero ticks while `Time.paused`**, and the accumulator advances by _scaled_ time, so `Time.scale` is slow-motion with per-tick determinism intact (OQ 33). **Engine guarantee (OQ 19):** no engine system introduces nondeterminism into fixed-tick simulation — this keeps lockstep/rollback netcode viable when networking arrives.
 - `shutdown` — called once before exit. Save state, clean up.
 
 #### GameContext
@@ -1441,15 +1463,30 @@ impl GameContext<'_> {
     fn register_system(&mut self, phase: Phase, system: impl System + 'static);
     fn set_draw_processor(&mut self, pass: &str, processor: impl DrawProcessor + 'static);
 
+    // Game flow (OQ 33)
+    fn begin_world_load(&mut self, scene: WorldDescriptor) -> WorldLoadHandle;
+    fn world_load_progress(&self, handle: WorldLoadHandle) -> LoadProgress;
+    fn swap_world(&mut self, handle: WorldLoadHandle, transition: SwapTransition);
+    // SwapTransition::None | CaptureLastFrame — freeze-frame crossfade texture (OQ 33)
+    fn set_paused(&mut self, paused: bool);
+    fn set_time_scale(&mut self, scale: f32);
+
+    // Runtime settings (OQ 33) — EngineConfig holds INITIAL values only
+    fn set_pacing(&mut self, pacing: PacingConfig);
+    fn set_window_mode(&mut self, mode: WindowMode);
+
     // Render feedback — fn feedback(), fn gpu_frame_time(): defined in
     // Frame Pipeline — Render-to-Game Feedback (not repeated here).
 }
 
 struct Time {
-    dt:       f32,    // variable delta (seconds)
-    elapsed:  f64,    // total seconds since start
+    dt:       f32,    // SCALED delta — 0 while paused; game logic reads this
+    real_dt:  f32,    // unscaled wall-clock delta — UI/menus read this (OQ 33)
+    elapsed:  f64,    // total scaled seconds since start
     frame:    u64,    // frame counter
     fixed_dt: f32,    // fixed timestep (e.g. 1/60)
+    scale:    f32,    // 1.0 normal, 0.5 slow-mo — drives the fixed accumulator too (OQ 33)
+    paused:   bool,   // fixed accumulator frozen; update continues (OQ 33)
 }
 
 struct WindowState {
@@ -1533,6 +1570,19 @@ impl LoadedScene {
 ```
 
 Compound assets (glTF, custom scene format) are loaded through the `AssetServer` and produce `LoadedScene` values that bulk-insert entities. `LoadedScene` is an _import-time_ product (DCC interchange); authored cells and saves use the OQ 20 document format — the two meet at spawn time, not on disk.
+
+#### Worlds & Game Flow
+
+_(OQ 33 resolution, 2026-08-12.)_ The flow state machine — MainMenu → Loading → Playing → Paused — is **game code** (an enum in the App, or a behavior); the engine never knows what a "main menu" is. It provides the primitives the flow composes:
+
+- **Background world construction.** `begin_world_load(descriptor)` builds a successor World while the current one keeps running — a loading screen is just the current World: spawns from documents, streams cells, warms assets through the normal async paths. `world_load_progress()` exposes asset/cell readiness for progress bars.
+- **Frame-boundary swap.** `swap_world(handle)` applies at end of frame: the old World tears down properly (behavior `shutdown`s, deferred despawns honored, emitters stop; the physics world rebuilds from the new World's descriptions per OQ 20), and the extract emits a **scene-reset delta** — the retained `RenderScene` clears wholesale and repopulates from the new World's first extract. GPU-resident assets are engine-level, not world-level: shared assets survive the swap via refcounts; only entities go.
+- **Cross-swap audio falls out of the existing split.** `AudioCommands` voices live in the engine-side mixer and survive swaps — menu music persists into the loading screen; `AudioEmitter`s die with their entities. The imperative/declarative pairing encodes _lifetime_.
+- **Pause & time scale.** `Time` carries `scale`, `paused`, and `real_dt`. Paused ⇒ the fixed accumulator freezes (zero ticks: physics and fixed gameplay halt) and `dt` reads 0, while `update` continues with `real_dt` so menus animate over a frozen world. `scale < 1` slows the accumulator: slow-motion with per-tick determinism intact. The engine does **not** auto-pause audio — ducking the gameplay bus is a game decision through the mixer.
+- **Pause is the _in-game_ tool — a main menu is a live World.** An animated menu backdrop (birds, clouds, wind) is just a small World running normally with UI entities in front; nothing is paused because there is no gameplay to protect. `paused`/`scale` are **global engine state, not world state**: they persist across swaps, and the engine never implicitly pauses or unpauses anything — flow transitions that want a different time state set it explicitly.
+- **Two clocks reach shaders too.** Frame uniforms carry both scaled `elapsed` and `real_elapsed`. Environmental shader effects (wind, water, cloud drift) default to **scaled** time — slow-mo bends the world, in-game pause freezes it — while real time is available per material for effects that must keep moving behind a pause menu.
+- **Loading screens & transitions.** A loading screen is pure composition, nothing new: a live World (never paused) with an image widget, music via `AudioCommands` (seamless across swaps), and a progress bar driven by `world_load_progress()` each `update`. **Fade-to-black** needs zero machinery — a full-screen UI quad animates alpha on `real_dt`, the swap hides behind full black, fade back in. **Crossfade** uses the shipped freeze-frame pattern: `swap_world(handle, SwapTransition::CaptureLastFrame)` captures the old world's final presented frame into a texture handle, and the game's UI fades that static image out over the new world's live render — visually indistinguishable from a live crossfade for short transitions. True dual-world live crossfade (two full scene renders composited) is explicitly out of scope.
+- **Runtime settings.** `EngineConfig` holds _initial_ values; `set_pacing()` and `set_window_mode()` mutate at frame boundaries through the existing control plumbing. A settings screen is UI + these setters + rebinding via the input action layer (see Input — Action Mapping).
 
 #### Entity Hierarchy
 
@@ -1661,6 +1711,46 @@ struct ControllerState {
 }
 ```
 
+#### Action Mapping
+
+_(OQ 34 resolution, 2026-08-12.)_ The raw polling API above remains (tools, debug), but the game-facing standard is **actions**: named, rebindable, device-agnostic. Engine/game split: the engine owns the mapping machinery, the context stack, and binding persistence; games declare action maps as data.
+
+```rust
+struct ActionMap {                   // asset: "gameplay", "ui", "vehicle", …
+    actions: Vec<ActionDef>,
+    passthrough: bool,               // false = blocks maps below it on the stack
+}
+
+struct ActionDef {
+    name: InternedString,            // "jump", "move", "fire"
+    kind: ActionKind,                // Button | Axis1 | Axis2
+    bindings: Vec<Binding>,          // rebindable; user edits serialize to user://
+}
+
+enum Binding {
+    Key(KeyCode),
+    MouseButton(MouseButton),
+    MouseMotion,                                       // Axis2
+    ControllerButton(u8),
+    ControllerAxis { axis: u8, dead_zone: f32 },
+    Composite2D { up: KeyCode, down: KeyCode, left: KeyCode, right: KeyCode },  // WASD
+}
+
+impl Input {
+    fn action_held(&self, name: &str) -> bool;
+    fn action_pressed(&self, name: &str) -> bool;      // frame edge — see fixed-tick rule
+    fn action_released(&self, name: &str) -> bool;
+    fn axis1(&self, name: &str) -> f32;
+    fn axis2(&self, name: &str) -> Vec2;
+    fn push_map(&mut self, map: AssetHandle<ActionMap>);
+    fn pop_map(&mut self);
+}
+```
+
+- **Context stack.** Active maps stack: opening the pause menu pushes the `ui` map, which (by default, `passthrough: false`) blocks gameplay actions beneath it — this is the input half of the UI focus/capture rule (OQ 18). Popping restores gameplay.
+- **Rebinding & persistence.** `ActionMap`s are assets; user rebinds serialize to `user://` (the settings screen edits bindings; the VFS persists them).
+- **Fixed-tick edge rule.** Action edges are per-_frame_, but a frame may run zero or two fixed ticks — so edges can be missed or double-seen by fixed logic. The documented pattern: read edges in `update`, convert to intent state ("jump requested"), consume the intent in `fixed_update`. The engine documents the pattern rather than hiding it.
+
 ### 6. Audio
 
 Game code issues audio commands; the audio system runs on a dedicated thread. No direct API access from game code — same server pattern as the rendering thread. (The audio engine itself — mixer graph, voices, DSP, streaming — is specified in the top-level Audio section.)
@@ -1745,6 +1835,27 @@ struct StreamingSource {
 ```
 
 - **Cell content = OQ 20 documents: base + overlay.** The base is authored content or a generation cache; the overlay holds persistent runtime edits (destruction). Load = base ∪ overlay. Same serde document format as scenes and saves — one format for authored content, generated caches, and persistence. Cell files are named by grid coordinates: stable across sessions.
+- **Unload persistence is a per-grid policy** _(OQ 35)_: `CellPersistence::Overlay` (default) diffs each unloading entity's dirty _registered_ components against the base document and writes the delta into the cell overlay — the pushed crate stays pushed when you return. `CellPersistence::Ephemeral` discards runtime state at unload — cells reset (respawning resources, dungeon instances). Per-grid, because the same world legitimately wants both (persistent structures grid + ephemeral clutter grid). Unregistered components are never persisted — the OQ 20 dev-mode audit warns.
+
+#### Entity Lifecycle (spawn → live → despawn → memory)
+
+_(OQ 35 resolution, 2026-08-12 — consolidation; every step already existed in its own section, this is the one-place ordering.)_
+
+**Spawn** (cell load, descriptor, or game code — always batched at load time per the perf rule):
+
+1. Registry-driven instantiation: stable component names → typed dense stores; `EntityRef` fields remapped; asset GUIDs resolve to handles (loads through the normal async path).
+2. Side structures react off the `ChangeTracker` spawn set: physics bodies created from `RigidBody`/`Collider` descriptions; `AudioEmitter`s start (in range); `BehaviorRef` instances register in the `BehaviorHost` — `init` + first `update` run **next** frame.
+3. The extract emits draw upserts + instance-slot allocations; the retained `RenderScene` absorbs them.
+
+**Despawn** (cell unload, `despawn()`, or behavior command — always deferred to end of frame, per OQ 6):
+
+1. Mark; children marked recursively (Entity Hierarchy).
+2. If the cell policy is `Overlay`: dirty registered components diff into the cell overlay _before_ teardown.
+3. End of frame, in order: behavior `shutdown`s → emitters stop (voices release to the pool) → physics bodies/joints destroyed → draw removes + instance-slot frees emitted through the delta → component entries removed (dense stores swap-remove) → **SlotMap slot recycled with a generation bump** — stale `EntityId`s and `PickId`s miss cleanly forever.
+4. Asset handles held by the removed components drop; refcounts decrement; zero-ref assets become arbiter-evictable (never eagerly freed).
+
+Memory story in one line: entity slots and component rows recycle immediately (arena + swap-remove); resource memory releases lazily under budget pressure. Allocation is eager and batched; deallocation is policy.
+
 - **HLOD proxies:** the contract is reserved (a cell may carry a far-proxy entity set); generation tooling is deferred.
 
 ### Layer 2 — Detail Streaming (data residency)
@@ -2038,7 +2149,7 @@ Sampling and graph evaluation run on the **game worker pool in PostUpdate**, pro
 
 _(OQ 26 resolution, 2026-08-11.)_ The audio engine is **in-house** — the mixer is engine identity, not an outsourced dependency. UE5's reinvestment in its own Audio Mixer + MetaSounds is the modern precedent; Unity's built-in audio being licensed FMOD internals is the cautionary tale. Middleware (Wwise/FMOD) is deliberately not designed for: if a shipping need ever demands it, the path would be a whole-subsystem replacement plugin — noted as possible, intentionally unspec'd.
 
-Engine/game split: the engine owns the device layer, mixer graph, voices, DSP, and streaming; the game owns _what plays and why_ — behaviors emit through `AudioCommands`, and game logic computes judgments like occlusion, writing engine-provided per-voice knobs.
+Engine/game split: the engine owns the device layer, mixer graph, voices, DSP, and streaming; the game owns _what plays and why_ — through `AudioCommands` (imperative) or the `AudioEmitter` component (declarative, engine-managed lifecycle), with game logic computing judgments like occlusion and writing engine-provided per-voice knobs. See "Who Initiates Sound" below.
 
 ### Architecture
 
@@ -2050,6 +2161,15 @@ Engine/game split: the engine owns the device layer, mixer graph, voices, DSP, a
 - **Occlusion — the split, showcased.** The engine primitive is a per-voice filter/gain knob. The _game_ computes occlusion (physics raycasts through the `PhysicsProvider` query API, from a behavior or system) and writes the knob. The engine never decides what is occluded.
 - **Streaming music.** Long clips decode on the IO pool into ring buffers — never fully resident. `AudioClip` remains the in-memory format for short SFX.
 - **Instrumented.** The audio thread has its profiling lane; voice counts and buffer underruns join the standard counter set (OQ 24).
+
+### Who Initiates Sound
+
+**The engine never initiates a sound by policy** — the weather rule applied to audio: the engine makes sound _representable_; the game decides what plays. Two canonical compositions:
+
+- **Audio triggers are not an engine concept.** A `Collider { sensor: true }` fires a trigger event into the bus → a game behavior reads it → `ctx.audio.play(suspense_track, …)`. The engine provided the sensor, the event plumbing, and the mixer; the _game_ decided the cave is scary.
+- **Footsteps**: the clip's animation event track fires `footstep` into the bus (Animation section) → a game system queries the surface underfoot (physics raycast → material) → picks gravel-vs-grass → plays it. The engine fires the event; the game maps event → sound.
+
+Two complementary game-facing surfaces, the same imperative/declarative pairing used throughout the design: **`AudioCommands`** (imperative — one-shots, music control, from `GameContext` and `BehaviorContext` alike) and the **`AudioEmitter` component** (declarative — persistent entity-attached sources with engine-managed lifecycle; see Core Engine Components).
 
 **v2+:** MetaSounds-style procedural audio graphs — the same data-graph philosophy as `AnimGraph`, applied to DSP.
 
@@ -2159,12 +2279,23 @@ Spec'd so tooling can rely on them: draw calls and instances per view; culled co
 
 The complete sequence of a single frame, showing which thread owns each phase.
 
+**Loop style, named:** an engine-owned **fixed-phase loop with minimal lifecycle hooks**
+(template-method IoC — the Unity/Godot family), not `frameStarted`/`frameEnded` observer
+callbacks (unordered listener lists are a bug farm; the structured substitute is a system
+registered in the right `Phase`). Input is a **polled snapshot**, never pushed events — the
+OS's callback pump (winit) is quarantined at the boundary by the INPUT phase. The `EventBus`
+is a **data plane, never a control plane**: nothing in the loop is event-driven; events are
+read during your phase, from last frame, deterministically. Between threads the style is
+**CSP message passing** — the render/audio/streaming threads are receive-driven loops on owned
+values. Every choice serves the same two masters: determinism (OQ 19 needs ordered phases) and
+profilability (phases map one-to-one onto instrumentation lanes).
+
 ### Game Thread
 
 | Phase       | Action                                                                                                                                                                            |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **INPUT**   | Main thread accumulates window events into `Input` snapshot                                                                                                                       |
-| **FIXED**   | `App::fixed_update()` runs 0–N times at fixed timestep                                                                                                                            |
+| **FIXED**   | `App::fixed_update()` runs 0–N times at fixed timestep (0 while paused; paced by scaled time — OQ 33)                                                                             |
 | **UPDATE**  | `App::update()` runs once. Game systems mutate World                                                                                                                              |
 | **LATE**    | Engine systems: hierarchy propagation, bounds recomputation, streaming demand                                                                                                     |
 | **EXTRACT** | Diff `&World` via `&ChangeTracker` into a `FramePacket` (views, lights, deltas, resource ops), interpolating fixed-tick transforms at the accumulator alpha; send through channel |
@@ -2194,6 +2325,212 @@ The complete sequence of a single frame, showing which thread owns each phase.
 | Asset bulk data                         | AssetServer + staging pool           | Decoded directly into mapped staging off-thread; never copied by value                |
 | Input                                   | Main Thread                          | Snapshot borrowed by game tick                                                        |
 | Audio commands                          | Collected on Game Thread             | Drained by audio server each frame                                                    |
+
+## Critical Path & Build Order
+
+_(Planning, 2026-08-11.)_ The absolute barebones for end-to-end: a game uses the engine, pixels
+reach the screen, game logic runs. Everything else branches off naive implementations.
+
+**The golden rule: naive implementations must be contract-shaped.** Every improvement track
+below replaces _internals behind an interface that already exists_ — a lighting slot gets fed,
+a provider gets swapped, a tier gets added. The skeleton therefore adopts four contracts on day
+one, in naive form, because they are cheap now and world-rewrites later:
+
+1. **f64 `Transform.position` + the per-cell offset plumbing** (OQ 30) — with a single implicit
+   cell at the origin until streaming arrives. Retrofitting `DVec3` into a shipped World is the
+   one migration this document refuses to schedule.
+2. **The instance lane** (`DrawId`/`InstanceSlot` allocation, `InstanceData` with fade+flags) —
+   PickId, LOD fades, and foliage all stand on slot stability.
+3. **The GBuffer contract as specified** — including the shading-model/flag bits in albedo
+   alpha and the velocity target (written even before TAA consumes it).
+4. **Profiling lanes from the first commit** (OQ 24) — the macros are nearly free, and every
+   subsequent milestone is validated through them.
+
+### The Spine (critical path)
+
+- **M0 — Boot.** Window + event loop; `GpuContext` + `Capabilities` probe; the two threads with
+  packet, feedback, and control channels; `Engine::run` / `App` / `Time`; profiling lanes.
+- **M1 — First pixels.** Minimal World (`Transform`, `MeshRenderer`, `Camera`, `LightSource`);
+  `ChangeTracker` → delta extract → retained `RenderScene` (mesh store + instance lane);
+  `StagingRef` over a naive one-buffer pool; GPU pools; minimal render graph executing
+  GBuffer → lighting (one hardcoded sun, no shadows) → ACES tonemap → present. _No depth
+  pre-pass, no HZB, no TAA — all optimizations, none required for correctness._
+- **M2 — A game.** Input; `fixed_update` + accumulator + the interpolation contract;
+  double-buffered events; Rust-tier behaviors in the `BehaviorHost`; systems + phases.
+  A player-controlled entity moves under game logic: the engine/game split is real.
+- **M3 — Survives reality.** Resize + staged teardown (a demo that dies on resize is not a
+  demo); direct glTF/PNG import at load (the cook cache comes later, behind the same
+  `AssetServer` API); egui overlay with the budget table.
+
+After M3 the spine ends; everything else is a branch track with its own naive → improved → v2
+chain, joined only by the contracts.
+
+### Build-Order Graph
+
+```mermaid
+flowchart TD
+    M0["M0 · Boot<br/>window · GpuContext · Capabilities<br/>threads + channels · App/Time<br/>profiling lanes (day one)"]
+    M1["M1 · First pixels<br/>World (f64 pos) · delta extract · retained scene<br/>instance lane · naive StagingRef · GPU pools<br/>GBuffer → sun light → ACES → present"]
+    M2["M2 · A game<br/>Input · fixed tick + interpolation<br/>events · Rust behaviors · systems"]
+    M3["M3 · Survives reality<br/>resize + teardown · direct glTF/PNG<br/>egui overlay + budget table"]
+    M0 --> M1 --> M2 --> M3
+
+    subgraph LIGHT["Lighting"]
+        L1["clustered lights"] --> L2["shadow atlas (CSM, shadow views)"] --> L3["env capture / IBL<br/>+ sky visibility floor"] --> L4["froxel volumetrics"] --> L5["GI clipmap<br/>(+ sky-vis cones)"] --> L6["RT passes (cap-gated,<br/>clipmap hit radiance)"] --> L7["v2/3 · Lumen analog"]
+    end
+
+    subgraph POST["Post / AA"]
+        P1["TAA (velocity + jitter)"] --> P2["TAAU + internal/display split"] --> P3["auto-exposure"] --> P4["DRS"] --> P5["v2 · FSR 2.2 / DLSS slot"]
+    end
+
+    subgraph PACE["Pacing"]
+        PC1["queue-depth throttle"] --> PC2["DRS controller"] --> PC3["v2 · predictive pacing"]
+    end
+
+    subgraph SCALE["World scale"]
+        S1["hierarchy + LATE systems"] --> S2["World Streaming cells<br/>+ OQ20 documents"] --> S3["Streaming Coordinator<br/>+ detail streaming + staging rings"] --> S4["multi-cell LWC anchors"] --> S5["v2 · GPU-driven phase 2"]
+        S2 --> SER1["save games<br/>(registry + EntityRef)"]
+    end
+
+    subgraph VOX["Voxel Plugin"]
+        VP1["VolumeSource (code) + brick tree/pool"] --> VP2["VolumePass raymarch (near)"] --> VP3["MC+Transvoxel far tier + handoff"] --> VP4["materials + dither"] --> VP5["density graphs"] --> VP6["edits + fan-out"] --> VP7["collision ring"] --> VP8["PCG scatter + foliage"]
+    end
+
+    subgraph PHYS["Physics"]
+        PH1["rapier provider<br/>fixed tick + sync-back"] --> PH2["queries + CPU picking"] --> PH3["joints"] --> PH4["character controller"]
+    end
+
+    subgraph ANIM["Animation"]
+        A1["DeformPass + clip sampling"] --> A2["AnimGraph + state machines"] --> A3["events · root motion · sockets"] --> A4["IK nodes"]
+    end
+
+    subgraph AUD["Audio"]
+        AU1["cpal + voices + commands"] --> AU2["mixer buses (data)"] --> AU3["streaming music"] --> AU4["reverb/DSP → v2 graphs"]
+    end
+
+    subgraph ASSET["Asset pipeline"]
+        AS1["derived-data cache<br/>(cook-on-demand)"] --> AS2["GUIDs + .meta + VFS mounts"] --> AS3["dependency closures"] --> AS4["ship cook + paks"]
+    end
+
+    subgraph SCRIPT["Scripting & UI"]
+        B1["Lua tier (mlua, accessor API)"] --> B2["C ABI vtable"]
+        UI1["game-UI round<br/>(widgets = entities)"] --> UI2["editor (application, far)"]
+    end
+
+    subgraph SKY["Sky & weather"]
+        W1["Hillaire atmosphere"] --> W2["clouds module"] --> W3["WeatherState + hooks"]
+    end
+
+    M3 --> L1
+    M3 --> P1
+    M3 --> PC1
+    M3 --> S1
+    M3 --> A1
+    M3 --> AS1
+    M2 --> PH1
+    M2 --> AU1
+    M2 --> B1
+    M3 --> UI1
+    L3 --> W1
+    S3 --> VP1
+    L2 -.->|"ShadowCaster"| VP2
+    L5 -.->|"GI injection"| VP6
+    M1 -.->|"velocity target ready since M1"| P1
+    PC2 -.->|"consumes resolution_scale"| P2
+    S4 -.->|"before planet content"| VP1
+    PH2 -.->|"gameplay raycasts"| VP7
+    VP8 -.->|"ScatterSurface"| S2
+```
+
+### Sequencing Notes
+
+- **The Voxel Plugin branches off streaming, not off rendering** — its residency, sources, and
+  cell integration are streaming-shaped; its render passes then plug into contracts M1 already
+  built. Multi-cell LWC anchors (S4) must land before planet-scale content, not before voxels
+  as such.
+- **Physics and audio branch off M2** (they serve game logic), rendering tracks off M3.
+- **Shadow views (L2) are the multi-view forcing function** — the first consumer of per-view
+  culling beyond the main camera; build them before any aux-view feature (probes, RTT).
+- **v2 items** (Lumen analog, GPU-driven, FSR, predictive pacing, audio graphs, editor) hang
+  off the ends of their tracks — none is load-bearing for any other track's v1, by
+  construction (the Deferred Ledger's category-B rounds).
+
+### M4 — The Sandbox Slice (E2E Acceptance)
+
+The vertical slice that proves the engine end to end, at each subsystem's _minimum viable
+tier_: boot → live main menu → settings → loading screen → playtest level → pause → save →
+back to menu → quit. Every beat traces to specs; the slice is the acceptance test for the
+branch tracks' first rungs.
+
+| Beat                         | Exercises                                                                   | Sufficient tier                                                                                                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Boot to main menu            | M0–M3 core; World from documents                                            | —                                                                                                                                                                            |
+| 3D backdrop: mountain        | Mesh path (M1), retained scene                                              | Static meshes (voxel terrain = stretch goal via the plugin)                                                                                                                  |
+| Clouds wafting               | Sky                                                                         | **Skybox interim tier** (panning textures) — the clouds module is _not_ required                                                                                             |
+| Birds flying                 | `BehaviorHost`                                                              | One Rust bird + one **Lua bird** — proves both tiers behave identically                                                                                                      |
+| Sun rays through clouds      | Froxel volumetrics + shadow atlas + directional light                       | Crepuscular rays fall out of froxels — no extra feature                                                                                                                      |
+| Music playing                | Audio: commands, mixer buses                                                | In-memory clip acceptable; streaming music = bonus                                                                                                                           |
+| Menus, dialogs, progress bar | UI                                                                          | **Interim decision: egui for the slice's UI** (buttons/sliders/dialogs today); widgets-as-entities replaces it in its own round — the slice must not pull that round forward |
+| Settings: key bindings       | Action mapping (OQ 34) + rebind persistence to `user://`                    | Full — this _is_ the OQ 34 acceptance test                                                                                                                                   |
+| Settings: audio volumes      | Per-bus volume (MixerLayout)                                                | Full                                                                                                                                                                         |
+| Settings: graphics           | `set_pacing` (vsync, DRS toggle), `set_window_mode`                         | Full — runtime settings (OQ 33) acceptance                                                                                                                                   |
+| New game / load save         | OQ 20 registry + save documents                                             | Minimal registered-component set                                                                                                                                             |
+| Loading screen + progress    | `begin_world_load` / `world_load_progress` / `swap_world` (OQ 33)           | Full, including fade or freeze-frame transition                                                                                                                              |
+| Run around                   | KCC (OQ 28) + camera rig + action axes                                      | Full move-and-slide, slopes, grounding                                                                                                                                       |
+| Jump                         | KCC vertical + grounding + **the frame-edge → intent → fixed-tick pattern** | The documented input gotcha, exercised deliberately                                                                                                                          |
+| Push a box                   | KCC impulses → dynamic bodies (rapier)                                      | Full                                                                                                                                                                         |
+| Something falls              | Gravity, dynamic bodies, collision vs. level                                | Full                                                                                                                                                                         |
+| Pause menu                   | `set_paused`, `real_dt` UI, bus ducking                                     | Full — frozen world behind animated UI                                                                                                                                       |
+| Save / back to menu / quit   | OQ 20 save; reverse `swap_world` (music surviving); teardown protocol       | Full                                                                                                                                                                         |
+
+**Deliberately not exercised** (each is a later slice, not scope creep here): the Voxel Plugin
+(stretch goal only), both streaming layers (the playtest level is a single unstreamed World),
+GI clipmap, RT, TAAU/DRS under load, skeletal animation (the character may be a capsule),
+decals, probes, vegetation/PCG, networking. A second slice ("the planet walk") exercises
+streaming + voxels + LOD transitions when those tracks land.
+
+### Capability Tiers (T0–T4)
+
+The per-subsystem quality ladder — the M4 "sufficient tier" column generalized. As subsystems
+climb tiers, the sandbox's visuals and capabilities improve with zero sandbox rework: tiers
+replace internals behind the contracts. Semantics: **T0** minimum viable (the slice floor),
+**T1** interim (modest-game shippable), **T2** end goal (the resolved spec — what the OQ
+records commit), **T3** stretch (committed rounds with triggers — Deferred Ledger category B),
+**T4** future/research (**explicitly uncommitted**; listed only to mark direction).
+
+| Subsystem              | T0 minimum viable               | T1 interim                                                | T2 end goal                                                          | T3 stretch                                                | T4 future                                  |
+| ---------------------- | ------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------ |
+| Lighting & GI          | Hardcoded sun, no shadows       | Clustered lights + CSM atlas + sky-IBL × visibility floor | Froxels + GI clipmap + specular cones + RT (cap-gated)               | Lumen analog (mesh SDFs + surface cache)                  | Real-time path tracing                     |
+| Shadows                | None                            | CSM + atlas + PCF                                         | + RT shadows (cap-gated), volume `ShadowCaster`                      | Virtual Shadow Maps                                       | —                                          |
+| Reflections            | None                            | SSR + sky × visibility                                    | + clipmap cones + RT reflections + authored probes                   | Bindless sharp hit-shading                                | —                                          |
+| Sky / weather          | Clear color / static skybox     | Panning-texture skybox                                    | Hillaire atmosphere + volumetric clouds + `WeatherState`             | —                                                         | Planetary weather simulation               |
+| Volumetrics & media | None | Froxel fog (global height fog) | + `FogVolume`s, public injectors, hero-media raymarch pass | — | — |
+| Transparency | Sorted alpha blend | Clustered Forward+ + froxel fog sampling | + `scene_color_copy` refraction, media/surface split | Weighted-blended OIT | Per-pixel OIT |
+| AA / post              | ACES tonemap only               | TAA (native res)                                          | TAAU + DRS + auto-exposure + bloom + grading                         | FSR 2.2 port; DLSS interop                                | —                                          |
+| Volumes (Voxel Plugin) | — (slice stretch)               | Fragment raymarch near + extracted far                    | Full V-series: LOD blending, materials, edits, physics ring, scatter | Visibility-buffer compute tier (int64 atomics)            | HW SVO traversal (needs wgpu RT pipelines) |
+| Draw submission        | CPU cull, per-view              | + HZB occlusion, cell-granular foliage batching           | Mature CPU-driven (the v1 design)                                    | GPU-driven phase 2: GPU cull, indirect, visibility buffer | —                                          |
+| LOD & transitions | Single LOD, hard swaps | Dithered mesh cross-fade + selection hysteresis | + volume band-blending, handoff convergence, residency gating | — | — |
+| Views & cameras | Single main view | + shadow views (per-cascade culling) | + aux views: RTT, probes, split-screen | — | — |
+| Decals                 | None                            | —                                                         | Deferred GBuffer decals                                              | —                                                         | —                                          |
+| Materials & shading | Fixed PBR params | Textured PBR (maps) | Custom WGSL fragments + shading-model IDs (toon, foliage…) | — | Node-graph material editor |
+| Physics                | rapier: bodies + queries        | + joints + KCC                                            | Full contract: f64, events, extension hatch                          | Jolt provider; ragdolls; vehicle module                   | —                                          |
+| Animation              | None (capsule character)        | Clip sampling + DeformPass skinning                       | AnimGraph, state machines, morphs, events, root motion, sockets, 2-bone IK | Full-body IK; cloth deformer                        | ML motion synthesis                        |
+| Audio                  | Clips + voices + commands       | + `MixerLayout` buses, emitters, streaming music          | + reverb/DSP inserts, occlusion knobs, virtualization                | MetaSounds-style graphs; HRTF                             | Acoustic simulation                        |
+| Streaming              | Single unstreamed World         | Layer 1 cells (entities, persistence policy)              | Full two-layer + coordinator + budgets + region files                | HLOD tooling; team-shared caches                          | Server-streamed worlds                     |
+| Assets / pipeline      | Direct import at load           | Derived-data cache + GUID/.meta                           | Full VFS + ship cook + paks + dependency closures                    | Mod mounts                                                | —                                          |
+| Serialization / save   | Descriptors only                | Registry + save documents (minimal set)                   | + cell overlays, migrations, `EntityRef` remap                       | Reflection layer (editor-grade)                           | —                                          |
+| Vegetation / PCG       | None                            | Scatter graphs + instance tier + wind                     | + cook-time imposters, ecology channels, overlay persistence         | Merged HLOD imposters                                     | —                                          |
+| UI                     | egui (interim, incl. M4 slice)  | Widgets-as-entities core set                              | Full framework: theming, text shaping, l10n, a11y                    | Editor application                                        | —                                          |
+| Input                  | Raw polling snapshot            | Action maps + rebinding + context stack                   | + full gamepad backend                                               | —                                                         | —                                          |
+| Scripting / behaviors  | Rust tier                       | + Lua (mlua)                                              | + C ABI vtable                                                       | Parallel native behaviors (declared access)               | —                                          |
+| Profiling              | Scope macros + Tracy lanes      | + GPU timestamps, budget-table overlay                    | + full counter set, chrome-trace export, pick pass + debug heatmaps  | Shipping telemetry                                        | —                                          |
+| Pacing                 | Vsync only                      | Queue-depth throttle + DRS                                | Mature loops + software frame cap                                    | Predictive tick pacing                                    | —                                          |
+| Threading              | Two pools (game/render)         | + coordinator, audio, IO lanes                            | Mature split (the v1 design)                                         | Task-graph scheduler (crossbeam)                          | —                                          |
+| Lifecycle              | Clean teardown + resize         | Full control-channel protocol                             | + fatal-with-grace device loss                                       | Device-loss recovery walk                                 | —                                          |
+| Game flow | Single World | Pause/time-scale + runtime settings | World swap + load progress + freeze-frame transitions | — | — |
+| Large worlds           | f64 fields + single origin cell | Multi-cell anchors                                        | Planet-scale proven (with streaming T2)                              | —                                                         | —                                          |
+| Particles              | None                            | None                                                      | (OQ 32 design round)                                                 | GPU sim tiers                                             | —                                          |
+| Networking             | None (hooks preserved)          | None                                                      | None — post-v1 by decision                                           | Transport + replication modules                           | Rollback/prediction stack                  |
 
 ---
 
@@ -2429,7 +2766,10 @@ surfaced as a missing subsystem, and large-world coordinates escalated from the 
     music via IO-pool ring buffers; occlusion = engine knob, game computation via physics
     queries. Middleware deliberately unspec'd — a whole-subsystem replacement plugin remains a
     possible future path if a shipping need demands it. v2+: MetaSounds-style procedural
-    graphs. Spec: Audio section.
+    graphs. Spec: Audio section. _Amended 2026-08-12:_ **`AudioEmitter`** declarative component
+    added (engine-managed lifecycle for persistent entity-attached sources — the
+    imperative/declarative pairing), and the **engine-never-initiates doctrine** recorded with
+    the trigger/footstep compositions ("Who Initiates Sound").
 27. **[RESOLVED 2026-08-11] Resource pipeline & filesystem.** **Identity: GUIDs** assigned at
     import (sidecar `.meta`, Unity-proven), paths as human-facing aliases — resolves OQ 20's
     ambiguity. **Cooking:** asset database + derived-data cache keyed by
@@ -2487,13 +2827,43 @@ surfaced as a missing subsystem, and large-world coordinates escalated from the 
     sprites/meshes; transparency ordering; froxel-lit particles), collision (depth-buffer +
     physics queries), a determinism stance, and the engine/game split (engine: simulation +
     rendering primitives + graph evaluator; games: effect graphs as assets).
+33. **[RESOLVED 2026-08-12] Game-flow primitives (worlds, pause, runtime settings).** Surfaced
+    by the scene-change walkthrough (menu → loading → game → pause). The flow state machine is
+    game code; the engine provides: **background world construction + frame-boundary swap**
+    (scene-reset delta clears the retained scene; assets survive via refcounts; physics
+    rebuilds from descriptions; commands-audio survives, emitters die — lifetime encoded by
+    the imperative/declarative split); **pause & time scale** (`Time.scale/paused/real_dt`;
+    paused freezes the fixed accumulator while `update` continues on `real_dt`); **runtime
+    settings** (`set_pacing`/`set_window_mode`; `EngineConfig` = initial values only). Specs:
+    Worlds & Game Flow (World Building), GameContext, Time, The App Trait. _Amended same day:_
+    menus/loading screens are **live Worlds** (pause is the in-game tool; paused/scale persist
+    across swaps, never implicitly changed); dual shader clocks (scaled + real elapsed in frame
+    uniforms); **`SwapTransition::CaptureLastFrame`** freeze-frame crossfade (dual-world live
+    crossfade explicitly out of scope).
+34. **[RESOLVED 2026-08-12] Input action mapping.** Named, rebindable, device-agnostic actions
+    over the raw polling API: `ActionMap` assets (Button/Axis1/Axis2, composite WASD, dead
+    zones), a **context stack** with block/passthrough — the input half of OQ 18's
+    focus/capture — rebinds persisted to `user://`, and the documented frame-edge → intent →
+    fixed-tick consumption pattern. Engine owns machinery, stack, persistence; games declare
+    maps as data. Spec: Input — Action Mapping.
+35. **[RESOLVED 2026-08-12] Entity lifecycle & cell-unload persistence.** Surfaced by the
+    Gregory world-loading audit: spawn/despawn existed only scattered across six sections, and
+    **entity-state persistence at cell unload was genuinely unspecified** (voxel edits
+    persisted via V8; a player-pushed crate did not). Resolution: (1) a consolidated **Entity
+    Lifecycle** ordering — registry instantiation → side-structure reactions off the change
+    tracker → render deltas; deferred despawn → overlay diff → ordered teardown → generational
+    slot recycling → lazy asset eviction ("allocation is eager and batched; deallocation is
+    policy"); (2) **`CellPersistence::Overlay | Ephemeral` per grid** (default Overlay: dirty
+    registered components diff into the cell overlay at unload; Ephemeral for respawning
+    content) — per-grid because one world legitimately wants both. Specs: Streaming Layer 1,
+    Entity Lifecycle.
 
 ---
 
 ## Deferred Ledger
 
 Everything the resolutions above defer, consolidated so the debt is one list instead of
-archaeology. Items *live* in their home entries (pointers given); this ledger is an index, and
+archaeology. Items _live_ in their home entries (pointers given); this ledger is an index, and
 it must be updated whenever a resolution adds or discharges a deferral.
 
 ### A. Open questions
@@ -2504,20 +2874,20 @@ it must be updated whenever a resolution adds or discharges a deferral.
 
 Each of these is a full design session when its time comes:
 
-| Round | Home | Scope |
-|-------|------|-------|
-| GPU-driven phase 2 | OQ 7 (+ OQ 1 volumes tier, OQ 29 foliage) | GPU scene buffer → GPU culling → indirect draws → visibility-buffer geometry; hard additivity requirement |
-| The Lumen analog | OQ 4 | Mesh SDFs + surface cache; v2/v3 quality end-state; representation swap behind unchanged slots |
-| Task-graph scheduler | OQ 16 (+ OQ 6 threading notes) | crossbeam-based, declared dependencies + priorities; unifies parallel systems, physics, streaming decode |
-| Game-UI detail round | OQ 18 / UI Framework section | Widget catalog, theming, text shaping (cosmic-text-class), l10n, a11y |
-| Networking modules | OQ 19 | Transport + replication on the preserved hooks (fixed tick, component registry, generational IDs) |
-| The editor | UI Framework — Editor Consequence | An application on the engine; consumes UI framework + reflection + aux views + pick pass; no design until there is a runtime to edit |
+| Round                | Home                                      | Scope                                                                                                                                |
+| -------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| GPU-driven phase 2   | OQ 7 (+ OQ 1 volumes tier, OQ 29 foliage) | GPU scene buffer → GPU culling → indirect draws → visibility-buffer geometry; hard additivity requirement                            |
+| The Lumen analog     | OQ 4                                      | Mesh SDFs + surface cache; v2/v3 quality end-state; representation swap behind unchanged slots                                       |
+| Task-graph scheduler | OQ 16 (+ OQ 6 threading notes)            | crossbeam-based, declared dependencies + priorities; unifies parallel systems, physics, streaming decode                             |
+| Game-UI detail round | OQ 18 / UI Framework section              | Widget catalog, theming, text shaping (cosmic-text-class), l10n, a11y                                                                |
+| Networking modules   | OQ 19                                     | Transport + replication on the preserved hooks (fixed tick, component registry, generational IDs)                                    |
+| The editor           | UI Framework — Editor Consequence         | An application on the engine; consumes UI framework + reflection + aux views + pick pass; no design until there is a runtime to edit |
 
 ### C. Fully spec'd, implementation scheduled — work, not design
 
 Deferred decals (OQ 13) · volumetric clouds, skybox interim (OQ 31) · `ReflectionProbe`
 implementation (OQ 11) · serialization machinery + `EntityRef` (OQ 20) · FSR 2.2 WGSL port
-(OQ 12) · predictive tick pacing — *calibration methodology is honest TBD* (OQ 8) · HLOD
+(OQ 12) · predictive tick pacing — _calibration methodology is honest TBD_ (OQ 8) · HLOD
 generation tooling (OQ 17/29) · device-lost recovery walk (OQ 15) · sw-6dd982 GBuffer
 migration (OQ 22).
 
@@ -2542,132 +2912,3 @@ replacement (OQ 26) · the hexasphere sibling plugin (plugin V1) · mod mounts (
   `fixed_update` (OQ 6 threading notes).
 
 ---
-
-## Critical Path & Build Order
-
-*(Planning, 2026-08-11.)* The absolute barebones for end-to-end: a game uses the engine, pixels
-reach the screen, game logic runs. Everything else branches off naive implementations.
-
-**The golden rule: naive implementations must be contract-shaped.** Every improvement track
-below replaces *internals behind an interface that already exists* — a lighting slot gets fed,
-a provider gets swapped, a tier gets added. The skeleton therefore adopts four contracts on day
-one, in naive form, because they are cheap now and world-rewrites later:
-
-1. **f64 `Transform.position` + the per-cell offset plumbing** (OQ 30) — with a single implicit
-   cell at the origin until streaming arrives. Retrofitting `DVec3` into a shipped World is the
-   one migration this document refuses to schedule.
-2. **The instance lane** (`DrawId`/`InstanceSlot` allocation, `InstanceData` with fade+flags) —
-   PickId, LOD fades, and foliage all stand on slot stability.
-3. **The GBuffer contract as specified** — including the shading-model/flag bits in albedo
-   alpha and the velocity target (written even before TAA consumes it).
-4. **Profiling lanes from the first commit** (OQ 24) — the macros are nearly free, and every
-   subsequent milestone is validated through them.
-
-### The Spine (critical path)
-
-- **M0 — Boot.** Window + event loop; `GpuContext` + `Capabilities` probe; the two threads with
-  packet, feedback, and control channels; `Engine::run` / `App` / `Time`; profiling lanes.
-- **M1 — First pixels.** Minimal World (`Transform`, `MeshRenderer`, `Camera`, `LightSource`);
-  `ChangeTracker` → delta extract → retained `RenderScene` (mesh store + instance lane);
-  `StagingRef` over a naive one-buffer pool; GPU pools; minimal render graph executing
-  GBuffer → lighting (one hardcoded sun, no shadows) → ACES tonemap → present. *No depth
-  pre-pass, no HZB, no TAA — all optimizations, none required for correctness.*
-- **M2 — A game.** Input; `fixed_update` + accumulator + the interpolation contract;
-  double-buffered events; Rust-tier behaviors in the `BehaviorHost`; systems + phases.
-  A player-controlled entity moves under game logic: the engine/game split is real.
-- **M3 — Survives reality.** Resize + staged teardown (a demo that dies on resize is not a
-  demo); direct glTF/PNG import at load (the cook cache comes later, behind the same
-  `AssetServer` API); egui overlay with the budget table.
-
-After M3 the spine ends; everything else is a branch track with its own naive → improved → v2
-chain, joined only by the contracts.
-
-### Build-Order Graph
-
-```mermaid
-flowchart TD
-    M0["M0 · Boot<br/>window · GpuContext · Capabilities<br/>threads + channels · App/Time<br/>profiling lanes (day one)"]
-    M1["M1 · First pixels<br/>World (f64 pos) · delta extract · retained scene<br/>instance lane · naive StagingRef · GPU pools<br/>GBuffer → sun light → ACES → present"]
-    M2["M2 · A game<br/>Input · fixed tick + interpolation<br/>events · Rust behaviors · systems"]
-    M3["M3 · Survives reality<br/>resize + teardown · direct glTF/PNG<br/>egui overlay + budget table"]
-    M0 --> M1 --> M2 --> M3
-
-    subgraph LIGHT["Lighting"]
-        L1["clustered lights"] --> L2["shadow atlas (CSM, shadow views)"] --> L3["env capture / IBL<br/>+ sky visibility floor"] --> L4["froxel volumetrics"] --> L5["GI clipmap<br/>(+ sky-vis cones)"] --> L6["RT passes (cap-gated,<br/>clipmap hit radiance)"] --> L7["v2/3 · Lumen analog"]
-    end
-
-    subgraph POST["Post / AA"]
-        P1["TAA (velocity + jitter)"] --> P2["TAAU + internal/display split"] --> P3["auto-exposure"] --> P4["DRS"] --> P5["v2 · FSR 2.2 / DLSS slot"]
-    end
-
-    subgraph PACE["Pacing"]
-        PC1["queue-depth throttle"] --> PC2["DRS controller"] --> PC3["v2 · predictive pacing"]
-    end
-
-    subgraph SCALE["World scale"]
-        S1["hierarchy + LATE systems"] --> S2["World Streaming cells<br/>+ OQ20 documents"] --> S3["Streaming Coordinator<br/>+ detail streaming + staging rings"] --> S4["multi-cell LWC anchors"] --> S5["v2 · GPU-driven phase 2"]
-        S2 --> SER1["save games<br/>(registry + EntityRef)"]
-    end
-
-    subgraph VOX["Voxel Plugin"]
-        VP1["VolumeSource (code) + brick tree/pool"] --> VP2["VolumePass raymarch (near)"] --> VP3["MC+Transvoxel far tier + handoff"] --> VP4["materials + dither"] --> VP5["density graphs"] --> VP6["edits + fan-out"] --> VP7["collision ring"] --> VP8["PCG scatter + foliage"]
-    end
-
-    subgraph PHYS["Physics"]
-        PH1["rapier provider<br/>fixed tick + sync-back"] --> PH2["queries + CPU picking"] --> PH3["joints"] --> PH4["character controller"]
-    end
-
-    subgraph ANIM["Animation"]
-        A1["DeformPass + clip sampling"] --> A2["AnimGraph + state machines"] --> A3["events · root motion · sockets"] --> A4["IK nodes"]
-    end
-
-    subgraph AUD["Audio"]
-        AU1["cpal + voices + commands"] --> AU2["mixer buses (data)"] --> AU3["streaming music"] --> AU4["reverb/DSP → v2 graphs"]
-    end
-
-    subgraph ASSET["Asset pipeline"]
-        AS1["derived-data cache<br/>(cook-on-demand)"] --> AS2["GUIDs + .meta + VFS mounts"] --> AS3["dependency closures"] --> AS4["ship cook + paks"]
-    end
-
-    subgraph SCRIPT["Scripting & UI"]
-        B1["Lua tier (mlua, accessor API)"] --> B2["C ABI vtable"]
-        UI1["game-UI round<br/>(widgets = entities)"] --> UI2["editor (application, far)"]
-    end
-
-    subgraph SKY["Sky & weather"]
-        W1["Hillaire atmosphere"] --> W2["clouds module"] --> W3["WeatherState + hooks"]
-    end
-
-    M3 --> L1
-    M3 --> P1
-    M3 --> PC1
-    M3 --> S1
-    M3 --> A1
-    M3 --> AS1
-    M2 --> PH1
-    M2 --> AU1
-    M2 --> B1
-    M3 --> UI1
-    L3 --> W1
-    S3 --> VP1
-    L2 -.->|"ShadowCaster"| VP2
-    L5 -.->|"GI injection"| VP6
-    M1 -.->|"velocity target ready since M1"| P1
-    PC2 -.->|"consumes resolution_scale"| P2
-    S4 -.->|"before planet content"| VP1
-    PH2 -.->|"gameplay raycasts"| VP7
-    VP8 -.->|"ScatterSurface"| S2
-```
-
-### Sequencing Notes
-
-- **The Voxel Plugin branches off streaming, not off rendering** — its residency, sources, and
-  cell integration are streaming-shaped; its render passes then plug into contracts M1 already
-  built. Multi-cell LWC anchors (S4) must land before planet-scale content, not before voxels
-  as such.
-- **Physics and audio branch off M2** (they serve game logic), rendering tracks off M3.
-- **Shadow views (L2) are the multi-view forcing function** — the first consumer of per-view
-  culling beyond the main camera; build them before any aux-view feature (probes, RTT).
-- **v2 items** (Lumen analog, GPU-driven, FSR, predictive pacing, audio graphs, editor) hang
-  off the ends of their tracks — none is load-bearing for any other track's v1, by
-  construction (the Deferred Ledger's category-B rounds).

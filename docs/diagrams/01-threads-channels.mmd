@@ -1,0 +1,75 @@
+classDiagram
+    direction LR
+
+    class GameThread {
+        main thread - winit event loop
+        owns World, Input, Time, AssetServer, BehaviorHost
+        INPUT FIXED UPDATE LATE EXTRACT CLEAR
+    }
+
+    class RenderThread {
+        dedicated
+        owns GpuContext, RenderScene, RenderGraph, pools, targets
+        RECEIVE PREPARE CULL RECORD SUBMIT PRESENT
+    }
+
+    class StreamingCoordinator {
+        dedicated, low priority
+        owns demand queue + budget arbiter
+        dispatcher, never a worker
+    }
+
+    class AudioThread {
+        dedicated
+        mixer at fixed block size
+    }
+
+    class WorkerPools {
+        game pool + render pool
+        work-stealing, split vs priority inversion
+    }
+
+    class FramePacket {
+        +frame_index u64
+        +views Vec~ViewParams~
+        +lights Vec~LightParams~
+        +environment EnvironmentParams
+        +resource_ops Vec~ResourceOp~
+        +mesh_delta MeshDrawDelta
+        +deltas Vec~BackendDelta~
+    }
+
+    class FrameFeedback {
+        +frame_index u64
+        +gpu_time Option~GpuTimingFeedback~
+        +occlusion OcclusionFeedback
+        +readback Vec~ReadbackResult~
+    }
+
+    class ControlEvent {
+        <<enumeration>>
+        Resized
+        ScaleFactorChanged
+        MinimizedRestored
+        DeviceLost
+        Quit
+    }
+
+    class UploadBatch {
+        staged regions ready for GPU copy
+    }
+
+    GameThread --> FramePacket : sends, bounded(1)
+    FramePacket --> RenderThread : owned value
+    RenderThread --> FrameFeedback : sends
+    FrameFeedback --> GameThread : advisory, about N-2
+    GameThread --> ControlEvent : sends OOB
+    ControlEvent --> RenderThread : applied at frame boundary
+    GameThread --> StreamingCoordinator : demand channel
+    StreamingCoordinator --> UploadBatch : assembles
+    UploadBatch --> RenderThread : recorded in PREPARE
+    RenderThread --> StreamingCoordinator : residency advisories
+    GameThread --> AudioThread : AudioCommands drained per frame
+    GameThread ..> WorkerPools : game pool tasks
+    RenderThread ..> WorkerPools : render pool tasks
+    StreamingCoordinator ..> WorkerPools : IO and decode dispatch

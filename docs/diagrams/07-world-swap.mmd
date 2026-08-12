@@ -1,0 +1,32 @@
+sequenceDiagram
+    participant App as Your App (flow state machine)
+    participant GT as Game Thread (engine)
+    participant RT as Render Thread (engine)
+    participant AT as Audio Thread
+
+    Note over App,AT: IN-GAME PAUSE — two clocks, one frozen.<br/>A main menu is a LIVE World birds fly, clouds waft, nothing paused.<br/>paused and scale persist across swaps. only flow code changes them.
+    App->>GT: ctx.set_paused(true)
+    Note over GT: FIXED phase runs 0 ticks (accumulator frozen)<br/>physics + fixed gameplay halt · world renders frozen-but-alive
+    GT->>App: update(ctx) keeps running — dt = 0, real_dt live
+    App->>GT: pause-menu UI entities animate on real_dt
+    App->>AT: duck gameplay bus, keep UI bus (game decision, via mixer)
+    App->>GT: ctx.set_paused(false) — simulation resumes, no time debt
+
+    Note over App,AT: WORLD SWAP — MainMenu → Loading → Game (flow enum lives in the App)
+    App->>GT: ctx.audio.play(menu_music) — voice lives in the mixer, not the World
+    App->>GT: ctx.begin_world_load(game_world_descriptor)
+    GT->>GT: build successor World in the background:<br/>spawn from documents · stream cells · warm assets (normal async paths)
+    loop while loading — the CURRENT World keeps rendering (it IS the loading screen)
+        App->>GT: ctx.world_load_progress(handle)
+        GT->>App: asset/cell readiness → progress bar
+    end
+    opt fade-to-black (pure game composition)
+        App->>GT: full-screen UI quad, alpha up on real_dt
+    end
+    App->>GT: ctx.swap_world(handle, CaptureLastFrame)
+    Note over GT: applied at end of frame — old World tears down properly:<br/>behavior shutdowns · deferred despawns · emitters stop ·<br/>physics world rebuilds from new descriptions (OQ 20)
+    GT->>RT: EXTRACT — scene-reset delta + the new World's first spawns
+    RT->>RT: retained RenderScene clears wholesale, repopulates
+    GT->>App: transition texture handle (old world's last presented frame)
+    App->>GT: crossfade: UI fades the captured frame out over the live new World
+    Note over App,AT: menu music is still playing — commands-audio outlives worlds. the App crossfades it via ctx.audio once gameplay begins
