@@ -12,3 +12,7 @@
 /tmp
 .xpo/worktrees/
 /.claude/worktrees/
+
+book/.quarto/
+book/**/*.quarto_ipynb
+book/_output/

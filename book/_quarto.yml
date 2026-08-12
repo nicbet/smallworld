@@ -1,0 +1,76 @@
+project:
+  type: book
+  output-dir: _output
+
+filters:
+  - dropcap.lua
+
+book:
+  title: "Modern Game Engine Design"
+  subtitle: "Building a Hybrid Voxel-Mesh Engine in Rust"
+  author: "Smallworld Team"
+  date: today
+  chapters:
+    - index.qmd
+    - introduction.md
+    - part: "Game Engine Foundations"
+      chapters:
+        - 01-engine-renaissance.md
+        - 02-architectural-foundations.md
+        # - 02-core-loop-and-frame-lifecycle.md
+        # - 03-memory-handles-and-instrumentation.md
+        # - 04-resource-pipeline-and-virtual-filesystem.md
+    # - part: "Part II: Gameplay Foundations"
+    #   chapters:
+    #     - 05-entity-component-system.md
+    #     - 06-game-logic-scripting-and-events.md
+    #     - 07-managing-massive-scale.md
+    #     - 08-world-streaming-and-data-residency.md
+    # - part: "Part III: Rendering"
+    #   chapters:
+    #     - 09-render-thread-firewall.md
+    #     - 10-render-graph-and-pipeline-extensibility.md
+    #     - 11-visibility-and-geometry.md
+    #     - 12-shading-lighting-and-global-illumination.md
+    #     - 13-environment-and-post-processing.md
+    # - part: "Part IV: Simulation, Audio, and Networking"
+    #   chapters:
+    #     - 14-physics-and-collision.md
+    #     - 15-animation-systems.md
+    #     - 16-audio-architecture.md
+    #     - 17-networking-and-multiplayer.md
+    # - part: "Part V: Tools & User Interface"
+    #   chapters:
+    #     - 18-user-interface-and-tooling.md
+
+format:
+  pdf:
+    documentclass: scrreprt
+    classoption:
+      - twoside
+      - open=right
+    papersize: letter
+    fontsize: 11pt
+    linestretch: 1.2
+    geometry:
+      - top=1in
+      - bottom=1in
+      - left=1.25in
+      - right=1.25in
+    colorlinks: true
+    linkcolor: NavyBlue
+    urlcolor: NavyBlue
+    citecolor: NavyBlue
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    number-depth: 3
+    highlight-style: github
+    code-block-bg: "#f8f8f8"
+    code-block-border-left: "#4a86c8"
+    mainfont: "Palatino"
+    sansfont: "Helvetica"
+    monofont: "JetBrains Mono"
+    monofontoptions:
+      - Scale=0.75  # Decreased font size for code blocks
+    include-in-header: preamble.tex

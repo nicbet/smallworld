@@ -1,0 +1,70 @@
+% 1. Chapter and Part Title Formatting (KOMA-Script)
+% Right-aligned, large numbers on their own line, followed by the title.
+\RedeclareSectionCommand[beforeskip=0pt, afterskip=2.5cm]{chapter}
+\renewcommand*{\chapterformat}{\fontsize{50}{60}\sffamily\mdseries\selectfont\thechapter}
+
+\makeatletter
+\renewcommand*{\chapterlinesformat}[3]{%
+  \vspace*{4cm}% Push it down the page significantly
+  \begin{flushright}
+    \Ifstr{#2}{}{}{#2\par}% Print number, no extra vspace to keep it close
+    {\fontsize{28}{36}\sffamily\selectfont #3}%
+  \end{flushright}
+}
+
+% Make Parts match the chapter style (right aligned, very large)
+\RedeclareSectionCommand[beforeskip=6cm, afterskip=2.5cm]{part}
+\renewcommand*{\raggedpart}{\raggedleft}
+\renewcommand*{\partformat}{\partname~\thepart}
+\renewcommand*{\partheadmidvskip}{\par\vspace{0.2cm}}
+\setkomafont{part}{\fontsize{32}{42}\sffamily\selectfont}
+\setkomafont{partnumber}{\fontsize{36}{42}\sffamily\mdseries\selectfont}
+\makeatother
+
+% Section and Subsection Rhythm
+% Tighten up the massive gaps before and after headings
+\RedeclareSectionCommands[
+  beforeskip=-1.75ex,
+  afterskip=0.125ex
+]{section,subsection,subsubsection}
+
+% Prevent LaTeX from artificially stretching vertical spaces on underfull pages
+\raggedbottom
+
+% 2. Drop Caps Setup
+% Make it black and span 2 lines, matching the image.
+\usepackage{lettrine}
+\setcounter{DefaultLines}{2}
+\renewcommand{\LettrineFontHook}{\color{black}}
+\setlength{\DefaultNindent}{0em}
+\setlength{\DefaultFindent}{0.1em}
+
+% 3. List Spacing
+% Makes lists breathe a bit more instead of being tightly packed.
+\usepackage{enumitem}
+\setlist{itemsep=0.3em, topsep=0em, parsep=0em}
+
+% 4. Code Block Adjustments
+% Quarto wraps code in a 'Shaded' environment. We can hook into it to
+% adjust the font size or line spacing specifically for code blocks.
+\usepackage{setspace}
+\makeatletter
+\@ifundefined{Shaded}{}{
+  \renewenvironment{Shaded}{\begin{snugshade}\small\setstretch{0.95}}{\end{snugshade}}
+}
+\makeatother
+
+% 5. Headers and Footers
+\usepackage[headsepline=0.5pt]{scrlayer-scrpage}
+\pagestyle{scrheadings}
+\clearpairofpagestyles
+\automark[section]{chapter} % Chapter on even pages, section on odd pages
+\ohead{\pagemark} % Page number outwards
+\ihead{\headmark} % Section/Chapter title inwards
+\setkomafont{pageheadfoot}{\small\sffamily}
+\setkomafont{pagenumber}{\small\sffamily}
+
+% Math & Tables (from the original _quarto.yml)
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
