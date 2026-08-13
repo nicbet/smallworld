@@ -1,14 +1,29 @@
 # Glossary
 
-## A
+## A {.unnumbered}
+
+**Acceleration structure**
+: A spatial hierarchy (typically a bounding-volume hierarchy with TLAS and BLAS levels) that enables efficient ray intersection queries for hardware ray tracing.
 
 **Action map**
 : A mapping from raw device input to named game or tool intent, often scoped by a context such as gameplay or a menu.
 
+**Animation graph**
+: A data-driven asset defining blend trees, layers, masks, and state machines that the engine evaluates over pose primitives to produce animation output.
+
+**Archetype**
+: The set of component types attached to an entity; entities sharing the same archetype can share a storage layout in the ECS.
+
+**Asset descriptor**
+: A serializable data file (RON, JSON, or binary) that describes an entity's initial component composition and asset references, letting designers author game objects without code.
+
 **Asset handle**
 : An opaque, stable identifier by which code refers to an asset without owning its CPU or GPU storage.
 
-## B
+**Authority**
+: The designation of which machine (client, server, or peer) owns the canonical version of a piece of game state in a networked game.
+
+## B {.unnumbered}
 
 **Backpressure**
 : A policy that limits a producer when a consumer falls behind, preventing unbounded work or latency from accumulating.
@@ -16,7 +31,31 @@
 **Bounded channel**
 : A message queue with finite capacity; a common way to encode backpressure at an ownership boundary.
 
-## C
+**Broad phase**
+: The first stage of collision detection that cheaply generates candidate overlap pairs before precise geometric testing.
+
+**Bus (audio)**
+: A named routing channel through which voices and sub-mixes flow to the final audio output, carrying shared effects and volume control.
+
+## C {.unnumbered}
+
+**Camera-relative rendering**
+: Transforming geometry relative to the camera position before sending it to the GPU, avoiding floating-point jitter far from the world origin.
+
+**Cascaded shadow map**
+: A series of shadow maps at increasing range and decreasing resolution used to shadow a directional light across large view distances.
+
+**Cell**
+: A spatial partition of the world used as the unit of streaming, residency management, and coordinate anchoring.
+
+**Change tracking**
+: An engine mechanism that records which components were mutated each frame, enabling efficient extraction, persistence, and replication.
+
+**Client prediction**
+: Running gameplay logic locally on the client before the server confirms the result, masking network latency for the local player.
+
+**Clustered lighting**
+: A light-assignment scheme that divides the view frustum into 3D clusters and lists the affecting lights per cluster for efficient evaluation.
 
 **Component**
 : Plain game-facing data attached to an entity in an entity-component system.
@@ -24,15 +63,51 @@
 **Control contract**
 : A rule governing ordering, scheduling, lifecycle, or permission to request work across domains.
 
-## D
+**Cooking**
+: Processing source assets (meshes, textures, audio) into optimized, platform-ready runtime formats, either ahead of time or on demand during import.
+
+**Coordinate space**
+: A named frame of reference — object, world, view, clip, NDC, or screen — in which positions and transforms are expressed and converted.
+
+## D {.unnumbered}
 
 **Data contract**
 : A stable description of the data allowed to cross a domain boundary, including ownership and representation rules.
 
+**Data-oriented composition**
+: The design principle of representing game objects as combinations of plain-data components queried in bulk, rather than as nodes in an inheritance hierarchy.
+
+**Decal**
+: A projected surface modification applied after opaque geometry to amend material attributes (albedo, normals) without creating a separate object.
+
+**Demand source**
+: An entity (player, camera, gameplay trigger) whose position or state drives streaming requests for nearby world content and assets.
+
+**Denoising**
+: Temporal accumulation and spatial filtering applied to noisy ray-traced results to produce a stable image within a limited sample budget.
+
+**Dense storage**
+: Storing components of the same type in contiguous arrays so iteration is a cache-friendly linear scan rather than pointer chasing.
+
+**Depth pre-pass**
+: An early render pass that writes only depth, producing shared evidence that later passes test against to avoid overdraw.
+
+**Derived data**
+: Intermediate or final build outputs produced by the asset pipeline from source content, typically cached with content hashes for incremental rebuilds.
+
+**Detail streaming**
+: Adjusting the fidelity of an object's visual or audio representation independently of whether the object itself is loaded into memory.
+
 **Domain**
 : A cohesive area of engine responsibility with its own vocabulary, state, and contracts with neighboring areas.
 
-## E
+**Dynamic resolution**
+: Adjusting the internal rendering resolution per frame to meet a frame-time budget while keeping the final output size constant.
+
+## E {.unnumbered}
+
+**Emitter (audio)**
+: A World-attached spatial source of sound whose position and parameters are updated with the entity it represents.
 
 **Entity**
 : A stable game-world identity to which components can be attached.
@@ -40,52 +115,226 @@
 **Entity-component system (ECS)**
 : A game object model in which entities are identities, components are data, and systems transform selected component data.
 
+**EventBus**
+: A typed, double-buffered event channel where events sent during frame N become readable during frame N+1, ensuring deterministic ordering regardless of system execution order.
+
 **Extraction**
 : Translation of game-facing state into an owned description for another domain, commonly the render domain.
 
-## F
+## F {.unnumbered}
+
+**Feature tier**
+: A named level of rendering capability that gates which visual features are active on a given device and backend.
+
+**Fixed timestep**
+: A simulation cadence that advances in constant-size increments regardless of display frame rate, providing deterministic physics and gameplay updates.
 
 **Frame lifecycle**
 : The documented sequence of sampling input, advancing time, running simulation, preparing presentation, and responding to lifecycle events.
 
-## G
+**Frame pacing**
+: Delivering frames at even intervals so that a high average frame rate translates into smooth perceived motion and stable input latency.
+
+**FramePacket**
+: An owned, self-contained snapshot of render-relevant state extracted from the World and transferred across the game–render firewall for presentation.
+
+**Frames in flight**
+: The number of frames the CPU may prepare ahead of the GPU, bounded to limit input latency and stale scene work.
+
+**Froxel**
+: A frustum-aligned voxel used to discretize view space for volumetric fog, clustered lighting, or participating-media evaluation.
+
+**Frustum culling**
+: Discarding objects entirely outside the camera's view volume before any draw work is submitted.
+
+## G {.unnumbered}
 
 **Game–render firewall**
 : The ownership boundary that prevents gameplay code from accessing renderer-owned GPU state and prevents rendering from aliasing the live World.
 
-## H
+**Gameplay tag**
+: A hierarchical interned string label (e.g. `status.debuff.burning`) used for loose cross-system communication without direct dependencies between features.
+
+**GBuffer**
+: A set of screen-sized textures storing per-pixel material attributes, normals, depth, and motion data produced by the geometry pass for deferred shading.
+
+**Generational index**
+: A handle pattern that pairs a slot index with a generation counter, detecting use-after-free without the runtime cost of reference counting.
+
+**Geometry backend**
+: A pair of traits (extractor and renderer) that define a new kind of renderable, split across the game–render firewall.
+
+**Global illumination (GI)**
+: Indirect light that has bounced at least once, approximated by a ladder of progressive techniques rather than a single exact solution.
+
+## H {.unnumbered}
 
 **Handle**
 : An opaque value that names a resource or object while allowing the implementation to control its lifetime and storage location.
 
-## P
+**Hot reload**
+: Replacing code or data in a running engine session without a full restart, shortening the edit–test iteration loop during development.
+
+**HRTF**
+: Head-related transfer function; a filter that simulates three-dimensional sound positioning over headphones.
+
+## I {.unnumbered}
+
+**Instancing**
+: Drawing many copies of the same mesh with per-instance variation, reducing draw-call overhead for repeated geometry.
+
+**Interest management**
+: Filtering replicated network state so each client receives only what is relevant to its current view of the world.
+
+**Inverse kinematics (IK)**
+: Computing joint angles to place an end effector at a target position, applied as a pose transformation after clip evaluation.
+
+## K {.unnumbered}
+
+**Kinematic controller**
+: A physics body moved directly by code rather than by simulated forces, typically used for player-character movement.
+
+## L {.unnumbered}
+
+**Large-world coordinates**
+: A precision strategy using double-precision or cell-relative positions to represent worlds too large for single-precision floating-point accuracy.
+
+**Level of detail (LOD)**
+: Swapping or simplifying geometry based on distance or screen coverage to stay within rendering budgets.
+
+## M {.unnumbered}
+
+**Mixer (audio)**
+: The audio subsystem that owns voice playback, bus routing, effects processing, and final output at a fixed audio cadence independent of the frame rate.
+
+## N {.unnumbered}
+
+**Named budget**
+: An explicit, observable limit on a shared resource (frame time, GPU memory, upload bandwidth, streaming range) with a defined policy for when the limit is exceeded.
+
+**Narrow phase**
+: The second stage of collision detection that performs precise geometric contact tests on the candidate pairs from the broad phase.
+
+**Navigation mesh**
+: A polygonal representation of traversable space used to answer pathfinding queries for agents of a given size and capability.
+
+## O {.unnumbered}
+
+**Occlusion culling**
+: Skipping objects hidden behind other geometry, using CPU or GPU queries to avoid drawing invisible surfaces.
+
+**Off-mesh link**
+: An authored connection in navigation data that lets agents traverse gaps, jumps, or transitions not represented by the walkable surface.
+
+**Origin rebasing**
+: Periodically shifting the coordinate-system origin close to the camera so that nearby geometry retains single-precision accuracy.
+
+**Overlapped execution**
+: Running game-side simulation for frame N+1 concurrently with render-side presentation of frame N, trading one frame of latency for higher throughput.
+
+## P {.unnumbered}
+
+**Participating media**
+: Materials like fog, smoke, or volumetric light shafts through which light scatters rather than reflecting off a hard surface.
 
 **Plugin**
 : An extension package that adds a permitted capability through public or extension contracts without importing private engine internals.
 
+**Pose**
+: A snapshot of joint transforms representing an animated skeleton's configuration at a point in time.
+
 **Presentation surface**
 : A platform-provided target, usually associated with a window, to which rendered images are presented.
 
-## R
+## Q {.unnumbered}
+
+**Quality ladder**
+: An ordered set of rendering quality settings the engine traverses up or down in response to measured frame-time performance.
+
+## R {.unnumbered}
+
+**Reconciliation**
+: Correcting mispredicted client state when the server's authoritative result arrives over the network.
+
+**Reflection probe**
+: A captured or authored environment map providing local indirect specular reflections for nearby surfaces.
 
 **Render graph**
 : A dependency graph of rendering passes and resources that determines valid ordering, lifetime, and synchronization of render work.
 
-**Retained render scene**
-: Renderer-owned scene state that persists across frames and is updated from extracted descriptions or deltas.
+**Replication**
+: Synchronizing selected game state across networked machines according to authority, relevance, and bandwidth rules.
 
 **Residency**
 : Whether data is presently available in the CPU, GPU, or other memory domain required to use it.
 
-## S
+**Retained render scene**
+: Renderer-owned scene state that persists across frames and is updated from extracted descriptions or deltas.
+
+**Rollback**
+: Rewinding and replaying simulation from a past authoritative state to correct prediction errors or resolve simultaneous inputs.
+
+**Root motion**
+: Displacement and rotation encoded in an animation clip that drives entity movement rather than being purely cosmetic.
+
+## S {.unnumbered}
+
+**Scene-referred**
+: Pixel values representing physical light intensities before tone mapping converts them to display-ready output.
+
+**Screen-space reflections**
+: Approximating reflections by ray-marching against the depth buffer, limited to information visible on screen.
+
+**Shading model**
+: A per-pixel identifier stored in the GBuffer that selects the lighting response (standard PBR, unlit, toon, foliage, etc.) in the deferred lighting pass.
+
+**Shadow atlas**
+: A shared texture that packs multiple local-light shadow maps into a single GPU resource managed by budget.
+
+**Skinning**
+: Deforming mesh vertices according to weighted bone transforms to produce animated geometry from a computed pose.
+
+**SlotMap**
+: A generational-index arena that provides stable opaque handles with dense, cache-friendly storage and O(1) insert, remove, and lookup.
+
+**Spatialization**
+: Positioning a sound in 3D space using distance attenuation, panning, and optional HRTF filtering.
+
+**Staging pool**
+: Engine-managed CPU-visible GPU buffers into which IO and decode threads write asset data before the render thread copies it to device-local memory.
 
 **System**
 : A unit of behavior that reads and transforms selected game data; more generally, an engine service with a defined responsibility.
 
-## W
+## T {.unnumbered}
 
-**World**
-: The game-facing collection of entities, components, and game state, distinct from renderer-owned or platform-owned state.
+**Temporal anti-aliasing (TAA)**
+: Reconstructing a stable image by accumulating jittered sub-pixel samples across frames using motion-vector reprojection.
+
+**Tone mapping**
+: Compressing high-dynamic-range scene values into the displayable range while preserving perceptual contrast.
+
+**Transient resource**
+: A GPU resource whose lifetime is scoped to a single frame and can be aliased with other non-overlapping transient resources.
+
+## V {.unnumbered}
+
+**Velocity buffer**
+: A screen-sized buffer storing per-pixel motion vectors, consumed by TAA, temporal upscaling, and motion blur.
+
+**Virtual filesystem**
+: An abstraction that presents loose development files, packed shipping builds, editor assets, and network-delivered content through a single asset-facing interface.
+
+**Virtualization (audio)**
+: Tracking a voice's logical state (position, parameters) without actually mixing it, to stay within the real-time voice budget.
+
+**Voice (audio)**
+: A single concurrent audio playback instance managed by the mixer, subject to priority, virtualization, and budget limits.
+
+## W {.unnumbered}
 
 **wgpu**
 : A Rust graphics library exposing a portable WebGPU-based abstraction over supported graphics backends.
+
+**World**
+: The game-facing collection of entities, components, and game state, distinct from renderer-owned or platform-owned state.

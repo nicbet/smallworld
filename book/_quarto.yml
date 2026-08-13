@@ -6,6 +6,7 @@ filters:
   - dropcap.lua
 
 bibliography: references.bib
+csl: modern-game-engine.csl
 reference-section-title: Bibliography
 
 book:

@@ -1,0 +1,50 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  \draw[-Latex, line width=0.45pt] (0,3.1) -- node[above, font=\sffamily\scriptsize] {real time} (12.5,3.1);
+
+  % Frame markers
+  \foreach \name/\x/\label in {f0/0/F0, f1/2.0/F1, f2/5.0/F2, f3/7.0/F3, f4/8.2/F4, f5/10.5/F5} {
+    \draw[line width=0.5pt, black!60] (\x,2.75) -- (\x,3.45);
+    \node[font=\sffamily\scriptsize\bfseries, anchor=south] at (\x,3.48) {\label};
+  }
+
+  % Fixed dt markers (every 1.667 units)
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (-0.1,2.1) {FIXED STEPS};
+  \foreach \i/\x in {1/1.667,2/3.333,3/5.0,4/6.667,5/8.333,6/10.0} {
+    \draw[line width=0.5pt, black!35] (\x,1.8) -- (\x,2.4);
+    \node[font=\sffamily\tiny, black!50, anchor=south] at (\x,2.42) {\i};
+  }
+  \draw[line width=0.35pt, black!35] (0,2.1) -- (11.5,2.1);
+
+  % Accumulator bars per frame
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (-0.1,1.0) {ACCUMULATOR};
+
+  % F0→F1: dt=2.0, accum starts 0, add 2.0, run 1 step (1.667), leftover=0.333
+  \node[engine-package, text width=2.3cm, minimum height=0.6cm] at (1.0,1.0)
+    {\textbf{1 step}\\rem = 0.33};
+
+  % F1→F2: dt=3.0, accum=0.333+3.0=3.333, run 2 steps (3.333), leftover=0.0
+  \node[engine-package, text width=2.3cm, minimum height=0.6cm] at (3.5,1.0)
+    {\textbf{2 steps}\\rem = 0.00};
+
+  % F2→F3: dt=2.0, accum=0+2.0=2.0, run 1 step, leftover=0.333
+  \node[engine-package, text width=2.3cm, minimum height=0.6cm] at (6.0,1.0)
+    {\textbf{1 step}\\rem = 0.33};
+
+  % F3→F4: dt=1.2, accum=0.333+1.2=1.533, run 0 steps, leftover=1.533
+  \node[engine-package, text width=2.3cm, minimum height=0.6cm] at (7.6,1.0)
+    {\textbf{0 steps}\\rem = 1.53};
+
+  % F4→F5: dt=2.3, accum=1.533+2.3=3.833, run 2 steps, leftover=0.5
+  \node[engine-package, text width=2.3cm, minimum height=0.6cm] at (9.35,1.0)
+    {\textbf{2 steps}\\rem = 0.50};
+
+  % Alpha annotation
+  \node[font=\sffamily\tiny, black!65, align=left, anchor=north west] at (0,-0.05)
+    {Each step consumes exactly \texttt{fixed\_dt}. The remainder becomes \texttt{alpha} for interpolation.};
+\end{tikzpicture}
+\caption{The fixed-timestep accumulator across frames with varying real-time deltas. The number of steps per frame varies, but each step always consumes exactly \texttt{fixed\_dt}. Short frames may run zero steps; long frames run several.}
+\label{fig:fixed-timestep-accumulator}
+\end{figure}
+\FloatBarrier

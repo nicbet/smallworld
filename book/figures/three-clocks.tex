@@ -1,0 +1,58 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Timeline arrows
+  \draw[-Latex, line width=0.45pt] (0,2.4) -- node[above, font=\sffamily\scriptsize] {time} (11.5,2.4);
+
+  % Real time
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (-0.1,1.6) {REAL TIME};
+  \draw[line width=0.4pt, black!50] (0,1.6) -- (11,1.6);
+  \foreach \x in {0,1.5,3.5,5.0,6.0,7.5,9.5,11.0} {
+    \draw[line width=0.4pt, black!50] (\x,1.45) -- (\x,1.75);
+  }
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (0.75,1.42) {15ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (2.5,1.42) {20ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (4.25,1.42) {15ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (5.5,1.42) {10ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (6.75,1.42) {15ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (8.5,1.42) {20ms};
+  \node[font=\sffamily\tiny, black!70, anchor=north] at (10.25,1.42) {15ms};
+  \node[font=\sffamily\tiny, anchor=east] at (-0.1,1.15) {\itshape always advances};
+
+  % Scaled game time
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (-0.1,0.3) {GAME TIME};
+  \draw[line width=0.4pt, black!50] (0,0.3) -- (11,0.3);
+  \foreach \x in {0,0.75,1.75,2.5,3.0,3.75,4.75,5.5} {
+    \draw[line width=0.4pt, black!50] (\x,0.15) -- (\x,0.45);
+  }
+  \node[font=\sffamily\tiny, anchor=east] at (-0.1,-0.05) {\itshape scale = 0.5};
+  % Paused section
+  \draw[line width=0.8pt, black!30, dashed] (5.5,0.3) -- (8.5,0.3);
+  \node[font=\sffamily\tiny\itshape, black!40] at (7.0,0.55) {scale = 0.0 (paused)};
+  % Resume
+  \draw[line width=0.4pt, black!50] (8.5,0.3) -- (11,0.3);
+  \foreach \x in {8.5,9.25,10.25,11.0} {
+    \draw[line width=0.4pt, black!50] (\x,0.15) -- (\x,0.45);
+  }
+
+  % Fixed simulation time
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (-0.1,-0.9) {FIXED TIME};
+  \draw[line width=0.4pt, black!50] (0,-0.9) -- (11,-0.9);
+  \foreach \x in {0,1.667,3.333,5.0} {
+    \draw[line width=0.6pt, black!70] (\x,-1.1) -- (\x,-0.7);
+  }
+  \node[font=\sffamily\tiny, anchor=north] at (0.833,-1.13) {fixed\_dt};
+  \node[font=\sffamily\tiny, anchor=east] at (-0.1,-1.3) {\itshape constant steps};
+  % Paused section
+  \draw[line width=0.8pt, black!30, dashed] (5.0,-0.9) -- (8.5,-0.9);
+  \node[font=\sffamily\tiny\itshape, black!40] at (6.75,-0.6) {0 steps};
+  % Resume
+  \draw[line width=0.4pt, black!50] (8.5,-0.9) -- (11,-0.9);
+  \foreach \x in {8.5,10.167} {
+    \draw[line width=0.6pt, black!70] (\x,-1.1) -- (\x,-0.7);
+  }
+\end{tikzpicture}
+\caption{Three clocks in the engine. Real time always advances. Scaled game time tracks real time modulated by a time scale (here 0.5\texttimes, then paused). Fixed simulation time advances in constant steps derived from scaled game time.}
+\label{fig:three-clocks}
+\end{figure}
+\FloatBarrier

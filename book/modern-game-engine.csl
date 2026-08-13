@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0">
+  <info>
+    <title>Modern Game Engine</title>
+    <id>https://smallworld.dev/csl/modern-game-engine</id>
+    <updated>2026-08-13T00:00:00+00:00</updated>
+  </info>
+
+  <citation collapse="citation-number">
+    <sort>
+      <key variable="citation-number"/>
+    </sort>
+    <layout prefix="[" suffix="]" delimiter=", ">
+      <text variable="citation-number"/>
+    </layout>
+  </citation>
+
+  <bibliography second-field-align="flush">
+    <sort>
+      <key variable="citation-number"/>
+    </sort>
+    <layout>
+      <text variable="citation-number" prefix="[" suffix="] "/>
+      <text variable="title" quotes="true"/>
+      <text value=" — "/>
+      <names variable="author">
+        <name and="text" delimiter=", " delimiter-precedes-last="always"/>
+      </names>
+      <choose>
+        <if type="webpage post post-weblog" match="any">
+          <group prefix=", ">
+            <text value="Accessed "/>
+            <date variable="accessed">
+              <date-part name="year"/>
+              <date-part name="month" prefix="-" form="numeric-leading-zeros"/>
+              <date-part name="day" prefix="-" form="numeric-leading-zeros"/>
+            </date>
+          </group>
+        </if>
+        <else-if variable="DOI">
+          <text variable="DOI" prefix=", DOI: "/>
+        </else-if>
+        <else-if variable="ISBN">
+          <text variable="ISBN" prefix=", ISBN: "/>
+        </else-if>
+        <else-if variable="ISSN">
+          <text variable="ISSN" prefix=", ISSN: "/>
+        </else-if>
+      </choose>
+    </layout>
+  </bibliography>
+</style>

@@ -1,0 +1,64 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Time arrow
+  \draw[-Latex, line width=0.45pt] (0.3,2.85) -- node[above, font=\sffamily\scriptsize] {time} (12.3,2.85);
+
+  % Game Thread label
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,2.0) {GAME};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,1.65) {THREAD};
+
+  % Game Thread Frame N
+  \foreach \name/\x/\title in {gi/0.7/Input, gf/2.0/Fixed, gu/3.3/Update, gl/4.6/Late, ge/5.9/Extract, gc/7.2/Clear} {
+    \node[engine-package, text width=0.85cm, minimum height=0.65cm] (\name) at (\x,1.8) {\title};
+  }
+  \draw[-Latex, line width=0.35pt] (gi.east) -- (gf.west);
+  \draw[-Latex, line width=0.35pt] (gf.east) -- (gu.west);
+  \draw[-Latex, line width=0.35pt] (gu.east) -- (gl.west);
+  \draw[-Latex, line width=0.35pt] (gl.east) -- (ge.west);
+  \draw[-Latex, line width=0.35pt] (ge.east) -- (gc.west);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=south] at (3.95,2.28) {Frame N};
+
+  % Game Thread Frame N+1 (starts after Clear)
+  \foreach \name/\x/\title in {gi2/8.2/Input, gf2/9.3/Fixed, gu2/10.4/Update, gl2/11.5/Late} {
+    \node[engine-package, text width=0.85cm, minimum height=0.65cm] (\name) at (\x,1.8) {\title};
+  }
+  \draw[-Latex, line width=0.35pt] (gc.east) -- (gi2.west);
+  \draw[-Latex, line width=0.35pt] (gi2.east) -- (gf2.west);
+  \draw[-Latex, line width=0.35pt] (gf2.east) -- (gu2.west);
+  \draw[-Latex, line width=0.35pt] (gu2.east) -- (gl2.west);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=south] at (9.85,2.28) {Frame N+1};
+
+  % Render Thread label
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,0.0) {RENDER};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,-0.35) {THREAD};
+
+  % Render Thread Frame N-1 (earlier, finishing)
+  \foreach \name/\x/\title in {rr0/2.0/Record, rs0/3.3/Submit, rp0/4.6/Present} {
+    \node[engine-package, text width=0.85cm, minimum height=0.65cm] (\name) at (\x,-0.2) {\title};
+  }
+  \draw[-Latex, line width=0.35pt] (rr0.east) -- (rs0.west);
+  \draw[-Latex, line width=0.35pt] (rs0.east) -- (rp0.west);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=north] at (3.3,-0.7) {Frame N\textminus1};
+
+  % Render Thread Frame N (starts after receiving packet from Extract)
+  \foreach \name/\x/\title in {rr/6.6/Receive, rp1/7.7/Prepare, rc/8.8/Cull, rd/9.9/Record, re/11.0/Submit} {
+    \node[engine-package, text width=0.85cm, minimum height=0.65cm] (\name) at (\x,-0.2) {\title};
+  }
+  \draw[-Latex, line width=0.35pt] (rp0.east) -- (rr.west);
+  \draw[-Latex, line width=0.35pt] (rr.east) -- (rp1.west);
+  \draw[-Latex, line width=0.35pt] (rp1.east) -- (rc.west);
+  \draw[-Latex, line width=0.35pt] (rc.east) -- (rd.west);
+  \draw[-Latex, line width=0.35pt] (rd.east) -- (re.west);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=north] at (8.8,-0.7) {Frame N};
+
+  % Channel transfer arrow
+  \draw[-Latex, line width=0.6pt] (ge.south) -- node[right, font=\sffamily\tiny, align=left] {owned\\packet} (rr.north);
+
+  % Feedback arrow
+  \draw[-Latex, line width=0.45pt, dashed] (rp0.north west) to[bend left=16] node[above, font=\sffamily\tiny] {feedback} (gi.south);
+\end{tikzpicture}
+\caption{The two-frame overlapped pipeline. The Game Thread prepares frame N+1 while the Render Thread draws frame N. The extract/receive boundary is the sole synchronization point; feedback returns asynchronously from past frames.}
+\label{fig:overlapped-pipeline}
+\end{figure}
+\FloatBarrier

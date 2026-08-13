@@ -1,0 +1,28 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Stage boxes
+  \node[engine-package, text width=2.8cm, minimum height=0.95cm] (s1) at (0,0)
+    {\textbf{Stage 1}\\Stop simulation\\{\tiny (services still live)}};
+  \node[engine-package, text width=2.8cm, minimum height=0.95cm] (s2) at (3.6,0)
+    {\textbf{Stage 2}\\Quiesce producers\\{\tiny (cancel streaming)}};
+  \node[engine-package, text width=2.8cm, minimum height=0.95cm] (s3) at (7.2,0)
+    {\textbf{Stage 3}\\Drain pipeline\\{\tiny (close channels, GPU idle)}};
+  \node[engine-package, text width=2.8cm, minimum height=0.95cm] (s4) at (3.6,-1.8)
+    {\textbf{Stage 4}\\Stop services\\{\tiny (audio, worker pools)}};
+  \node[engine-package, text width=2.8cm, minimum height=0.95cm] (s5) at (7.2,-1.8)
+    {\textbf{Stage 5}\\Destroy\\{\tiny (device, window, exit)}};
+
+  \draw[-Latex, line width=0.5pt] (s1.east) -- (s2.west);
+  \draw[-Latex, line width=0.5pt] (s2.east) -- (s3.west);
+  \draw[-Latex, line width=0.5pt] (s3.south) |- (s4.east);
+  \draw[-Latex, line width=0.5pt] (s4.east) -- (s5.west);
+
+  % Key invariant callout
+  \node[font=\sffamily\tiny, black!65, text width=4.5cm, anchor=north west] at (0,-1.2)
+    {Saves flush in Stage~1 while IO and asset services are alive. Each stage has a 2\,s deadline; missed deadlines are logged and forced.};
+\end{tikzpicture}
+\caption{The five-stage teardown protocol. Simulation stops while services are alive (so saves succeed), then producers quiesce, the pipeline drains, services stop, and resources are destroyed. Each stage has a deadline to prevent hanging.}
+\label{fig:teardown-protocol}
+\end{figure}
+\FloatBarrier

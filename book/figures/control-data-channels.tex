@@ -1,0 +1,37 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Game Thread box
+  \node[engine-package, minimum width=3.2cm, minimum height=1.4cm] (game) at (0,0) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (0,0.35) {Game Thread};
+  \node[font=\sffamily\tiny, black!65] at (0,-0.05) {World, Input, Time};
+
+  % Render Thread box
+  \node[engine-package, minimum width=3.2cm, minimum height=1.4cm] (render) at (8.0,0) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (8.0,0.35) {Render Thread};
+  \node[font=\sffamily\tiny, black!65] at (8.0,-0.05) {RenderScene, GPU};
+
+  % Receive box inside render
+  \node[engine-package, text width=1.4cm, minimum height=0.5cm, fill=black!8] (recv) at (5.9,0.9)
+    {\textbf{RECEIVE}};
+
+  % Data channel (thick, solid)
+  \draw[-Latex, line width=0.7pt] (1.7,0.0) -- node[below, font=\sffamily\scriptsize] {\texttt{FramePacket}} (6.3,0.0);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=south] at (4.0,0.05) {data channel (bounded)};
+
+  % Control channel (dashed, above)
+  \draw[-Latex, line width=0.5pt, dashed] (1.7,0.9) -- node[above, font=\sffamily\scriptsize] {Resized, DeviceLost, Quit} (5.1,0.9);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=south] at (3.4,1.0) {control channel (out-of-band)};
+
+  % Feedback channel (thin, below)
+  \draw[Latex-, line width=0.4pt, dotted] (1.7,-0.6) -- node[below, font=\sffamily\scriptsize] {\texttt{FrameFeedback}} (6.3,-0.6);
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=north] at (4.0,-0.75) {feedback channel (advisory)};
+
+  % Frame boundary annotation
+  \draw[line width=0.3pt, black!35] (5.5,-1.2) -- (5.5,1.6);
+  \node[font=\sffamily\tiny\itshape, black!40, anchor=south, rotate=90] at (5.35,0.0) {frame boundary};
+\end{tikzpicture}
+\caption{Three channels between the Game Thread and Render Thread. The control channel is out-of-band and always deliverable; the data channel carries per-frame rendering work; the feedback channel returns advisory performance data. The Render Thread drains control at the frame boundary before processing packets.}
+\label{fig:control-data-channels}
+\end{figure}
+\FloatBarrier

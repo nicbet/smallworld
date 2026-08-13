@@ -1,0 +1,29 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Three loops as stacked boxes
+  \node[engine-boundary, minimum width=11cm, minimum height=1.1cm] (drs) at (5.5,2.2) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (0.35,2.55) {LOOP 1 \textemdash\ DYNAMIC RESOLUTION};
+  \node[font=\sffamily\tiny, anchor=west, text width=9.5cm] at (0.55,1.95) {Consumes GPU frame time vs.\ target. Drops resolution fast on overrun, recovers slowly. Hysteresis band prevents oscillation.};
+
+  \node[engine-boundary, minimum width=11cm, minimum height=1.1cm] (throttle) at (5.5,0.7) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (0.35,1.05) {LOOP 2 \textemdash\ GPU QUEUE-DEPTH THROTTLE};
+  \node[font=\sffamily\tiny, anchor=west, text width=9.5cm] at (0.55,0.45) {Waits on GPU completion before submitting. Caps in-flight frames at \texttt{max\_gpu\_frames\_in\_flight}. Deterministic worst-case latency.};
+
+  \node[engine-boundary, minimum width=11cm, minimum height=1.1cm] (vsync) at (5.5,-0.8) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (0.35,-0.45) {LOOP 3 \textemdash\ VSYNC / PRESENT MODE};
+  \node[font=\sffamily\tiny, anchor=west, text width=9.5cm] at (0.55,-1.05) {Fifo (vsync on) paces to vblank; Mailbox/Immediate (vsync off) uses a software frame cap. Backpressure propagates through the bounded channel.};
+
+  % Interaction arrows
+  \draw[-Latex, line width=0.5pt] (drs.south) -- node[right, font=\sffamily\tiny] {keeps GPU inside budget} (throttle.north);
+  \draw[-Latex, line width=0.5pt] (throttle.south) -- node[right, font=\sffamily\tiny] {bounds driver-side latency} (vsync.north);
+
+  % Proactive vs reactive labels
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=east] at (11.2,2.2) {proactive};
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=east] at (11.2,0.7) {backstop};
+  \node[font=\sffamily\tiny\itshape, black!55, anchor=east] at (11.2,-0.8) {cadence};
+\end{tikzpicture}
+\caption{Three composable pacing control loops. Dynamic resolution adjusts quality proactively; the queue-depth throttle bounds latency as a backstop; vsync or a software limiter governs the overall cadence. When Loop~1 succeeds, Loop~2 rarely engages.}
+\label{fig:pacing-control-loops}
+\end{figure}
+\FloatBarrier
