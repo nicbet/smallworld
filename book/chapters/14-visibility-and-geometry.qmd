@@ -1,0 +1,63 @@
+# Visibility and Geometry
+
+> **Draft chapter map.** Explain how the renderer decides what geometry to prepare and draw, across meshes, volumes, and changing levels of detail.
+
+## Visibility Is a Budget Decision
+
+- Establish that rendering every object is not a viable definition of correctness.
+- Connect visibility to view-dependent relevance and finite frame budgets.
+
+### Frustum, Occlusion, and Distance
+
+- Explain broad classes of culling without treating one technique as universally required.
+- Compare CPU and GPU responsibility based on data size and latency.
+
+#### Conservative Results and Temporal Feedback
+
+- Discuss false positives, delayed results, and stability trade-offs.
+- Connect visibility feedback to the advisory-feedback contract.
+
+## Geometry as an Extensible Family
+
+- Explain why an engine should not make a single primitive representation its universal object model.
+- Introduce meshes, instancing, terrain, and volumes as renderer-facing realizations of game intent.
+
+### Mesh Streams and Levels of Detail
+
+- Cover shared geometry, instances, LOD selection, and transition quality.
+- Relate streaming demand to geometric detail.
+
+#### Voxel Volumes as First-Class Geometry
+
+- Use Smallworld to illustrate a hybrid voxel-mesh renderer.
+- Explain what is generalizable and what is specific to the engine’s target worlds.
+
+## Opaque Geometry Produces Shared Evidence
+
+- Explain why a depth pre-pass and an opaque geometry/GBuffer pass are more than draw stages: they create the depth, material, normal, emissive, and motion information consumed by later work.
+- Compare deferred, forward, and hybrid paths in terms of light count, material freedom, memory bandwidth, and the needs of opaque versus transparent geometry.
+
+### GBuffer, Motion, and Identification
+
+- Describe the purpose of material attributes, encoded normals, depth, and per-pixel velocity; connect velocity to temporal anti-aliasing, temporal upscaling, and motion blur.
+- Cover picking and debug identification as deliberate, on-demand services rather than a permanent full-resolution ID target that taxes every frame.
+
+#### Decals and Surface Modification
+
+- Place projected deferred decals after opaque geometry and before lighting, showing how they amend existing surface data without creating a separate object model.
+- Explain receiving flags, normal blending, ordering, and why decals belong to the shared render contract rather than a game-specific shortcut.
+
+## Deformation and Animation at the Boundary
+
+- Explain the handoff from animation data to renderable geometry.
+- Set up later detail on compute skinning and deformation passes.
+
+### Verification and Profiling
+
+- Define useful counters for visibility, draw work, and geometry throughput.
+- Connect tuning decisions to instrumentation and visual correctness.
+
+#### Common Failure Modes
+
+- Cover popping, unstable LOD, over-culling, and unbounded draw preparation.
+- Tie remedies to explicit quality and latency policy.

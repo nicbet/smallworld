@@ -1,0 +1,49 @@
+# Resource Pipeline and Virtual Filesystem
+
+> **Draft chapter map.** Follow content from authored source through identity, processing, loading, and runtime use.
+
+## Assets Are Data Products
+
+- Explain the difference between source content, imported data, cooked runtime data, and resident runtime resources.
+- Establish why asset processing belongs to the engine rather than scattered game startup code.
+
+### Stable Asset Identity
+
+- Compare durable identifiers with human-friendly aliases and paths.
+- Explain how identity permits references to survive renames, packaging, and asynchronous loading.
+
+#### The Virtual Filesystem Boundary
+
+- Show how one content interface can serve loose files, packed builds, editor assets, and network-delivered content.
+- Keep operating-system file details below the asset-facing contract.
+
+## Importing and Cooking
+
+- Explain validation, conversion, derived data, and versioning as reproducibility tools.
+- Compare import-on-demand with precomputed cooked assets.
+
+### Derived Data and Incremental Work
+
+- Describe content hashes, cache invalidation, and build reproducibility.
+- Connect a good pipeline to fast iteration for a small team.
+
+#### Extensible Importers
+
+- Show where plugins can add importers and processors without changing engine internals.
+- Establish clear failure reporting and fallback behavior.
+
+## Runtime Loading and Upload
+
+- Describe demand, IO, decoding, staging, and residency as a pipeline with explicit handoffs.
+- Defer renderer-owned GPU upload mechanics to the rendering chapters.
+
+### Asynchronous Loading Contracts
+
+- Explain handles, loading states, readiness notifications, and placeholder content.
+- Keep gameplay responsive while content is incomplete.
+
+#### Resource Failure Is Normal
+
+- Cover missing files, incompatible content, cancellation, and retry policy.
+- Explain why the engine must expose failure as data rather than crash by default.
+

@@ -1,0 +1,48 @@
+# Core Loop and Frame Lifecycle
+
+> **Draft chapter map.** Explain how the engine converts continuous platform events into coordinated simulation, presentation, and service work.
+
+## Time Is an Engine Service
+
+- Establish that “a frame” is a presentation opportunity, not a universal clock for every subsystem.
+- Separate real time, scaled game time, and fixed simulation time before introducing implementation details.
+
+### Fixed and Variable Work
+
+- Explain why physics and deterministic gameplay need a stable cadence while cameras, UI, and visual effects can update at frame rate.
+- Compare accumulator-based fixed stepping with naive frame-time simulation.
+
+#### Interpolation and Catch-Up Policy
+
+- Explain the visual role of interpolation and the safety role of bounded catch-up.
+- Foreshadow the explicit policies for pause, slow frames, and time debt.
+
+## Overlapped Frame Execution
+
+- Show the conceptual overlap between the game side preparing one frame and the render side presenting another.
+- Explain that overlap is a latency/throughput trade-off, not an unconditional performance win.
+
+### Pacing, Backpressure, and Presentation
+
+- Describe the display, the GPU queue, and the engine as separate pacing influences.
+- Establish bounded queues and named latency budgets as the alternative to unbounded frame accumulation.
+
+#### Adaptive Quality as a Control Loop
+
+- Introduce feedback-driven decisions such as dynamic resolution without committing to a particular algorithm.
+- Connect quality changes to measured budgets rather than one-off feature switches.
+
+## Lifecycle Events Are First-Class Work
+
+- Explain why resize, focus, minimize, device loss, and shutdown cannot be treated as ordinary gameplay events.
+
+### Pausing, Resuming, and World Transitions
+
+- Separate pausing simulation from freezing the entire application.
+- Explain how a responsive UI and loading experience can coexist with a paused or changing World.
+
+#### Graceful Teardown
+
+- Outline the order in which work is stopped, resources are released, and threads are joined.
+- Emphasize recoverable failure paths over process-wide assumptions.
+

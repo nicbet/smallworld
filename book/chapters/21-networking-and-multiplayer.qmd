@@ -1,0 +1,49 @@
+# Networking and Multiplayer
+
+> **Draft chapter map.** Apply the book’s data, control, ownership, and time contracts to simulation that spans multiple machines.
+
+## Networking Changes the Trust Boundary
+
+- Explain why multiplayer is not “serialize the World every frame.”
+- Introduce authority, latency, partial knowledge, and adversarial inputs as architectural constraints.
+
+### Client, Server, and Peer Models
+
+- Compare common authority models and the games for which they fit.
+- Keep transport choices separate from game-state policy.
+
+#### Identity Across the Network
+
+- Explain network identities, local handles, and stable references.
+- Connect identity to persistence and world streaming.
+
+## Replication as a Data Contract
+
+- Explain snapshots, deltas, relevance, serialization, and interest management.
+- Show why the network representation is distinct from both the live World and render data.
+
+### Prediction and Interpolation
+
+- Introduce client prediction, reconciliation, and visual interpolation.
+- Connect them to the fixed/variable time model from Chapter 4.
+
+#### Rollback and Determinism
+
+- Explain what rollback requires and why not every engine or game needs it.
+- Identify deterministic boundaries, input history, and reproducibility requirements.
+
+## Networking Meets Engine Services
+
+- Connect replication to assets, physics, audio, streaming, and UI.
+- Explain how explicit domain contracts prevent networking from becoming a global exception.
+
+### Testing and Diagnostics
+
+- Outline simulated latency, packet loss, traces, and reproducible desynchronization tests.
+- Connect observability to trustworthy multiplayer iteration.
+
+#### Smallworld’s Future Direction
+
+- Identify the existing contracts that keep multiplayer viable.
+- Clearly distinguish designed extension points from implemented functionality.
+

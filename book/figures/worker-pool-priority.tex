@@ -1,0 +1,22 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex]
+  \node[engine-layer, minimum width=14.5cm, minimum height=2.55cm] (shared) at (0,2.35) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (shared.north) [yshift=-0.27cm] {ONE SHARED WORKER POOL};
+  \foreach \x in {-4.7,-1.6,1.5,4.6} {
+    \node[engine-package, minimum width=2.25cm, minimum height=0.58cm] at (\x,2.15) {Physics solve (3 ms)};
+  }
+  \node[engine-package, text width=4.45cm, minimum height=0.72cm] at (0,1.18) {Frustum culling (render-critical)};
+  \node[font=\sffamily\scriptsize, anchor=west] at (2.35,1.18) {waits behind physics $\rightarrow$ missed frame};
+  \node[font=\sffamily\bfseries\scriptsize] at (0,0.30) {SPLIT POOLS};
+  \node[engine-layer, minimum width=6.75cm, minimum height=2.0cm] (game) at (-3.85,-1.15) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (game.north) [yshift=-0.25cm] {GAME WORKER POOL};
+  \node[engine-package, text width=5.7cm, minimum height=1.0cm] at (-3.85,-1.48) {Physics\quad Animation\quad Streaming};
+  \node[engine-layer, minimum width=6.75cm, minimum height=2.0cm] (render) at (3.85,-1.15) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (render.north) [yshift=-0.25cm] {RENDER WORKER POOL};
+  \node[engine-package, text width=5.7cm, minimum height=1.0cm] at (3.85,-1.48) {Frustum culling\quad Draw sorting\quad Batch merge};
+\end{tikzpicture}
+\caption{Priority inversion in a shared worker pool, and the separation that prevents render-critical preparation from queueing behind game work.}
+\label{fig:worker-pool-priority}
+\end{figure}
+\FloatBarrier

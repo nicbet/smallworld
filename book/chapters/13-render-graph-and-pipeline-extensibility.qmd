@@ -1,0 +1,69 @@
+# Render Graph and Pipeline Extensibility
+
+> **Draft chapter map.** Explain how a renderer grows from a fixed sequence into a resource-aware, extensible graph of work.
+
+## Rendering Is a Dependency Problem
+
+- Introduce passes, resources, and ordering as a directed dependency graph.
+- Explain why hard-coded pass sequences become brittle as effects accumulate.
+
+### The Render Graph Model
+
+- Define pass inputs, outputs, lifetimes, and scheduling at a conceptual level.
+- Connect explicit dependencies to validation and efficient resource reuse.
+
+#### Compiling a Frame Plan
+
+- Describe graph validation, ordering, transient allocation, and execution planning.
+- Defer API command recording details to the concrete renderer implementation.
+
+## The Pass Sequence Is a Contract
+
+- Trace the durable opaque-frame order: extraction and preparation, deformation, depth, geometry or GBuffer, decals, shadows, volumetrics, lighting, sky, transparency, post-processing, and presentation.
+- Explain that a render graph makes this sequence explicit without pretending every game needs every pass or that a graph has only one valid ordering.
+
+### Resources Shared Across Passes
+
+- Name the high-value shared resources—depth, GBuffer attributes, velocity, HDR scene color, histories, shadow atlases, and internal-resolution targets—and describe the producer/consumer contract for each.
+- Explain why a velocity buffer, for example, is a cross-cutting promise needed by temporal anti-aliasing, temporal upscaling, motion blur, and stable volumetrics.
+
+#### Extension Slots in a Real Pipeline
+
+- Locate custom geometry, deferred GBuffer decals, fog-density injectors, material shading models, auxiliary views, transparency passes, and post-process nodes in the graph.
+- Show how declared inputs and outputs let a plugin participate without a private renderer fork or an undocumented ordering dependency.
+
+## Extension Without Renderer Forks
+
+- Explain how plugins and game features add passes, materials, and geometry providers through contracts.
+- Keep the core renderer in control of resource ownership and scheduling.
+
+### Custom Geometry and Material Hooks
+
+- Distinguish data extraction contracts from rendering implementation contracts.
+- Show how an extension can be powerful without importing private GPU state.
+
+#### Ordering, Hazards, and Diagnostics
+
+- Explain resource hazards, missing inputs, and incompatible extensions.
+- Establish clear validation and debuggability as extension requirements.
+
+## Capability-Aware Rendering
+
+- Explain why a renderer must adapt to a range of devices and backends.
+- Separate a visual goal from the hardware path used to achieve it.
+
+### Feature Tiers and Fallbacks
+
+- Develop a concrete ladder from a baseline raster path through clustered lights and shadow atlases, temporal reconstruction and dynamic resolution, software GI, and optional hardware ray tracing.
+- Explain which features are capability-gated, which are quality policies, and which must have a functional fallback rather than silently disappearing.
+- Connect policies to the boot-time device negotiation introduced in Chapter 2.
+
+#### Vendor Technologies and Replaceable Interfaces
+
+- Explain why temporal resolve/upscaling belongs behind a declared graph slot with color, depth, velocity, exposure, and jitter inputs.
+- Use in-house TAAU as the baseline, FSR as a portable later implementation, and DLSS or XeSS as optional vendor integrations—not as renderer-wide dependencies.
+
+#### Smallworld’s `wgpu` Realization
+
+- Show how `wgpu` provides a graphics abstraction while capability policy remains engine-owned.
+- Distinguish portable contracts from backend-specific optimization.

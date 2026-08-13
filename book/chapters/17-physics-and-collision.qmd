@@ -1,0 +1,53 @@
+# Physics and Collision
+
+> **Draft chapter map.** Separate gameplay spatial queries from rigid-body simulation and integrate a physics provider without surrendering World ownership.
+
+## Collision Is More Than Physics
+
+- Distinguish overlap tests, ray queries, character movement, triggers, and full dynamics.
+- Explain why many gameplay questions do not require a costly rigid-body simulation.
+
+### Spatial Queries as a Contract
+
+- Define query inputs, filtering, results, and coordinate-space policy.
+- Connect collision data to World state and streaming residency.
+
+#### Broad Phase and Narrow Phase
+
+- Explain candidate generation versus precise contact testing.
+- Relate the split to data-oriented structures and performance budgets.
+
+## Provider-Based Simulation
+
+- Explain the value of an engine-facing physics contract over direct dependency on one library.
+- Compare provider abstraction with pretending all physics engines have identical behavior.
+
+### Bodies, Constraints, and Characters
+
+- Cover dynamic bodies, kinematic controllers, joints, and authored collision shapes.
+- Establish the ownership and synchronization rules with the game-facing World.
+
+#### Fixed-Step Integration
+
+- Connect simulation cadence to Chapter 4’s time model.
+- Explain interpolation and event delivery at the boundary.
+
+## Physics at Scale
+
+- Discuss streamed collision, large coordinates, and sleeping objects.
+- Connect performance policy to the world-residency model.
+
+### Debugging and Verification
+
+- Outline visual debug drawing, reproducible scenarios, and determinism limits.
+- Explain how profiling separates query cost from solver cost.
+
+#### Smallworld Provider Design
+
+- Use Smallworld to illustrate the selected contract and integration path.
+- Keep third-party library details subordinate to the design principles.
+
+## Navigation Is a Separate Spatial Service
+
+- Explain why collision answers immediate geometric questions, whereas navigation answers planned movement questions over an authored and changing world.
+- Lead into the next chapter's query, threading, streaming, and budget contracts for pathfinding.

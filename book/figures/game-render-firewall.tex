@@ -1,0 +1,18 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex]
+  \node[engine-layer, minimum width=14.5cm, minimum height=2.15cm] (game) at (0,2.25) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (game.north) [yshift=-0.27cm] {GAME DOMAIN};
+  \node[engine-package, text width=12.6cm, minimum height=1.0cm] at (0,1.92) {\textbf{Owns:} World state, game logic, entity hierarchies\\\textbf{Speaks in:} transforms, materials, handles, events, and commands\\\textbf{Never touches:} GPU devices, bind groups, render targets, or command encoders};
+  \node[engine-boundary, text width=7.1cm, minimum height=0.62cm] (extract) at (0,0.72) {EXTRACT --- owned render description};
+  \draw[-Latex, line width=0.6pt] (game.south) -- (extract.north);
+  \node[font=\sffamily\scriptsize, align=left, anchor=west] at (3.95,0.72) {views, lights, geometry and material intent,\\resource requests, extension descriptions};
+  \node[engine-layer, minimum width=14.5cm, minimum height=2.15cm] (render) at (0,-1.25) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (render.north) [yshift=-0.27cm] {RENDER DOMAIN};
+  \node[engine-package, text width=12.6cm, minimum height=1.0cm] at (0,-1.58) {\textbf{Owns:} render-side scene, GPU pools, render targets, command submission\\\textbf{Speaks in:} draw commands, GPU resources, shader bindings\\\textbf{Never touches:} World, components, or live game state};
+  \draw[-Latex, line width=0.6pt] (extract.south) -- (render.north);
+\end{tikzpicture}
+\caption{The Game--Render Firewall. An owned, render-relevant description crosses from the mutable game World to the renderer; private mutable state does not.}
+\label{fig:game-render-firewall}
+\end{figure}
+\FloatBarrier

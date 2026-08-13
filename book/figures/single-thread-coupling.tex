@@ -1,0 +1,20 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, node distance=0.55cm]
+  \node[engine-layer, minimum width=14.5cm, minimum height=3.9cm] (box) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (box.north) [yshift=-0.28cm] {SINGLE-THREADED, SHARED-STATE LOOP};
+  \node[engine-package, minimum width=1.9cm, minimum height=0.65cm] (input) at (-5.2,0.60) {Input};
+  \node[engine-package, minimum width=2.2cm, minimum height=0.65cm, right=of input] (world) {World update};
+  \node[engine-package, minimum width=2.2cm, minimum height=0.65cm, right=of world] (draws) {Build draws};
+  \node[engine-package, minimum width=1.4cm, minimum height=0.65cm, right=of draws] (gpu) {GPU};
+  \draw[-Latex, line width=0.5pt] (input) -- (world);
+  \draw[-Latex, line width=0.5pt] (world) -- (draws);
+  \draw[-Latex, line width=0.5pt] (draws) -- (gpu);
+  \node[engine-package, text width=3.4cm, minimum height=1.05cm, align=left] (state) at (-1.0,-0.95) {\textbf{Shared live state}\\Entity transforms\\GPU buffers\\Material state};
+  \draw[-Latex, dashed, line width=0.5pt] (world.south) -- (state.north west);
+  \draw[-Latex, dashed, line width=0.5pt] (draws.south) -- (state.north east);
+\end{tikzpicture}
+\caption{A naive shared-state loop. When world update and draw preparation both access live state, concurrent progress requires synchronization.}
+\label{fig:single-thread-coupling}
+\end{figure}
+\FloatBarrier

@@ -1,0 +1,54 @@
+# Audio Architecture
+
+> **Draft chapter map.** Treat sound as a real-time service with its own ownership, timing, resource, and gameplay contracts.
+
+## Audio Is Not Another Render Pass
+
+- Explain the real-time constraints of audio callbacks and why sound cannot wait for a frame.
+- Distinguish game requests for sound from mixer-owned playback state.
+
+### Commands and Declarative Emitters
+
+- Compare imperative one-shot commands with World-attached emitters.
+- Explain lifetime, spatial updates, and world-transition behavior for each model.
+
+#### Audio Handles and Control
+
+- Define play, stop, parameter, and bus-control contracts.
+- Keep game code independent of device and mixer implementation.
+
+## The Mixer as a Dataflow System
+
+- Introduce voices, buses, effects, and output as an ordered audio pipeline.
+- Explain why the mixer owns its state and runs at a fixed audio cadence.
+
+### Virtualization and Spatialization
+
+- Develop the v1 spatial model: listener and emitter transforms, distance attenuation, stereo or surround panning, voice priorities, and virtualization.
+- Explain positional-audio occlusion as a split responsibility: gameplay or physics performs the spatial query, while the mixer exposes filter and gain controls rather than deciding what is blocked.
+- Connect quality policy to explicit resource budgets.
+
+#### DSP, Reverb, and Spatial-Audio Tiers
+
+- Cover per-voice pitch, gain, low-pass filtering, send buses, an algorithmic reverb, and extension points for effect inserts.
+- State the delivery ladder explicitly: distance and panning first; reverb, occlusion controls, and richer DSP as bounded mixer features; HRTF spatialization and acoustic simulation as later quality tiers with their own CPU budget and platform policy.
+
+#### Music, UI, and World Changes
+
+- Explain how audio may outlive a loaded World while still responding to game flow.
+- Connect bus routing to pause and transition behavior.
+
+## Assets, Streaming, and Effects
+
+- Discuss decoded clips, streaming music, buffering, and effect parameters.
+- Relate audio loading to the general resource pipeline.
+
+### Diagnostics for Real-Time Sound
+
+- Outline underrun detection, voice counts, bus meters, and event traces.
+- Explain how to diagnose audio glitches without relying on subjective listening alone.
+
+#### Smallworld’s Audio Service
+
+- Use the engine’s command boundary and mixer ownership as a concrete example.
+- Defer device-library mechanics to implementation notes.

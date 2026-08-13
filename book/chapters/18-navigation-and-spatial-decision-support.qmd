@@ -1,0 +1,48 @@
+# Navigation and Spatial Decision Support
+
+> **Draft chapter map.** Treat navigation as a budgeted engine service: it turns changing spatial data into usable movement decisions without making every AI system own a pathfinder.
+
+## Navigation Is an Engine Service
+
+- Distinguish navigation from steering, decision making, collision, and rigid-body simulation.
+- Explain why a path query needs a stable spatial representation, filtering policy, and result contract before choosing an algorithm.
+
+### Pathfinding Is Not AI
+
+- Separate a request for a traversable route from the gameplay choice of where and when an agent should move.
+- Compare navigation meshes, grids, waypoint graphs, voxel volumes, and hybrid representations in terms of the worlds they model well.
+
+#### The Query Contract
+
+- Define agent capability, start and goal, filters, partial paths, failure, and cancellation as explicit query data.
+- Explain why the game-facing World asks for a decision while the navigation service owns its acceleration structures.
+
+## Navigation Data at World Scale
+
+- Connect authored navigation, procedural terrain, destruction, and streamed cells to a changing spatial index.
+- Explain the difference between building navigation data, loading it, and incrementally repairing it.
+
+### Building, Streaming, and Updating
+
+- Cover tiles, regions, portals, off-mesh links, and invalidation boundaries.
+- Relate residency and versioning to the World-streaming contracts from Chapter 11.
+
+#### Threading and Budget Policy
+
+- Explain why long searches and rebuilds need queues, cancellation, priorities, and per-frame work budgets.
+- Establish result age and world-version checks so a route computed yesterday is not silently applied to a changed world.
+
+## Request, Result, and World Change
+
+- Show how systems submit requests, observe completed results, and react to a blocked or changed route.
+- Keep result delivery asynchronous so pathfinding cannot stall simulation or compete unpredictably with rendering.
+
+### Navigation Across Domains
+
+- Connect navigation to physics queries, streaming, animation locomotion, networking, and debug visualization.
+- Explain how shared vocabulary and narrow adapters avoid a single all-knowing spatial subsystem.
+
+#### Smallworld Direction
+
+- Use Smallworld to illustrate a concrete Rust service, its ownership boundaries, and the budgets it exposes.
+- Separate the durable service design from any one navigation crate or world representation.

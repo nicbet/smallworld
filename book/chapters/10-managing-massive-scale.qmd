@@ -1,0 +1,49 @@
+# Managing Massive Scale
+
+> **Draft chapter map.** Explain how coordinate systems, spatial partitions, and precision policy let an engine represent worlds larger than a single local scene.
+
+## Scale Changes the Meaning of Position
+
+- Establish precision as an architectural concern, not a last-minute rendering bug.
+- Use concrete distance and jitter examples to motivate the problem.
+
+### Coordinate Spaces and Transforms
+
+- Explain local, parent, world, camera-relative, and render spaces.
+- Show why a consistent vocabulary prevents subtle cross-domain errors.
+
+#### Choosing Numeric Precision
+
+- Compare single and double precision where each is appropriate.
+- Relate the choice to simulation, authoring, storage, and graphics work.
+
+## Large-World Coordinates
+
+- Present the durable patterns: large absolute coordinates, local origins, and cell-based transforms.
+- Compare origin rebasing with camera-relative rendering.
+
+### Cell Anchors and Rendering
+
+- Explain how large global positions become stable local rendering values.
+- Connect the conversion to the game--render data contract.
+
+#### Spatial Queries Across Boundaries
+
+- Discuss physics, AI, streaming, and networking implications.
+- State the invariants that prevent one subsystem from silently using the wrong space.
+
+## Scaling the Design, Not Just Coordinates
+
+- Connect scale to streaming, visibility, and content authoring.
+- Prepare the transition to world residency in the next chapter.
+
+### Smallworld’s Hybrid Worlds
+
+- Use voxel volumes and meshes as a concrete illustration of shared spatial policy.
+- Defer geometry-specific rendering mechanics to Part III.
+
+#### Verification at Scale
+
+- Outline tests and diagnostics for precision drift, boundary crossings, and long sessions.
+- Connect evidence to the instrumentation chapter.
+

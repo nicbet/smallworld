@@ -1,0 +1,52 @@
+digraph G {
+  rankdir=TB;
+  splines=true;
+  nodesep=0.3;
+  ranksep=0.5;
+  size="6,10";
+  margin=0;
+  pad=0.1;
+
+  node [shape=box, style="rounded,filled", fillcolor=white, color=gray50, fontname="Helvetica", fontsize=11];
+
+  subgraph cluster_boot {
+    label = "Boot (Once)";
+    labeljust = "l";
+    style = "dashed,rounded";
+    color = gray70;
+    fontname = "Helvetica-Bold";
+    fontsize = 11;
+    margin = 12;
+
+    { rank=same;
+      create_conn  [label="Create platform\nconnection"];
+      discover_env [label="Discover graphics\nenvironment"];
+      start_serv   [label="Start execution\nservices"];
+      create_world [label="Create first\nWorld"];
+      begin_load   [label="Begin loading /\nfirst presentation"];
+    }
+
+    create_conn -> discover_env -> start_serv -> create_world -> begin_load;
+  }
+
+  subgraph cluster_run {
+    label = "Run Continuously";
+    labeljust = "l";
+    style = "dashed,rounded";
+    color = gray70;
+    fontname = "Helvetica-Bold";
+    fontsize = 11;
+    margin = 12;
+
+    { rank=same;
+      game_side   [label="Game Side\ninput · rules · World"];
+      render_side [label="Render Side\nscene · GPU work · present"];
+      cont_serv   [label="Continuous Services\naudio · streaming · platform"];
+    }
+
+    game_side -> render_side [label="update", fontsize=10];
+  }
+
+  create_conn -> game_side [style=invis];
+  begin_load -> game_side [style=dashed, label="enter main loop", fontsize=10];
+}

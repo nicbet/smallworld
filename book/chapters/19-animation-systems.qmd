@@ -1,0 +1,49 @@
+# Animation Systems
+
+> **Draft chapter map.** Explain animation as data transformation from authored clips and graph state to pose data and renderable deformation.
+
+## Animation Has Several Consumers
+
+- Distinguish gameplay meaning, pose evaluation, physics interaction, and visual deformation.
+- Explain why a single skeletal object should not be mutated freely by every subsystem.
+
+### Poses, Clips, and Blending
+
+- Introduce local poses, global transforms, clip sampling, and blend operations.
+- Connect the data model to predictable performance and authoring.
+
+#### State Machines and Animation Graphs
+
+- Explain declarative transition logic and parameter-driven graph evaluation.
+- Compare authored graph data with hard-coded behavior.
+
+## Moving Information Across Boundaries
+
+- Explain root motion, events, sockets, and attachment points as explicit contracts.
+- Identify which facts affect gameplay and which are render-only.
+
+### Deformation and the Render Domain
+
+- Trace the path from a computed pose to skinned or deformed geometry.
+- Connect palette data to the render-thread firewall.
+
+#### Inverse Kinematics and Procedural Adjustment
+
+- Present IK as an additional pose transformation with clear ownership.
+- Discuss quality, latency, and debugging trade-offs.
+
+## Scaling Animated Worlds
+
+- Cover update-rate policy, LOD, pose sharing, and crowd behavior.
+- Connect animation cost to visibility and streaming demand.
+
+### Smallworld’s Animation Direction
+
+- Use the engine as a concrete implementation example when the abstractions are established.
+- Identify open design choices separately from durable architecture.
+
+#### Diagnostics and Authoring Feedback
+
+- Outline pose visualizers, graph traces, and event inspection.
+- Relate tool support to reliable content iteration.
+

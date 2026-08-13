@@ -5,7 +5,7 @@
 
 \makeatletter
 \renewcommand*{\chapterlinesformat}[3]{%
-  \vspace*{4cm}% Push it down the page significantly
+  \vspace*{2cm}% Push it down the page significantly
   \begin{flushright}
     \Ifstr{#2}{}{}{#2\par}% Print number, no extra vspace to keep it close
     {\fontsize{28}{36}\sffamily\selectfont #3}%
@@ -44,6 +44,19 @@
 \usepackage{enumitem}
 \setlist{itemsep=0.3em, topsep=0em, parsep=0em}
 
+% Quarto renders numbered source blocks as `codelisting` floats. Let them
+% float to the page bottom or a dedicated float page, and strongly prefer
+% placement over leaving a large hole in the surrounding prose.
+\AtBeginDocument{\floatplacement{codelisting}{!pb}}
+
+% Quarto callouts reserve a small column for their icon. Keep that visual cue,
+% but tighten only the lists inside the box so their bullets do not create a
+% second, oversized indentation.
+\AtBeginEnvironment{tcolorbox}{%
+  \setlist[itemize]{leftmargin=1.25em, labelsep=0.4em}%
+  \setlist[enumerate]{leftmargin=1.5em, labelsep=0.4em}%
+}
+
 % 4. Code Block Adjustments
 % Quarto wraps code in a 'Shaded' environment. We can hook into it to
 % adjust the font size or line spacing specifically for code blocks.
@@ -68,3 +81,36 @@
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage{amssymb}
+\usepackage{placeins}
+\usepackage{caption}
+\captionsetup[figure]{
+  format=plain,
+  justification=raggedright,
+  singlelinecheck=false,
+  indention=0pt,
+  font={small,it},
+  labelfont={small,bf},
+  labelsep=period,
+  skip=0.65em
+}
+
+% Architecture diagrams are drawn natively so they remain sharp and correctly
+% proportioned in the PDF; browser-oriented diagram renderers do not.
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\tikzset{
+  engine-layer/.style={draw=black!55, fill=black!4, rounded corners=2pt, line width=0.45pt},
+  engine-package/.style={draw=black!50, fill=white, rounded corners=1.5pt, line width=0.4pt,
+    align=center, font=\sffamily\scriptsize, inner sep=4pt,
+    execute at begin node={\hyphenpenalty=10000\exhyphenpenalty=10000\relax}},
+  engine-boundary/.style={draw=black!55, fill=black!12, rounded corners=2pt, line width=0.45pt,
+    align=center, font=\sffamily\bfseries\scriptsize, inner sep=5pt}
+}
+
+% Title page -----------------------------------------------------------------
+% The cover is designed separately and inserted as a full-bleed PDF page.
+% Keeping it external lets a graphical design tool own its typography and art.
+\usepackage{pdfpages}
+\renewcommand{\maketitle}{%
+  \includepdf[pages=1,pagecommand={\thispagestyle{empty}}]{support/title-page.pdf}%
+}

@@ -1,0 +1,91 @@
+# Glossary
+
+## A
+
+**Action map**
+: A mapping from raw device input to named game or tool intent, often scoped by a context such as gameplay or a menu.
+
+**Asset handle**
+: An opaque, stable identifier by which code refers to an asset without owning its CPU or GPU storage.
+
+## B
+
+**Backpressure**
+: A policy that limits a producer when a consumer falls behind, preventing unbounded work or latency from accumulating.
+
+**Bounded channel**
+: A message queue with finite capacity; a common way to encode backpressure at an ownership boundary.
+
+## C
+
+**Component**
+: Plain game-facing data attached to an entity in an entity-component system.
+
+**Control contract**
+: A rule governing ordering, scheduling, lifecycle, or permission to request work across domains.
+
+## D
+
+**Data contract**
+: A stable description of the data allowed to cross a domain boundary, including ownership and representation rules.
+
+**Domain**
+: A cohesive area of engine responsibility with its own vocabulary, state, and contracts with neighboring areas.
+
+## E
+
+**Entity**
+: A stable game-world identity to which components can be attached.
+
+**Entity-component system (ECS)**
+: A game object model in which entities are identities, components are data, and systems transform selected component data.
+
+**Extraction**
+: Translation of game-facing state into an owned description for another domain, commonly the render domain.
+
+## F
+
+**Frame lifecycle**
+: The documented sequence of sampling input, advancing time, running simulation, preparing presentation, and responding to lifecycle events.
+
+## G
+
+**Game–render firewall**
+: The ownership boundary that prevents gameplay code from accessing renderer-owned GPU state and prevents rendering from aliasing the live World.
+
+## H
+
+**Handle**
+: An opaque value that names a resource or object while allowing the implementation to control its lifetime and storage location.
+
+## P
+
+**Plugin**
+: An extension package that adds a permitted capability through public or extension contracts without importing private engine internals.
+
+**Presentation surface**
+: A platform-provided target, usually associated with a window, to which rendered images are presented.
+
+## R
+
+**Render graph**
+: A dependency graph of rendering passes and resources that determines valid ordering, lifetime, and synchronization of render work.
+
+**Retained render scene**
+: Renderer-owned scene state that persists across frames and is updated from extracted descriptions or deltas.
+
+**Residency**
+: Whether data is presently available in the CPU, GPU, or other memory domain required to use it.
+
+## S
+
+**System**
+: A unit of behavior that reads and transforms selected game data; more generally, an engine service with a defined responsibility.
+
+## W
+
+**World**
+: The game-facing collection of entities, components, and game state, distinct from renderer-owned or platform-owned state.
+
+**wgpu**
+: A Rust graphics library exposing a portable WebGPU-based abstraction over supported graphics backends.

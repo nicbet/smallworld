@@ -1,0 +1,58 @@
+# Shading, Lighting, and Global Illumination
+
+> **Draft chapter map.** Build a modern lighting architecture from material meaning to direct and indirect illumination under real hardware constraints.
+
+## What a Material Must Express
+
+- Separate game-facing material intent from renderer-facing shader implementation.
+- Introduce surface models, parameters, and data-driven variation.
+
+### Material Data and Shading Models
+
+- Explain deferred, forward, and hybrid organization as trade-offs.
+- Establish a stable material contract before selecting a packing layout.
+
+#### Validation and Authoring
+
+- Discuss asset validation, fallbacks, and debuggable material interfaces.
+- Connect tools to predictable runtime behavior.
+
+## Direct Lighting at Scale
+
+- Explain light representation, shadowing, and view-dependent assignment.
+- Connect light count to culling and frame budgets.
+
+### Light Selection and Shadow Resources
+
+- Explain clustered or tiled light assignment, cascaded directional shadows, local-light atlases, filtering, and the budgets that prevent shadows from becoming an unbounded second renderer.
+- Treat shadow maps and ray-traced shadows as policies over capability tiers, with stable fallback behavior on hardware without ray tracing.
+
+#### Temporal Stability
+
+- Discuss noise, flicker, history, and the need for stable camera and object data.
+- Relate the problem to the core loop and render feedback.
+
+## Indirect Light as a Capability Ladder
+
+- Explain ambient, screen-space, reflection-probe, software-clipmap, and hardware-assisted approaches.
+- Frame global illumination as progressive approximations, not a binary feature.
+
+### Software GI, Reflections, and Probes
+
+- Develop screen traces followed by cone tracing against a lighting-domain voxel clipmap as a practical software-GI family, including its leaks, temporal history, and large-world implications.
+- Cover screen-space reflections, authored and captured reflection probes, and amortized environment capture as complementary approximations rather than competing checkboxes.
+
+#### Hardware Ray Tracing as a Secondary-Effects Tier
+
+- Explain the raster-first hybrid model: rasterization establishes primary visibility, while ray tracing may improve shadows, reflections, ambient occlusion, and indirect light.
+- Cover acceleration structures, denoising and temporal accumulation, the larger off-screen culling domain required for secondary effects, and fallback paths for non-RT devices.
+
+### Smallworld’s Hybrid Lighting Direction
+
+- Use the engine’s raster-first direction, software GI clipmap, captured probes, and optional ray-tracing upgrades as a concrete example.
+- State the quality, portability, and complexity trade-offs honestly.
+
+#### Measuring Lighting Cost and Quality
+
+- Define budget and diagnostic questions for lighting systems.
+- Connect visual correctness to reproducible test scenes.

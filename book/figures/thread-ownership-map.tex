@@ -1,0 +1,21 @@
+\begin{table}[!tb]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{p{2.9cm}p{5.1cm}p{5.1cm}}
+\toprule
+\textbf{Execution context} & \textbf{Owns} & \textbf{Communicates through} \\
+\midrule
+Game Thread (main) & World, input, time, systems, asset server & Owned render description to the Render Thread; advisory feedback back \\
+Render Thread (dedicated) & GPU context, render scene, pools, graph, targets & Render descriptions in; advisory feedback out \\
+Game Worker Pool & No persistent state; borrows work items & Scoped tasks such as \texttt{join()} and \texttt{parallel\_for()} \\
+Render Worker Pool & No persistent state; borrows work items & Scoped tasks such as \texttt{join()} and \texttt{parallel\_for()} \\
+Streaming Coordinator & Demand priority queue and budget arbiter & Demand from game; \texttt{UploadBatch} to renderer \\
+Audio Thread (dedicated) & Mixer, voices, and output stream & Drained \texttt{AudioCommands} \\
+IO Pool & No persistent state; blocking IO and decode tasks & Tasks from asset and streaming services \\
+\bottomrule
+\end{tabular}
+\caption{Thread ownership map. Persistent mutable state belongs to a named execution context; worker pools borrow bounded work rather than accumulating their own engine state.}
+\label{tab:thread-ownership}
+\end{table}
+\FloatBarrier

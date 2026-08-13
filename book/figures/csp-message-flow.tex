@@ -1,0 +1,17 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, node distance=2.05cm and 4.5cm]
+  \node[engine-package, minimum width=2.75cm, minimum height=0.8cm] (game) {Game Thread};
+  \node[engine-package, minimum width=2.75cm, minimum height=0.8cm, right=of game] (render) {Render Thread};
+  \node[engine-package, minimum width=2.75cm, minimum height=0.8cm, below=of game] (audio) {Audio Thread};
+  \node[engine-package, minimum width=3.35cm, minimum height=0.8cm, below=of render] (stream) {Streaming Coordinator};
+  \draw[-Latex, line width=0.55pt] (game) -- node[above, font=\sffamily\scriptsize] {render description} (render);
+  \draw[-Latex, line width=0.55pt] (render.south west) to[bend right=18] node[below, font=\sffamily\scriptsize] {advisory feedback} (game.south east);
+  \draw[-Latex, line width=0.55pt] (game) -- node[left, font=\sffamily\scriptsize, align=right] {\texttt{AudioCommands}} (audio);
+  \draw[-Latex, line width=0.55pt] (game.south east) to[bend left=8] node[above, font=\sffamily\scriptsize] {demand} (stream.north west);
+  \draw[-Latex, line width=0.55pt] (stream.north) to[bend left=10] node[right, font=\sffamily\scriptsize] {\texttt{UploadBatch}} (render.south);
+\end{tikzpicture}
+\caption{The primary CSP data-plane messages. Each arrow transfers a deliberately typed, owned value; lifecycle control remains on an independent channel.}
+\label{fig:csp-message-flow}
+\end{figure}
+\FloatBarrier

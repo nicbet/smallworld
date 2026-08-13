@@ -1,0 +1,43 @@
+# Input and Platform Interaction
+
+> **Draft chapter map.** Turn platform events and raw device signals into stable, accessible game intent without letting platform APIs leak through the engine.
+
+## Platform Events Are Engine Input
+
+- Establish windows, focus, display changes, text entry, device connection, clocks, and files as platform-facing events with lifecycle consequences.
+- Distinguish device signals from the game actions they may eventually cause.
+
+### From Device Signals to Action Maps
+
+- Explain how keyboard, mouse, controller, touch, and platform-specific input become a normalized engine vocabulary.
+- Compare raw-event access with named actions and contexts; preserve a controlled route for tools that genuinely need device detail.
+
+#### Focus, Text Entry, and Haptics
+
+- Cover focus loss, text composition, cursor capture, IME support, rumble, and controller reconnection as first-class cases.
+- Explain why these behaviors belong to the platform boundary rather than scattered gameplay code.
+
+## Sampling, Buffering, and Frame Timing
+
+- Explain when the engine receives events, when it samples action state, and when systems consume it.
+- Connect buffering to Chapter 4's frame lifecycle and to reproducible input recording.
+
+### Contexts, Ownership, and UI
+
+- Show how gameplay, menus, consoles, editors, and accessibility overlays can share devices without competing for hidden global state.
+- Define priority, capture, and propagation as documented control contracts.
+
+#### Input for Replay and Networking
+
+- Treat input history as a compact, game-facing record distinct from raw device events.
+- Foreshadow prediction, rollback, and replay requirements without assuming every game needs them.
+
+## Cross-Platform Policy
+
+- Explain how one action vocabulary accommodates different devices and platform conventions without pretending their capabilities are identical.
+- Connect remapping, accessibility, and fallback behavior to player-facing quality rather than mere portability.
+
+### Smallworld's Platform Boundary
+
+- Use Smallworld to illustrate how Rust types can isolate windowing and device libraries behind stable engine data.
+- Keep concrete crate choices subordinate to the contract and its testability.

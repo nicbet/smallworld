@@ -1,0 +1,422 @@
+# Engine Runtime Contracts
+
+Chapter 2 established three architectural questions: how the engine is organized into domains, how those domains come alive at boot and in the main loop, and which contracts let them cooperate without sharing their internals. This chapter is the first guided zoom into those contracts. It concentrates on the two with the greatest structural consequences: the **data contract**, which defines the representations that may cross a domain boundary, and the **ownership contract**, which defines who may mutate state on either side.
+
+Those contracts become three closely connected questions:
+
+1. How does the game-facing World describe rendering intent without exposing renderer internals?
+2. How is game state represented and composed so gameplay can evolve without making the whole engine share one object model?
+3. Which execution context owns mutable state, and how do domains communicate when work must cross that ownership boundary?
+
+Get any of these wrong and the consequences compound — tangled coupling, synchronization hazards, cache-hostile memory layouts, and an ever-growing surface of subtle bugs that ship to players.
+
+We begin with the **Game–Render Firewall**, the data boundary that decouples simulation logic from GPU presentation. We then examine **Data-Oriented Composition**: why ECS is the modern representation for the game-facing World, rather than a traditional object-oriented hierarchy. Finally, we explore **Thread Ownership**—the principle that each execution context exclusively owns its mutable data and communicates through explicit messages. Unreal Engine, Godot, and Smallworld serve as examples of these principles in different forms; Rust and `wgpu` make one particularly clean modern realization possible.
+
+Together, the firewall, data-driven composition, and thread ownership make Chapter 2's data and ownership contracts concrete. The next chapter turns to the remaining control and lifecycle contract: when each domain advances, how frames are paced, and how resize, device loss, and shutdown remain responsive.
+
+## What You Will Learn in This Chapter {.unnumbered}
+
+- **The Game–Render Firewall:** Why game code should not see GPU resources, what an explicit extraction contract protects, and why renderer-owned state is essential to safe overlap.
+- **Data-Oriented Composition:** Why ECS is the modern answer to representing game objects: entities as identities, components as data, and systems as operations over that data.
+- **Thread Ownership and CSP Messaging:** How Rust's ownership system makes shared mutability explicit and bounded, and why the engine uses Communicating Sequential Processes (CSP) channels for its main cross-thread boundaries.
+- **Work-Stealing Pools:** Why the engine splits its worker pools into game and render tiers, how this prevents priority inversion, and why a unified task-graph scheduler is the planned evolution rather than the starting architecture.
+- **Handle-Based Resource Management:** The role of generational indices, `SlotMap` arenas, and opaque handles in providing safe, cache-friendly resource access without garbage collection or reference counting on hot paths.
+
+## The Game–Render Firewall
+
+One of the most consequential architectural decisions in a multi-threaded game engine is the boundary between simulation and presentation. Get the boundary wrong — let gameplay code touch GPU buffers, or let the renderer reach into the live world — and the result is a system with limited overlap, obscured profiling, and a large refactoring blast radius.
+
+### The Problem: Coupling Limits Concurrency
+
+In a naive single-threaded engine, the game loop is a monolithic sequence: read input, update the world, build draw calls, submit to the GPU, present. Every subsystem has implicit access to everything else. The renderer reads entity transforms directly from the world. The world queries GPU readback buffers for occlusion data. Materials are modified in the same function that evaluates AI behavior.
+
+This works — until it no longer meets the game's performance or complexity requirements. Once simulation and rendering overlap across frames, every shared data access requires synchronization and careful ownership. Locks can serialize critical work; lock-free structures introduce subtle memory-ordering concerns. And the more subsystems you add — physics, animation, audio, streaming — the more tangled the dependency graph can become.
+
+Figure \ref{fig:single-thread-coupling} illustrates why this becomes a structural problem: the same live state serves both the world update and renderer, so neither can progress independently without synchronization.
+
+\input{figures/single-thread-coupling.tex}
+
+Unreal Engine 5 solves this with a hard architectural split: the **Game Thread** owns the world, and the **Render Thread** owns the GPU. Between them sits an extraction step that copies the data the renderer needs into a form the renderer owns. The two threads then operate independently, overlapped by one frame.
+
+The general pattern is clear: extract the render-relevant view from the live world, transfer it across a narrow boundary, and let the render domain own its resulting state. Smallworld illustrates this pattern with owned Rust messages and a retained render scene.
+
+### The Firewall Defined
+
+The Game–Render Firewall is not a suggestion or a coding guideline. It is a structural constraint: game and renderer own separate mutable state and exchange only deliberate boundary representations. In Smallworld, Rust's type system enforces that constraint:
+
+**Game code never sees a `wgpu::Device`, a bind group, or a GPU buffer.** The extract step is the boundary. Everything above it speaks in transforms, materials, and handles. Everything below it speaks in draw commands and GPU resources.
+
+The narrow invariant is precise: **the Render Thread exclusively owns device-local resources and command submission.** Nothing else in the engine should call `queue.submit()`, allocate a device-local buffer, or write to a render target. This is Smallworld's game--render-firewall commitment.
+
+The firewall constrains _game code_, not engine internals. Engine subsystems — the asset pipeline, the staging pool, the streaming coordinator — may create and populate CPU-visible staging resources from any thread, because `wgpu` is internally synchronized and designed for multi-threaded resource creation. What they may not do is touch device-local memory or record render commands. This distinction is critical: it means asset loading and streaming can proceed concurrently without violating the thread-safety contract. Figure \ref{fig:game-render-firewall} makes the resulting ownership and transfer rule explicit.
+
+\input{figures/game-render-firewall.tex}
+
+### Why Not Shared Memory?
+
+A reasonable engineer might ask: why not use `Arc<RwLock<T>>` or atomics to share state between threads? Rust makes concurrent access safe — why add the overhead of copying data through channels?
+
+The answer is threefold:
+
+1. **A coherent render view.** When the Game Thread transfers an owned render description, the Render Thread processes a frozen view of the world at a known point in time. There are no races over partially-updated state. The renderer never sees a half-applied physics step or a transform that was modified after the camera was positioned. This does not, by itself, make simulation deterministic; but it makes the simulation-to-render handoff coherent and repeatable.
+
+2. **Profiling and isolation.** Each thread's work can be traced, timed, and optimized in complete isolation. A game-thread stall does not pollute render-thread timings. A GPU bottleneck is visible in render-thread metrics without any game-thread interference. When the two domains share mutable state, profiling becomes archaeology — you are reconstructing causality from interleaved lock acquisitions.
+
+3. **Evolutionary safety.** When the renderer needs a new piece of data — say, a per-entity wind reactivity scalar — the change is surgical: add it to the published description and teach the renderer how to consume it. The game side and render side never see each other's private changes. When data is shared via `Arc`, adding a field to a shared struct requires auditing every reader and writer across every thread simultaneously. The blast radius of a change is the entire codebase.
+
+In Unreal Engine 5, the same boundary exists — `FSceneProxy` copies data from the game world into render-thread-owned proxies — but it is enforced by convention, documentation, and code review. A determined (or careless) programmer can reach across the boundary. In Rust, an owned description can be made `Send` while containing no references into the World. Once sent, the Game Thread cannot read it. Once received, the Render Thread cannot reach back. Here the type system is the enforcement mechanism, not human discipline.
+
+### The Contract Is Stable; Its Machinery Is a Later Design Choice
+
+At this level, the contract needs only four properties.
+
+1. The game domain publishes **an owned, render-relevant description**, not references into its live World.
+2. The render domain turns that description into **state it owns**.
+3. The handoff has a documented **capacity and latency policy**, so a slow renderer cannot silently create an unlimited queue of obsolete work.
+4. Any information that travels back is **time-stamped advisory feedback**, not a synchronous dependency of the current simulation step.
+
+These properties can be realized by many different mechanisms: a renderer may receive a complete snapshot, only changes since the previous handoff, or a mixture of both. It may use a message queue, a double buffer, or another bounded transfer owned by the engine. Each mechanism has different costs for static worlds, rapidly changing worlds, and latency-sensitive games. The architectural invariant is independent of that choice: no domain obtains an alias to another domain's mutable private state.
+
+Unreal Engine's scene proxies and Godot's `RenderingServer` show the same durable direction: renderer-facing data crosses an intentional interface rather than remaining an alias of the live game world [@epic-parallel-rendering; @godot-rendering-server]. Chapter 12 makes those alternatives concrete through extraction, retained render-side state, bounded handoffs, and asynchronous feedback; it then uses Smallworld's `FramePacket` as one Rust realization rather than treating that type as the principle itself.
+
+::: {.callout-warning appearance="simple" title="Weak Game--Render Boundaries"}
+
+- GPU objects in gameplay types let game rules depend on renderer implementation.
+- A synchronous readback or lock turns a supposedly asynchronous boundary into a hidden stall.
+- An unbounded queue turns a temporary render slowdown into rising input-to-photon latency.
+
+Each is best prevented by the boundary design itself—not by asking every future caller to be careful.
+
+:::
+
+## Data-Oriented Composition at the Game Boundary
+
+With the thread boundary established, we turn to the second foundational question: how should the engine represent **game objects**? This is a decision about the game-facing World: the running collection of actors, characters, vehicles, props, lights, and other things that gameplay must compose, query, serialize, replicate, and inspect. It is not a claim about whether the engine's renderer, asset loader, or platform code should be written with classes, structs, or any particular internal pattern.
+
+The two representations under discussion are a traditional object-oriented game-object model, in which a game's things are primarily instances in an inheritance taxonomy, and entity--component--system (ECS), in which entities are stable identities, components are data, and systems operate over selected component sets. The following comparison concerns this one decision: which model gives a modern game-facing World the clearest support for composition, bulk queries, serialization, and change over time?
+
+### From Class Taxonomy to Composition
+
+Class hierarchies and component-object models have long been useful ways to describe game objects. Unreal's `UObject`/Actor framework, for example, combines inheritance with attachable components, reflection, serialization, and editor integration. The difficulty appears when a class taxonomy becomes the primary representation for a large, performance-sensitive game world. Figure \ref{fig:oop-inheritance-pyramid} shows the kind of tree that accumulates shared behavior and lifecycle obligations downward through every descendant.
+
+\input{figures/oop-inheritance-pyramid.tex}
+
+This hierarchy encodes behavior and shared lifecycle through inherited types. An `APlayerCharacter` inherits movement from `ACharacter`, which inherits collision from `APawn`, which inherits lifecycle from `AActor`, which inherits serialization and reflection from `UObject`. Each layer adds methods, member variables, and invariants that all descendants must respect.
+
+For a game-facing world that must be queried in bulk, this representation has several costs:
+
+1. **A taxonomy does not compose new capabilities gracefully.** Adding a capability such as swimming can lead to new subclasses or increasingly complex component conventions. Changing a base-class invariant can affect every descendant.
+
+2. **Bulk queries need a deliberate data layout.** In many object-oriented implementations, objects and their relevant fields are spread over individual allocations. Iterating 10,000 transforms then becomes pointer chasing rather than a predictable linear scan. Inheritance does not require this layout, but it does not naturally encourage storage organized around the query either.
+
+3. **Hot loops benefit from direct data access.** Virtual dispatch is a valuable tool at extension points, but it is a poor default for a tight transform, visibility, or physics query that needs a few fields from many entities.
+
+4. **Reflection is powerful but carries a system-wide cost.** UE's generated metadata enables editor tooling, serialization, garbage collection, and Blueprint access. It also adds generated code, build work, and runtime machinery that a smaller engine can avoid when its data model is simpler.
+
+5. **Shared architecture can concentrate collaboration pressure.** When unrelated features meet in base classes or binary authoring assets, merges and reviews become more difficult than they need to be.
+
+### The advantages of ECS
+
+When using entity-component-systems for the game-facing world instead, components are plain data structs, systems operate on component stores, and hot paths query dense data rather than dispatch through object behavior.
+
+The Unity engine ships its Entities package as an ECS implementation, while Unreal Engine's Mass Entity framework represents high-scale gameplay entities as composable, data-only fragments processed by data-oriented systems [@unity-entities; @unreal-mass-entity].
+
+Neither engine thereby abandons every object-oriented API; the important conclusion is narrower and more durable. When the question is how to represent the mutable game World, composition of data is a better foundation than a class hierarchy. This is Smallworld's data-driven-game-state commitment.
+
+An entity is an opaque ID — a generational index into a `SlotMap`. It has no type, no base class, no vtable. What makes a "player" different from a "tree" is not inheritance but the set of components attached, as shown in @lst-entity-composition:
+
+```{#lst-entity-composition .rust lst-cap="Composing game objects from components"}
+// A player: transform + mesh + physics + audio + behavior
+let player = world.spawn();
+world.add(
+    player,
+    Transform {
+      position: Vec3::ZERO,
+      rotation: Quat::IDENTITY,
+      scale: Vec3::ONE,
+    },
+);
+world.add(
+    player,
+    MeshRenderer {
+      mesh: player_mesh, material: player_mat, cast_shadows: true, ..default()
+    },
+);
+world.add(player, RigidBody { mass: 80.0, drag: 0.1, ..default() });
+world.add(player, AudioListener);
+
+// A light: transform + light source. That's it.
+let sun = world.spawn();
+world.add(
+    sun,
+    Transform {
+        position: DVec3::new(0.0, 1000.0, 0.0),
+        ..default()
+    },
+);
+world.add(
+    sun,
+    LightSource {
+        kind: LightKind::Directional {
+          direction: Vec3::NEG_Y,
+          cascade_count: 4,
+        },
+        color: Vec3::ONE,
+        intensity: 10.0,
+        cast_shadow: true,
+        shadow_bias: 0.001,
+    },
+);
+```
+
+This is the same basic insight behind UE5's component attachment and Mass fragments: build a game object from the capabilities it has, rather than from the nearest branch of an inheritance tree. Smallworld realizes that idea with plain Rust data and does not require `UObject` reflection or `UPROPERTY` metadata for its game-object model. The type system provides safety; `Send + Sync + 'static` is the only trait bound on components.
+
+**Why plain data matters.** The "plain data" constraint is not merely
+aesthetic, but it is load-bearing:
+
+- **Dense storage.** Components of the same type are stored in contiguous arrays. Iterating over every `Transform` in the world is a linear scan through packed memory — the CPU prefetcher's dream. Compare this to chasing pointers through an inheritance hierarchy, where each object's `Transform` lives at a different heap address.
+
+- **Trivial serialization.** A plain data struct with no pointers, no trait objects, and no closures can be serialized with `serde` derive macros. An entity's full state is the union of its serializable components. No custom `SaveGame` overrides, no "forgot to serialize that new field" bugs.
+
+- **Safe extraction.** The extract step borrows `&World` — a read-only reference. Because components are data (not behaviors that might call back into the world), read-only access is guaranteed to be side-effect-free. This is what makes the firewall compositionally sound: extraction cannot trigger game logic.
+
+- **Deterministic change tracking.** When game code calls `world.get_mut::<Transform>(entity)`, the returned `&mut Transform` automatically marks the component dirty in the `ChangeTracker`. Because components are inert data, there is no possibility of a mutation happening through a side channel — every change is visible to the tracker.
+
+### The Engine/Game Component Split
+
+A useful component model draws a clean line between **engine components** (defined and consumed by the engine) and **game components** (defined by each game project). Engine components such as `Transform`, `MeshRenderer`, `LightSource`, and `RigidBody` have semantic meaning to the engine — the extract step can convert a `MeshRenderer` into a draw command, and the physics system can simulate a `RigidBody`. Game components remain opaque to the engine. @lst-game-components shows this distinction in Smallworld:
+
+```{#lst-game-components .rust lst-cap="Game-defined components remain opaque to the engine"}
+// Game-defined components — the engine doesn't know about these
+struct Health { current: f32, max: f32 }
+struct Inventory { slots: Vec<Option<ItemId>>, capacity: usize }
+
+// Attach them exactly like engine components
+world.add(player, Health { current: 100.0, max: 100.0 });
+world.add(player, Inventory { slots: vec![None; 20], capacity: 20 });
+```
+
+The engine iterates over its known component types during the LATE phase (hierarchy propagation, bounds recomputation, streaming demand) and the EXTRACT phase. Game components participate only through game-registered systems. This split is what keeps the engine's inner loops tight — the physics system iterates over `(RigidBody, Collider, Transform)` tuples, not over arbitrary component sets.
+
+### Asset Descriptors: Data-Driven Entity Archetypes
+
+An entity archetype should be authorable as data rather than reconstructed in code every time a level loads. This lets designers change the initial composition and tuning of a game object without editing gameplay source, and it keeps asset references out of hard-coded constructors.
+
+**Asset descriptors** are a lightweight realization: serializable RON, JSON, or binary files that describe an entity archetype. @lst-enemy-descriptor shows the shape of a Smallworld descriptor:
+
+```{#lst-enemy-descriptor .rust lst-cap="A serializable descriptor for an enemy archetype"}
+struct EnemyDescriptor {
+  mesh:       AssetPath,       // "meshes/goblin.glb"
+  material:   AssetPath,       // "materials/goblin.ron"
+  health:     f32,
+  speed:      f32,
+  loot_table: AssetPath,
+}
+```
+
+The engine loads these descriptors, resolves asset paths to handles, and spawns entities with the appropriate components. Artists and designers edit the data files; programmers define the descriptor schemas and the systems that process them. Because the files are text-based (RON or JSON), they diff and merge cleanly in version control. Unreal's Data-Only Blueprints solve the same broad authoring problem within its editor and asset system, though their binary `.uasset` representation makes ordinary source-control diffs less direct.
+
+This is the data-driven principle in action: the _structure_ of a goblin (what components it has, what mesh it uses, how much health it starts with) is data. The _behavior_ of a goblin (how it patrols, how it attacks) is code — either a Rust `Behavior` implementation or a Lua script. The two concerns are cleanly separated, and either can change independently.
+
+### Handle-Based Resources
+
+The next commitment completes the data-driven picture: **handle-based resources**. Games hold opaque handles. Lifetime, caching, and GPU upload are engine-managed. @lst-resource-handles separates immutable assets from mutable resources:
+
+```{#lst-resource-handles .rust lst-cap="Opaque handles separate game references from engine-managed lifetime"}
+struct AssetHandle<T> {
+    id:         AssetId,
+    generation: u32,
+    _marker:    PhantomData<T>,
+}
+
+struct ResourceHandle<T> {
+    id:         ResourceId,
+    generation: u32,
+    _marker:    PhantomData<T>,
+}
+```
+
+- **`AssetHandle<T>`** references an immutable, shared asset (mesh geometry, texture pixels, audio clips). Many entities can hold the same handle. The asset's GPU-resident representation is managed by the engine's GPU pools — game code never knows whether the asset is in VRAM, in the staging pool, or still loading from disk.
+
+- **`ResourceHandle<T>`** references a mutable resource (materials). The game can modify these at runtime — animate a material's emissive intensity, swap a texture — and the `ChangeTracker` records the mutation for the next extract.
+
+Both use **generational indices** for use-after-free detection. When a resource is freed, its slot's generation counter increments. Any handle still holding the old generation will fail a generation check on access — a clean miss, not a use-after-free crash. This provides the safety guarantees of reference counting without the runtime cost of atomic increment/decrement on every copy.
+
+::: {.callout-tip appearance="simple" title="Data-Driven Game Objects"}
+
+- **Keep components compact.** Large components—for example, an `Inventory` containing a heap-allocated `Vec`—erode the cache-locality benefit of dense storage. Put variable-size data behind a handle or in a side table; keep the component itself a fixed-size index into that data.
+- **Separate hot from cold data.** A `MeshRenderer` combines hot transform-adjacent work with a mesh handle that changes rarely. When profiling calls for it, separate data by update and query rate rather than loading cold fields on every transform update.
+- **Use gameplay tags for cross-system communication.** When several systems react to the same state, use a hierarchical tag such as `status.debuff.burning` instead of coupling systems through direct calls or special-case shared components.
+
+:::
+
+## Thread Ownership and the Work-Stealing Pools
+
+The firewall establishes the boundary between two threads. But a modern game engine is not two threads — it is a constellation of execution contexts, each with precise ownership boundaries and communication protocols. Getting the threading model wrong can produce data races through uncontrolled shared mutability or deadlocks through overly conservative locking. The goal is not a particular number of threads, but ownership rules that make those failure modes difficult to express.
+
+### The Ownership Principle
+
+The guiding principle is **thread ownership**: each execution context owns its mutable data, and the main cross-thread boundaries communicate through explicit messages rather than ambient shared state. In Smallworld, the messages are owned values sent through channels.
+
+This principle has a critical refinement: sharing _immutable_ data across threads (`Arc` payloads, mapped staging regions) is permitted. The rule forbids shared **mutability**, not sharing. A mesh's vertex data, once loaded, can be referenced from any thread via `Arc<MeshAsset>`. What no thread may do is mutate that data while another thread holds a reference.
+
+In C++ engines, this distinction is enforced by code review and (hopefully) thread sanitizers. In Rust, it is enforced by the compiler. The `Send` trait marks types that can be moved to another thread. The `Sync` trait marks types that can be referenced from multiple threads simultaneously. `Rc<T>` (reference-counted, not atomic) is neither `Send` nor `Sync` — the compiler will refuse to compile code that shares it across threads. `Arc<T>` is both, because its reference count is atomic. `&mut T` is `Send` but not `Sync` — you can transfer exclusive access, but you cannot share it. These are not runtime checks; they are compile-time guarantees with zero runtime cost.
+
+This principle leads to a practical test: a hot path should not need a global `RwLock` around the world, a `Mutex` around the render scene, or an atomic compare-and-swap loop merely to establish ordinary ownership. Smallworld meets that test by giving each domain its data outright and using bounded channels for ownership transfer.
+
+### The Execution Contexts
+
+The engine uses six execution contexts, each with clear ownership boundaries. Table \ref{tab:thread-ownership} records the persistent state each context owns and the deliberately narrow path through which it communicates:
+
+\input{figures/thread-ownership-map.tex}
+
+Several design choices deserve attention:
+
+**Dedicated threads for latency-sensitive work.** The Game Thread, Render Thread, Audio Thread, and Streaming Coordinator each get dedicated OS threads. This prevents them from being preempted by lower-priority work. A physics computation on a shared pool should never cause a present-miss on the render thread.
+
+**Worker pools own nothing.** The game and render worker pools are stateless — they borrow work items from their parent thread, execute tasks, and return results. They hold no persistent state of their own. This makes them safe to use with scoped tasks (`join()`, `parallel_for()`) where the parent thread guarantees the data outlives the task.
+
+**The IO pool is separate.** Blocking filesystem reads and decompression run on a dedicated pool with blocking-friendly threads. This prevents a disk stall from starving CPU-bound game or render work.
+
+### Why Two Worker Pools?
+
+The split between the game worker pool and the render worker pool is a deliberate choice to prevent **priority inversion**. In Figure \ref{fig:worker-pool-priority}, a render-critical culling task misses its deadline when it shares a saturated pool with simulation; separate pools prevent that queueing relationship.
+
+\input{figures/worker-pool-priority.tex}
+
+The **game pool** runs physics (the provider's internal parallelism binds here), animation sampling, and streaming demand computation. The **render pool** runs frustum culling, draw call sorting, and batch generation. Because the two-frame pipeline keeps both pools concurrently busy — the game pool works on frame N+1 while the render pool works on frame N — the split costs little utilization. And render-critical culling work never queues behind a heavy physics island solve.
+
+### CSP: Communicating Sequential Processes
+
+The primary inter-thread communication model is **Communicating Sequential Processes (CSP)** — the same model used by Go's goroutines and channels, by Erlang's actor mailboxes, and by Tony Hoare's original 1978 formalization. Each thread is a sequential process that communicates by sending and receiving messages on typed channels. The main architectural boundaries share no mutable state; the staging-pool exception is described below.
+
+In Smallworld, the general CSP pattern manifests as:
+
+- **Game → Render:** an owned render description via a bounded channel. Game → Render lifecycle events (`Resized`, `Quit`, `DeviceLost`) use a separate out-of-band control channel.
+- **Render → Game:** time-stamped advisory feedback uses a separate channel.
+- **Game → Audio:** `AudioCommands` drained each frame.
+- **Game → Streaming:** Demand requests via a demand channel. Streaming → Render: `UploadBatch` via an upload channel.
+
+Each channel carries owned values. Once a value is sent, the sender no longer has access to it. Once received, the receiver has exclusive ownership. This makes the main cross-thread communication explicit and prevents hidden mutable aliases at those boundaries. Figure \ref{fig:csp-message-flow} shows the data-plane routes; the control channel remains separate from the render-description path.
+
+\input{figures/csp-message-flow.tex}
+
+The control channel deserves special mention. Lifecycle events — window resize, device loss, shutdown — ride an **out-of-band control channel**, separate from the render-data plane. This follows Gregory's control/data-plane separation principle: control must be deliverable independent of normal frame traffic. A paused game that generates no render descriptions still resizes. A stalled pipeline that cannot accept another description still shuts down.
+
+### The Staging Pool: Where Threads Meet Safely
+
+There is one place where the strict "no shared mutable state" rule bends: the **staging pool**. Asset IO/decode threads write decoded asset data directly into mapped CPU-visible `wgpu` buffers. The Render Thread later records GPU copies from these buffers into device-local pools.
+
+This is permissible because:
+
+1. **wgpu is internally synchronized.** Creating and mapping buffers from any thread is designed-for usage. The `Device` and `Queue` handles are `Send + Sync`.
+
+2. **Write regions are exclusive.** Each staging region is allocated to exactly one writer. Two decode threads never write to the same region. The write is sequential (write-combined memory); once complete, a `StagingRef` is sent through the `ResourceOp` channel, transferring read access to the Render Thread.
+
+3. **Fence reclamation.** The region is not returned to the pool until the GPU has completed the copy — tracked by the submission fence. No thread can read, write, or reallocate the region while the GPU is using it.
+
+@lst-staging-reference is the small owned value that describes a completed staging allocation to the Render Thread:
+
+```{#lst-staging-reference .rust lst-cap="A staging-pool reference transferred to the renderer"}
+struct StagingRef {
+    buffer: StagingBufferId,
+    offset: u64,
+    size:   u64,
+}
+```
+
+The staging pool is engine-internal machinery. Game code never sees it. The firewall constraint applies to game code; the staging pool is part of the engine's infrastructure that sits below the firewall, safely managed by the engine's own threading invariants.
+
+### Budget-Explicit Design
+
+Budget-explicit design rounds out the threading and resource model: **frame time, GPU memory, upload bandwidth, and streaming distance are explicit budgets with engine arbitration, not emergent properties.** This is Smallworld's named-budgets commitment.
+
+Every pool — GPU meshes, GPU textures, staging buffers, deformed-vertex output, froxel volumes, the GI clipmap — has a named memory budget. When a budget is exceeded, the engine makes an explicit decision: evict the least-recently-used entry, lower LOD, or reject the allocation. Performance is never a mystery; it is an engineering parameter.
+
+Without explicit budgets, GPU memory can grow until the driver exhausts it and streaming distance can be tuned only by subjective feel. A modern engine makes these decisions observable and configurable. In Smallworld, every budget is a configuration value, visible in the profiler, and available to quality-scaling logic.
+
+@lst-gpu-budget makes the budget state explicit in the pool that consumes it:
+
+```{#lst-gpu-budget .rust lst-cap="A named budget attached to a GPU resource pool"}
+struct MemoryBudget {
+    limit_bytes: u64,
+    used_bytes:  u64,
+    high_water:  u64,   // peak usage for profiling
+}
+
+// Every GPU pool carries its budget
+struct GpuMeshPool {
+    meshes: SlotMap<GpuId, GpuMesh>,
+    budget: MemoryBudget,
+}
+```
+
+### How Rust Enables This Architecture
+
+This threading model is not merely a philosophical preference. Rust combines several language-level tools so that its most important rules can be checked together:
+
+- **Ownership and move semantics.** Sending an owned value through a channel moves it; the sender cannot access it afterward, removing that form of aliasing at the boundary.
+
+- **`Send` and `Sync`.** The compiler verifies that types crossing thread boundaries are safe to move or share. `Rc<T>`, for example, cannot enter a `Send` context.
+
+- **Borrow checking and lifetimes.** `&World` (read-only) and `&mut World` (exclusive) are checked at compile time. Scoped worker tasks cannot outlive the data they borrow.
+
+- **Explicit sharing and copying.** Sharing a `MeshAsset` requires an explicit `Arc`; moving a large value remains visible in the code. The cost and ownership decision are not hidden behind an implicit reference.
+
+C++ can implement the same architecture with careful APIs, static analysis, sanitizers, and disciplined review. Rust's advantage is that ownership, borrowing, and thread-safety constraints compose directly in the type system, making the intended design easier to preserve as the codebase grows.
+
+## Putting It Together: The Frame in Motion
+
+To see how the three pillars — the firewall, data-driven design, and thread ownership — interact in practice, let us trace a single frame through the engine.
+
+### A Frame's Journey
+
+Figure \ref{fig:frame-journey} follows the ordinary data path through one frame. It emphasizes the transfer between owners, not an assertion that every operation executes serially or at exactly these durations.
+
+\input{figures/frame-journey.tex}
+
+At this level, the frame has three architectural acts:
+
+1. **Simulate.** The Game Thread collects input, advances fixed- and variable-rate systems, and runs engine preparation such as hierarchy propagation and streaming-demand calculation. It owns the mutable `World` throughout this work.
+
+2. **Extract.** The engine identifies render-relevant state and produces an owned render description. A bounded transfer gives the renderer a coherent input and provides backpressure if rendering falls behind. Once transferred, the Game Thread can begin preparing the next frame.
+
+3. **Render.** The Render Thread receives control events and render data, updates its private state, prepares visibility and draw work, records GPU commands, submits them, and presents. Its feedback returns asynchronously and is advisory to the Game Thread.
+
+The next chapter defines the exact timing rules within these stages: fixed timestep accumulation, frame pacing, frames in flight, resizing, device loss, and graceful shutdown. Here the important point is the handoff: the Game Thread owns the live world; the Render Thread owns persistent render state; the packet is the only ordinary path between them.
+
+### What the Pillars Provide
+
+Notice how each pillar contributes to the frame's smooth execution:
+
+- **The Firewall** ensures that the Game Thread's UPDATE phase and the Render Thread's RECORD phase never touch each other's data. They run concurrently on separate frames without any synchronization beyond the channel send/receive.
+
+- **Data-Oriented Composition** keeps the EXTRACT phase mechanical: copy render-relevant plain data into the boundary representation and move on. Behavior and callbacks remain on the game side of the boundary, so extraction is a data transformation rather than an opportunity to run game logic.
+
+- **Thread Ownership** ensures that the PREPARE phase on the Render Thread is safe: its render-side state is exclusively owned, and its input is an owned value received at the boundary. This removes shared-state locking and contention from that handoff.
+
+Together, they produce an engine where the frame pipeline is coherent, profilable, and scalable. Adding a new component type does not change the threading model. Adding a new render pass does not touch game code. And Rust lets the compiler catch many ownership and thread-boundary violations at build time rather than in a crash report from a user's machine.
+
+## Chapter Summary {.unnumbered}
+
+This chapter established three architectural pillars for a modern engine and showed how Smallworld realizes them:
+
+1. **The Game–Render Firewall** separates simulation from presentation through a hard ownership boundary. Game code interacts with the renderer through a compact extracted representation, and the Render Thread owns its private presentation state. The next rendering chapter compares concrete snapshot, delta, retained-scene, and feedback mechanisms; Smallworld's owned-message approach is one realization.
+
+2. **Data-Oriented Composition** uses ECS for the game-facing World: opaque entity IDs, plain-data components in dense stores, and systems that query the data they need. This replaces a primary game-object inheritance taxonomy with composition, and is cache-friendly, serialization-friendly, and extraction-friendly: render-relevant components can be read without side effects. Smallworld uses this model for its World.
+
+3. **Thread Ownership** keeps the main execution contexts — Game Thread, Render Thread, Audio Thread, Streaming Coordinator, split worker pools, and IO pool — responsible for their own mutable state and communicates through CSP channels carrying owned values. Carefully bounded engine-internal sharing, such as staging regions, has explicit invariants. Rust's type system makes these ownership boundaries easier to enforce and review at compile time; Smallworld applies that support directly to its thread model.
+
+In the next chapter, we will build on these foundations to examine the **core loop and frame lifecycle** in detail — the two-frame overlapped pipeline, frame pacing and vsync strategies, fixed-timestep simulation with interpolation, and the engine's lifecycle management for resizing, device loss, and graceful teardown.
+
+## Review Questions {.unnumbered}
+
+1. What is the narrow invariant that the Game–Render Firewall actually protects, and why is it narrower than "game code never touches the GPU"?
+
+2. What properties must a game-to-render handoff have even when different engines choose snapshots, deltas, double buffers, or message queues?
+
+3. Why might a modern engine use separate game and render worker pools instead of a single shared pool? What specific failure mode does this prevent?
+
+4. How does Rust's ownership system enforce the threading model at compile time? Give a concrete example of a threading bug that would compile in C++ but fail to compile in Rust.
+
+5. The staging pool appears to violate the "no shared mutable state" principle. Why is it safe, and what three mechanisms ensure correctness?

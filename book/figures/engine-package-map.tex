@@ -1,0 +1,42 @@
+\begin{figure}[!t]
+{\centering
+\begin{tikzpicture}[x=1cm, y=1cm]
+  % Game application
+  \node[engine-layer, minimum width=16cm, minimum height=1.50cm] at (8, 9.95) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (8, 10.50) {GAME APPLICATION};
+  \node[engine-package, text width=3.15cm, minimum height=0.65cm] at (2.05, 9.74) {Rules and systems};
+  \node[engine-package, text width=3.15cm, minimum height=0.65cm] at (5.95, 9.74) {Game-specific components};
+  \node[engine-package, text width=3.15cm, minimum height=0.65cm] at (9.85, 9.74) {Content and configuration};
+  \node[engine-package, text width=3.15cm, minimum height=0.65cm] at (13.75, 9.74) {UI, tools, and debug views};
+
+  % Public and extension contracts
+  \node[engine-boundary, minimum width=16cm, minimum height=0.76cm] at (8, 8.57) {PUBLIC ENGINE AND EXTENSION API --- components, handles, commands, events, and configuration};
+  \node[engine-boundary, minimum width=16cm, minimum height=0.76cm] at (8, 7.66) {PLUGIN AND EXTENSION PACKAGES --- systems and components, importers, render passes, materials, tools};
+
+  % Runtime domains
+  \node[engine-layer, minimum width=16cm, minimum height=2.55cm] at (8, 5.76) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (8, 6.83) {ENGINE RUNTIME DOMAINS};
+  \node[engine-package, text width=4.30cm, minimum height=1.70cm] at (2.85, 5.55) {\textbf{Game-facing World}\\ECS, game state\\fixed-step simulation\\physics, animation, AI\\audio, networking};
+  \node[engine-package, text width=4.30cm, minimum height=1.70cm] at (8, 5.55) {\textbf{Assets and streaming}\\import and cooking, handles\\IO, residency, caching\\asynchronous loading};
+  \node[engine-package, text width=4.30cm, minimum height=1.70cm] at (13.15, 5.55) {\textbf{Render domain}\\extraction, retained scene\\visibility, render graph\\materials, GPU resource pools};
+
+  % Shared foundations
+  \node[engine-layer, minimum width=16cm, minimum height=1.55cm] at (8, 3.46) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (8, 4.03) {SHARED ENGINE FOUNDATIONS};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (2.05, 3.26) {Jobs and\\asynchronous work};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (5.95, 3.26) {Handles, memory,\\and data};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (9.85, 3.26) {Math, spatial data,\\and serialization};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (13.75, 3.26) {Diagnostics, profiling,\\and logging};
+
+  % Platform and hardware boundary
+  \node[engine-layer, minimum width=16cm, minimum height=1.55cm] at (8, 1.66) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (8, 2.23) {PLATFORM AND HARDWARE BOUNDARY};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (2.05, 1.46) {Windows, input,\\clocks, and files};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (5.95, 1.46) {Audio and\\network adapters};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (9.85, 1.46) {\texttt{wgpu}\\graphics abstraction};
+  \node[engine-package, text width=3.15cm, minimum height=0.72cm] at (13.75, 1.46) {Operating system,\\drivers, and hardware};
+\end{tikzpicture}\par}
+\caption{A conceptual package map for a modern game engine. Public and extension APIs give games controlled ways to add capabilities; runtime domains cooperate through explicit data, ownership, and scheduling contracts.}
+\label{fig:engine-package-map}
+\end{figure}
+\FloatBarrier

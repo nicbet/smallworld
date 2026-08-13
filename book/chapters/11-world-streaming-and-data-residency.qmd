@@ -1,0 +1,49 @@
+# World Streaming and Data Residency
+
+> **Draft chapter map.** Explain how a large world becomes available gradually under explicit memory, bandwidth, and latency budgets.
+
+## A World Is Not All Resident
+
+- Distinguish the logical world from the subset currently loaded into CPU and GPU memory.
+- Explain why streaming is an engine-wide coordination problem rather than a file-loading feature.
+
+### Spatial Partitioning and Entity Residency
+
+- Introduce cells, regions, and demand sources such as players, cameras, and gameplay triggers.
+- Explain the lifecycle of entities entering and leaving residency.
+
+#### Detail Streaming
+
+- Separate existence of a world object from the fidelity of its visual and audio data.
+- Connect detail decisions to visibility and quality budgets.
+
+## Demand, Fulfilment, and Arbitration
+
+- Present streaming as requests competing for limited IO, CPU, upload, and memory capacity.
+- Explain priorities, cancellation, and starvation avoidance.
+
+### Streaming Across Engine Domains
+
+- Show the contracts among World, assets, renderer, and persistence.
+- Emphasize that the game asks for intent while engine services arbitrate realization.
+
+#### Loading Screens and Live Worlds
+
+- Explain why an existing World can remain interactive while a successor loads.
+- Connect world transitions to lifecycle and UI contracts.
+
+## Persistence and Change
+
+- Distinguish base world data from player or simulation changes.
+- Explain save/load as a data-model problem before choosing a file format.
+
+### Base-and-Overlay Models
+
+- Describe layering authored content with runtime deltas.
+- Discuss conflict, versioning, and migration at a conceptual level.
+
+#### Failure and Recovery
+
+- Cover missing cells, partial loads, invalid data, and budget exhaustion.
+- Relate graceful degradation to explicit engine policy.
+

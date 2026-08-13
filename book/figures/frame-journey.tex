@@ -1,0 +1,28 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.65,1.45) {GAME THREAD};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.65,-0.95) {RENDER THREAD};
+  \foreach \name/\x/\title/\detail in {ga/1.2/Input/buffered, gb/2.9/Fixed/fixed-step, gc/4.6/Update/variable, gd/6.3/Late/engine, ge/8.0/Extract/send, gf/9.7/Clear/tracker} {
+    \node[engine-package, text width=1.25cm, minimum height=0.78cm] (\name) at (\x,1.15) {\textbf{\title}\\\detail};
+  }
+  \draw[-Latex, line width=0.45pt] (ga.east) -- (gb.west);
+  \draw[-Latex, line width=0.45pt] (gb.east) -- (gc.west);
+  \draw[-Latex, line width=0.45pt] (gc.east) -- (gd.west);
+  \draw[-Latex, line width=0.45pt] (gd.east) -- (ge.west);
+  \draw[-Latex, line width=0.45pt] (ge.east) -- (gf.west);
+  \foreach \name/\x/\title/\detail in {ra/1.2/Receive/control, rb/2.9/Prepare/deltas, rc/4.6/Cull/views, rd/6.3/Record/graph, re/8.0/Submit/queue, rf/9.7/Present/surface} {
+    \node[engine-package, text width=1.25cm, minimum height=0.78cm] (\name) at (\x,-0.65) {\textbf{\title}\\\detail};
+  }
+  \draw[-Latex, line width=0.45pt] (ra.east) -- (rb.west);
+  \draw[-Latex, line width=0.45pt] (rb.east) -- (rc.west);
+  \draw[-Latex, line width=0.45pt] (rc.east) -- (rd.west);
+  \draw[-Latex, line width=0.45pt] (rd.east) -- (re.west);
+  \draw[-Latex, line width=0.45pt] (re.east) -- (rf.west);
+  \draw[-Latex, line width=0.6pt] (ge.south) -- node[right, font=\sffamily\scriptsize, align=left] {owned render\\description} (re.north);
+  \draw[-Latex, line width=0.45pt] (0.65,2.05) -- node[above, font=\sffamily\scriptsize] {time} (10.65,2.05);
+\end{tikzpicture}
+\caption{A frame's ordinary journey. The game side owns live state until extraction transfers an owned render description; the render side then prepares and presents from its private state.}
+\label{fig:frame-journey}
+\end{figure}
+\FloatBarrier

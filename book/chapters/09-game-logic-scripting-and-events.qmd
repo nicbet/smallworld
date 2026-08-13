@@ -1,0 +1,49 @@
+# Game Logic, Scripting, and Events
+
+> **Draft chapter map.** Explain how game-specific behavior extends the World without eroding its data and ownership boundaries.
+
+## Rules Need an Execution Model
+
+- Separate long-lived game flow, per-entity behavior, and bulk systems.
+- Explain why one abstraction rarely serves all three well.
+
+### Native Systems and Behaviors
+
+- Compare data-oriented systems with behavior objects and callbacks.
+- Identify the kinds of state and work that belong in each.
+
+#### Text, Code, and Visual Authoring
+
+- Discuss the strengths and limitations of code, declarative data, and visual graphs.
+- Frame tooling choices around debuggability, reviewability, and iteration—not ideology.
+
+## Events and Commands
+
+- Explain the difference between an observed fact, a request for work, and persistent World state.
+- Show how explicit message types reduce hidden coupling.
+
+### Event Lifetimes and Ordering
+
+- Introduce double buffering, phases, and ownership of event queues.
+- Explain why event order must be a documented contract.
+
+#### Gameplay Tags and Decoupling
+
+- Show how shared vocabulary can avoid direct dependencies among features.
+- Guard against tags becoming an untyped global escape hatch.
+
+## Extensibility and Safety
+
+- Explain plugin and scripting boundaries in terms of narrow contracts.
+- Connect extension points to the package map from Chapter 2.
+
+### Smallworld’s Behavior Boundary
+
+- Use Smallworld to illustrate a concrete host for native and scripted behavior.
+- Defer ABI, hot reload, and editor integration details until the tooling material.
+
+#### Common Failure Modes
+
+- Cover hidden global state, uncontrolled side effects, and per-frame allocation.
+- Relate fixes to data, control, and ownership contracts.
+

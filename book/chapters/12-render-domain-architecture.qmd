@@ -1,0 +1,65 @@
+# Render Domain Architecture
+
+> **Draft chapter map.** Make Chapter 3’s general data, ownership, and feedback contracts concrete as a renderer that extracts game intent, owns retained render state, and submits work through `wgpu`.
+
+## Why Rendering Needs Its Own Domain
+
+- Revisit the cost of renderer access to mutable game state.
+- Compare single-threaded direct access, snapshots, and retained render-side state.
+
+### Extraction as a Data Contract
+
+- Explain the extract phase as translation from game intent to render-owned data.
+- Define what an extracted description must contain and what it must never borrow.
+
+#### The `FramePacket` Example
+
+- Use Smallworld’s packet as one concrete owned-message realization.
+- Separate durable requirements from fields specific to the engine’s rendering features.
+
+## Retained Render State
+
+- Explain why renderers often maintain their own scene representation.
+- Compare full snapshots with delta-driven updates for static-heavy worlds.
+
+### GPU Resources and Submission Ownership
+
+- Establish device-local resources and command submission as renderer-owned state.
+- Explain how asset and streaming work can prepare uploads without breaking that invariant.
+
+#### Feedback Is Advisory
+
+- Describe delayed timings, readbacks, culling statistics, and queue information.
+- Explain why feedback informs future decisions rather than rewrites current game state.
+
+## Performance Is a Render-Domain Contract
+
+- Establish a frame-time budget as a concrete promise made to the player, not a renderer benchmark measured in isolation.
+- Convert target frame rates into budgets—for example, 16.67 ms at 60 Hz and 8.33 ms at 120 Hz—and account separately for CPU preparation, GPU execution, presentation, and deliberate headroom.
+
+### Frame Pacing, VSync, and Frames in Flight
+
+- Distinguish simulation cadence from presentation cadence, and explain why a high average FPS does not guarantee smooth motion or responsive input.
+- Compare VSync, adaptive presentation modes, uncapped rendering, and frame limiting in terms of tearing, latency, power, and frame-time stability.
+- Define a deliberate frames-in-flight policy: enough overlap to keep the GPU busy, but bounded so the renderer cannot accumulate stale input and obsolete scene work.
+
+#### Budgets, Instrumentation, and Quality Policy
+
+- Give the renderer named budgets for CPU render preparation, GPU frame time, memory, upload bandwidth, shader compilation, and transient-resource pressure.
+- Explain how CPU and GPU timings arrive at different times, why measurements are associated with a frame index, and why quality decisions must use delayed feedback safely.
+- Connect dynamic resolution, LOD, culling thresholds, shadow quality, and optional effects to a measured quality ladder rather than one-way feature disablement.
+
+## Backpressure and Failure Modes
+
+- Explain bounded handoffs, latency policy, and recovery from a slow renderer.
+- Connect missed budgets to backpressure, recovery, and the lifecycle rules introduced in Chapter 4.
+
+### Historical Patterns
+
+- Compare mature engine proxy/extraction models at a conceptual level.
+- Identify the durable pattern independent of language or graphics API.
+
+#### Smallworld’s Firewall
+
+- Trace the concrete types and thread boundaries used by Smallworld.
+- Verify that game code cannot acquire renderer-owned resources.

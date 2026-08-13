@@ -1,0 +1,54 @@
+# Environment and Post-Processing
+
+> **Draft chapter map.** Explain how sky, atmosphere, media, weather, procedural content, and image finishing compose into a coherent presentation pipeline.
+
+## The Environment Is a System
+
+- Treat sky, weather, terrain dressing, and time of day as connected data rather than isolated effects.
+- Explain how environment state crosses from the World into presentation.
+
+### Atmosphere, Clouds, and Weather
+
+- Introduce lookup-driven atmosphere, cloud rendering, and data-driven weather states.
+- Connect temporal stability and quality tiers to the render graph.
+
+#### Volumetric Media
+
+- Explain the visual problem of fog, shafts, and participating media through a frustum-aligned voxel grid, commonly called froxels.
+- Cover density injection, clustered-light evaluation, temporal reprojection, integration, internal-resolution policy, and the distinction between global fog, local fog volumes, and plugin-injected or hero media.
+
+## Procedural Content at Engine Scale
+
+- Explain why PCG needs spatial, streaming, and persistence contracts.
+- Distinguish deterministic generation from arbitrary runtime spawning.
+
+### Vegetation and Scatter Systems
+
+- Discuss surface queries, instancing, LOD, and artist control.
+- Use Smallworld’s world model as an illustration, not a universal prescription.
+
+#### Streaming and Editability
+
+- Explain how generated content responds to cell loads and player changes.
+- Connect procedural data to base-and-overlay persistence.
+
+## The Final Image
+
+- Explain why exposure, anti-aliasing, tone mapping, and UI composition belong in an explicit final stage.
+- Distinguish scene-referred rendering from display-referred output.
+
+### Temporal Post-Processing
+
+- Develop TAA and TAAU as temporal reconstruction: jittered samples, motion-vector reprojection, history validation, disocclusion, camera cuts, and dynamic-resolution changes.
+- Make the implementation ladder explicit: an in-house temporal resolver at native and scaled resolution first; FSR through the same declared graph slot later; DLSS and XeSS only where their platform and integration requirements are acceptable.
+- Connect quality management to frame pacing and diagnostics, including resolution-scale control, sharpening, and safe history resets.
+
+#### Exposure, Bloom, Tone Mapping, and Transparency
+
+- Cover histogram-based auto-exposure and manual exposure controls, bloom, ACES-style tone mapping, color grading, and the transition from scene-referred HDR values to display output.
+- Explain why transparent surfaces render after opaque lighting, sample the completed scene deliberately for refraction or fog, and cannot behave like another GBuffer producer.
+
+#### Debugging the Image Pipeline
+
+- Outline visualizers, intermediate targets, and automated image tests.
+- Emphasize explainable rendering over opaque effects stacks.

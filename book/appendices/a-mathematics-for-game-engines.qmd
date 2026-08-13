@@ -1,0 +1,46 @@
+# Mathematics for Game Engines
+
+> **Reference appendix.** This appendix gathers the mathematical vocabulary used throughout the book so the main chapters can stay focused on architectural reasoning. It is a companion for deliberate study, not a prerequisite to understanding the design arguments.
+
+## Scalars, Vectors, Points, and Units
+
+- Define scalar quantities, vectors, points, directions, distances, and units.
+- Explain why preserving the distinction between a point and a direction prevents common transform and coordinate-space errors.
+
+### Dot Products, Cross Products, and Norms
+
+- Derive the geometric meaning of projection, perpendicularity, orientation, length, and normalization.
+- Connect these operations to visibility, collision, lighting, and navigation queries.
+
+#### Numerical Care
+
+- Cover tolerances, degeneracy, normalization of near-zero vectors, and the practical limits of floating-point comparisons.
+
+## Transformations and Coordinate Spaces
+
+- Describe translation, scale, affine transforms, matrices, and homogeneous coordinates.
+- Relate local, parent, world, camera-relative, and clip spaces to the large-world and rendering chapters.
+
+### Rotations and Orientation
+
+- Explain Euler angles, rotation matrices, quaternions, interpolation, and the trade-offs among representations.
+- Identify composition order and handedness as explicit conventions rather than invisible assumptions.
+
+#### Projection and Depth
+
+- Introduce perspective and orthographic projection, depth ranges, and reverse-depth reasoning.
+- Connect the math to `wgpu` conventions while keeping the underlying ideas API-independent.
+
+## Geometry, Motion, and Interpolation
+
+- Cover rays, planes, boxes, spheres, triangles, barycentric coordinates, and common intersection tests.
+- Explain linear interpolation, smooth interpolation, and temporal sampling as tools with defined error and continuity properties.
+
+### Probability and Procedural Work
+
+- Introduce random variables, distributions, seeds, noise, and deterministic pseudo-random generation.
+- Connect reproducibility to procedural content, testing, and networked simulation.
+
+#### Further Study
+
+- Point readers to the glossary and bibliography for terminology and deeper sources.

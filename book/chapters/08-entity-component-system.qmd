@@ -1,0 +1,49 @@
+# The Entity-Component System
+
+> **Draft chapter map.** Establish ECS as the game object model: composition for gameplay state, not a universal engine-internals solution.
+
+## The Game Object Model Problem
+
+- Compare inheritance-heavy object models with composition-oriented game state.
+- Explain why games need flexible combinations of behavior and data.
+
+### Entities, Components, and Systems
+
+- Define entities as identities, components as plain data, and systems as transformations over selected data.
+- Use a small gameplay example before introducing storage details.
+
+#### ECS Is Not the Whole Engine
+
+- Reinforce the distinction between the game-facing World and renderer, streaming, or GPU internals.
+- Connect data structure choice to access pattern rather than ideology.
+
+## Storage and Queries
+
+- Explain dense component stores, queries, locality, and the cost model of iteration.
+- Discuss the trade-offs among sparse sets, archetypes, and purpose-built stores.
+
+### Runtime State Belongs in Fields
+
+- Explain why frequently changing state should be mutable component data rather than component presence or absence.
+- Connect structural churn to real frame-time costs.
+
+#### Spawn, Despawn, and Change Tracking
+
+- Describe lifecycle operations as normal but non-free work.
+- Foreshadow the change information needed by rendering, persistence, and streaming.
+
+## Describing and Constructing Worlds
+
+- Connect authored world descriptions to runtime entity creation.
+- Explain the difference between content data and a live World.
+
+### Smallworld as a Running Example
+
+- Show how Smallworld applies the general ECS model to its game-facing World.
+- Keep implementation specifics subordinate to the reusable design reasoning.
+
+#### From World Changes to Other Domains
+
+- Preview the data contracts consumed by rendering, physics, audio, and persistence.
+- Refer readers back to ownership and lifecycle rules where necessary.
+

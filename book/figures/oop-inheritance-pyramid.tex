@@ -1,0 +1,16 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, level distance=0.72cm, sibling distance=3.0cm,
+  every node/.style={engine-package, minimum width=2.0cm, minimum height=0.55cm}]
+  \node {\texttt{UObject}}
+    child {node {\texttt{AActor}}
+      child {node {\texttt{APawn}}
+        child {node {\texttt{ACharacter}}
+          child {node {\texttt{APlayerCharacter}}}}
+        child {node {\texttt{AVehicle}}}}
+      child {node {\texttt{ALight}}}};
+\end{tikzpicture}
+\caption{An inheritance taxonomy concentrates shared behavior and lifecycle obligations in base types. It can be useful, but does not by itself organize a large game World for composable data or bulk queries.}
+\label{fig:oop-inheritance-pyramid}
+\end{figure}
+\FloatBarrier

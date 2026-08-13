@@ -1,0 +1,63 @@
+# Memory, Handles, Instrumentation, and Reliability
+
+> **Draft chapter map.** Make resource identity, lifetime, memory budgets, and observability explicit engine services.
+
+## Identity Before Address
+
+- Explain why game code should name resources with stable handles rather than raw pointers or platform allocations.
+- Relate identity to loading, replacement, serialization, and safe asynchronous work.
+
+### Generational Handles and Resource Pools
+
+- Introduce generational indices and slot-map-style arenas as a practical safe-handle pattern.
+- Contrast stable identity with physical storage location.
+
+#### Handle Failure Modes
+
+- Cover stale handles, use-after-free prevention, and diagnostic-friendly invalidation.
+- Establish what a handle can promise and what it deliberately cannot promise.
+
+## Budgets Turn Failure into Policy
+
+- Explain why CPU memory, GPU memory, upload bandwidth, and frame time need named limits.
+- Frame budgets as arbitration rules among competing services rather than late-stage optimization.
+
+### Resource Lifetime and Residency
+
+- Distinguish logical asset lifetime from CPU and GPU residency.
+- Connect eviction, streaming demand, and fallback behavior to explicit ownership.
+
+#### Memory for Rust Engines
+
+- Discuss how Rust’s safety model changes lifetime errors without eliminating capacity planning.
+- Defer allocator and platform-specific details to implementation material.
+
+## Instrumentation Is Part of the Architecture
+
+- Establish profiling, tracing, and counters as data flows that must cross domains cleanly.
+- Explain why a modern engine needs evidence before it can make budget decisions.
+
+### Frame and Resource Telemetry
+
+- Outline CPU timings, GPU timings, allocation pressure, queue depth, and streaming state.
+- Distinguish current measurements from delayed or advisory feedback.
+
+#### Designing for Diagnosis
+
+- Show how stable names, scopes, and correlation IDs make cross-thread work understandable.
+- Connect observability to AI-assisted development and reproducible performance work.
+
+## Reliability Is an Engine Capability
+
+- Establish tests, deterministic scenarios, and reproducible builds as architecture work rather than a final verification phase.
+- Explain why cross-domain contracts need executable checks as well as prose and type signatures.
+
+### Tests at Architectural Boundaries
+
+- Cover unit, integration, property, and regression tests, with each form aimed at a different class of engine failure.
+- Use fixed seeds, controlled clocks, and recorded inputs to make simulation and streaming failures repeatable.
+
+#### Configuration, Features, and Delivery
+
+- Treat configuration as validated data with clear ownership, defaults, and versioning rules.
+- Cover feature policy, continuous integration, packaging, and cross-platform release checks as the path from a working engine to a dependable deliverable.

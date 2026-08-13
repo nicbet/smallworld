@@ -5,43 +5,53 @@ project:
 filters:
   - dropcap.lua
 
+bibliography: references.bib
+reference-section-title: Bibliography
+
 book:
-  title: "Modern Game Engine Design"
-  subtitle: "Building a Hybrid Voxel-Mesh Engine in Rust"
-  author: "Smallworld Team"
+  title: "The Modern Game Engine"
+  subtitle: "Architecture, Systems and Principles"
+  author: "Nicolas Bettenburg, PhD"
   date: today
   chapters:
     - index.qmd
-    - introduction.md
-    - part: "Game Engine Foundations"
+    - introduction.qmd
+    - part: "Foundations"
       chapters:
-        - chapters/01-engine-renaissance.md
-        - chapters/02-architectural-foundations.md
-        # - 02-core-loop-and-frame-lifecycle.md
-        # - 03-memory-handles-and-instrumentation.md
-        # - 04-resource-pipeline-and-virtual-filesystem.md
-    # - part: "Part II: Gameplay Foundations"
-    #   chapters:
-    #     - 05-entity-component-system.md
-    #     - 06-game-logic-scripting-and-events.md
-    #     - 07-managing-massive-scale.md
-    #     - 08-world-streaming-and-data-residency.md
-    # - part: "Part III: Rendering"
-    #   chapters:
-    #     - 09-render-thread-firewall.md
-    #     - 10-render-graph-and-pipeline-extensibility.md
-    #     - 11-visibility-and-geometry.md
-    #     - 12-shading-lighting-and-global-illumination.md
-    #     - 13-environment-and-post-processing.md
-    # - part: "Part IV: Simulation, Audio, and Networking"
-    #   chapters:
-    #     - 14-physics-and-collision.md
-    #     - 15-animation-systems.md
-    #     - 16-audio-architecture.md
-    #     - 17-networking-and-multiplayer.md
-    # - part: "Part V: Tools & User Interface"
-    #   chapters:
-    #     - 18-user-interface-and-tooling.md
+        - chapters/01-engine-renaissance.qmd
+        - chapters/02-engine-architecture-at-a-glance.qmd
+        - chapters/03-engine-runtime-contracts.qmd
+        - chapters/04-core-loop-and-frame-lifecycle.qmd
+        - chapters/05-input-and-platform-interaction.qmd
+        - chapters/06-memory-handles-and-instrumentation.qmd
+        - chapters/07-resource-pipeline-and-virtual-filesystem.qmd
+    - part: "Gameplay"
+      chapters:
+        - chapters/08-entity-component-system.qmd
+        - chapters/09-game-logic-scripting-and-events.qmd
+        - chapters/10-managing-massive-scale.qmd
+        - chapters/11-world-streaming-and-data-residency.qmd
+    - part: "Rendering"
+      chapters:
+        - chapters/12-render-domain-architecture.qmd
+        - chapters/13-render-graph-and-pipeline-extensibility.qmd
+        - chapters/14-visibility-and-geometry.qmd
+        - chapters/15-shading-lighting-and-global-illumination.qmd
+        - chapters/16-environment-and-post-processing.qmd
+    - part: "Simulation, Audio, and Networking"
+      chapters:
+        - chapters/17-physics-and-collision.qmd
+        - chapters/18-navigation-and-spatial-decision-support.qmd
+        - chapters/19-animation-systems.qmd
+        - chapters/20-audio-architecture.qmd
+        - chapters/21-networking-and-multiplayer.qmd
+    - part: "Tools and User Interface"
+      chapters:
+        - chapters/22-user-interface-and-tooling.qmd
+  appendices:
+    - appendices/a-mathematics-for-game-engines.qmd
+    - appendices/b-glossary.qmd
+    - appendices/c-bibliography.qmd
 
 format:
   pdf:

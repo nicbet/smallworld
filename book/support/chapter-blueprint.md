@@ -2,6 +2,16 @@ To meet best textbook practices, each chapter should bridge theory with concrete
 
 Some of the best value for a chapter is: what approaches exist, why the chosen one is superior, common pitfalls, tips and tricks etc. Each chapter should also contain quite a bit of background writing and overall be meaty and verbose.
 
+### Heading discipline
+
+A heading earns its place when it divides its parent into two or more peer
+ideas. Do not create a lone section, subsection, or sub-subsection merely to
+give a paragraph a label: merge that material into its parent instead. When a
+single distinction deserves emphasis but not a table-of-contents entry, use a
+short bold lead-in in the prose or a clearly labelled bullet. This keeps the
+book's navigation proportional to the argument rather than to every local
+point.
+
 Here is a standard textbook blueprint template. Each Section can be further broken down into sub-sections `[Chapter Number].[Section Number].1`, `[Chapter Number].[Section Number].2` etc. where required to keep length manageable.
 
 ---
