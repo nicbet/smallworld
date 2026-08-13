@@ -1,46 +1,1785 @@
 # Mathematics for Game Engines
 
-> **Reference appendix.** This appendix gathers the mathematical vocabulary used throughout the book so the main chapters can stay focused on architectural reasoning. It is a companion for deliberate study, not a prerequisite to understanding the design arguments.
+The mathematics of a game engine spans linear algebra, affine geometry, numerical analysis, and probability. None of these topics are unique to games — they are the standard tools of applied mathematics and computer science — but a game engine uses them under conditions that reward a particular kind of understanding. Frame budgets are measured in milliseconds. Floating-point precision is finite and its limits are visible to the player. Coordinate spaces are many, transforms compose in specific orders, and a sign error in a cross product or a handedness assumption can invert an entire lighting model.
+
+The goal of this appendix is not to be exhaustive — entire textbooks exist for each section — but to develop each idea carefully enough that the reader can apply it with confidence and debug it when it goes wrong.
 
 ## Scalars, Vectors, Points, and Units
 
-- Define scalar quantities, vectors, points, directions, distances, and units.
-- Explain why preserving the distinction between a point and a direction prevents common transform and coordinate-space errors.
+A **scalar** is a single real number that expresses a magnitude: a mass of 72 kilograms, a time step of 0.016 seconds, a temperature of 290 kelvin. Scalars have no direction. They can be added, multiplied, and compared with the ordinary arithmetic of the real numbers $\mathbb{R}$. In engine code, scalars are usually represented as `f32` or `f64` floating-point values; the choice of precision is an engineering decision discussed in the section on numerical care below.
 
-### Dot Products, Cross Products, and Norms
+A **vector** is a quantity with both magnitude and direction. A velocity of 3 meters per second northward, a force of 10 newtons downward, and a surface normal pointing outward from a triangle are all vectors. Formally, vectors live in a vector space: a set equipped with addition and scalar multiplication that satisfy the standard axioms (closure, commutativity, associativity, distributivity, existence of a zero vector and additive inverses). In a game engine, the vector spaces of interest are $\mathbb{R}^2$, $\mathbb{R}^3$, and $\mathbb{R}^4$.
 
-- Derive the geometric meaning of projection, perpendicularity, orientation, length, and normalization.
-- Connect these operations to visibility, collision, lighting, and navigation queries.
+A vector $\mathbf{v}$ in $\mathbb{R}^3$ is written as a column of components:
 
-#### Numerical Care
+$$
+\mathbf{v} = \begin{pmatrix} v_x \\ v_y \\ v_z \end{pmatrix}
+$$
 
-- Cover tolerances, degeneracy, normalization of near-zero vectors, and the practical limits of floating-point comparisons.
+These components are the projections of the vector onto a chosen set of basis vectors, usually the standard basis $\mathbf{e}_x = (1, 0, 0)^\top$, $\mathbf{e}_y = (0, 1, 0)^\top$, $\mathbf{e}_z = (0, 0, 1)^\top$. The same physical vector has different components in different bases, a fact that will become central when we discuss coordinate spaces and transformations.
 
-## Transformations and Coordinate Spaces
+**Vector addition** is component-wise:
 
-- Describe translation, scale, affine transforms, matrices, and homogeneous coordinates.
-- Relate local, parent, world, camera-relative, and clip spaces to the large-world and rendering chapters.
+$$
+\mathbf{a} + \mathbf{b} = \begin{pmatrix} a_x + b_x \\ a_y + b_y \\ a_z + b_z \end{pmatrix}
+$$
 
-### Rotations and Orientation
+**Scalar multiplication** scales every component:
 
-- Explain Euler angles, rotation matrices, quaternions, interpolation, and the trade-offs among representations.
-- Identify composition order and handedness as explicit conventions rather than invisible assumptions.
+$$
+s \, \mathbf{v} = \begin{pmatrix} s \, v_x \\ s \, v_y \\ s \, v_z \end{pmatrix}
+$$
 
-#### Projection and Depth
+Geometrically, addition is the parallelogram rule: the sum $\mathbf{a} + \mathbf{b}$ is the diagonal of the parallelogram formed by placing $\mathbf{a}$ and $\mathbf{b}$ tail-to-tail. Scalar multiplication stretches or compresses the vector without changing its direction (unless the scalar is negative, which reverses direction).
 
-- Introduce perspective and orthographic projection, depth ranges, and reverse-depth reasoning.
-- Connect the math to `wgpu` conventions while keeping the underlying ideas API-independent.
+### Points versus Directions
 
-## Geometry, Motion, and Interpolation
+The distinction between a **point** and a **direction** (or displacement) is one of the most consequential in engine mathematics. Both can be represented as triples of numbers in $\mathbb{R}^3$, but they belong to different mathematical objects and obey different rules.
 
-- Cover rays, planes, boxes, spheres, triangles, barycentric coordinates, and common intersection tests.
-- Explain linear interpolation, smooth interpolation, and temporal sampling as tools with defined error and continuity properties.
+A **point** $P$ is a location in space. It has coordinates but no intrinsic magnitude or direction. A **direction** (or displacement vector) $\mathbf{d}$ is the difference between two points. The rules of affine geometry are:
 
-### Probability and Procedural Work
+- Subtracting two points yields a vector: $P - Q = \mathbf{d}$.
+- Adding a vector to a point yields a new point: $P + \mathbf{d} = Q$.
+- Adding two points is undefined.
+- Adding two vectors yields a vector: $\mathbf{a} + \mathbf{b} = \mathbf{c}$.
 
-- Introduce random variables, distributions, seeds, noise, and deterministic pseudo-random generation.
-- Connect reproducibility to procedural content, testing, and networked simulation.
+Engines that conflate points and vectors routinely produce subtle transform bugs. A position must be translated; a direction must not. A surface normal must be transformed by the inverse transpose of the model matrix, not by the model matrix itself. When engine code treats both as "a `Vec3`," the type system cannot catch the error.
 
-#### Further Study
+::: {.callout-note appearance="simple" title="Affine Space"}
 
-- Point readers to the glossary and bibliography for terminology and deeper sources.
+Formally, a point lives in an **affine space** $\mathcal{A}$, which is a set of points acted on by a vector space $V$ of displacements. The affine space has no origin; choosing an origin is equivalent to choosing a coordinate system. This abstraction is why homogeneous coordinates (discussed below) exist: they encode whether a four-component quantity is a point ($w = 1$) or a direction ($w = 0$), so that a single $4 \times 4$ matrix can correctly transform both.
+
+:::
+
+### Units and Dimensional Analysis
+
+Engine mathematics operates on quantities with physical dimensions: meters, seconds, kilograms, radians. Mixing dimensions is a category error that compilers rarely catch but that gameplay makes visible. Adding a velocity to a position, or comparing a force magnitude to a distance, produces numerical nonsense that can hide behind plausible-looking floating-point values.
+
+The discipline of **dimensional analysis** assigns dimensions to every quantity and verifies that both sides of every equation are dimensionally consistent. If velocity has dimensions $\text{length} \cdot \text{time}^{-1}$ and the simulation step has dimensions $\text{time}$, then the displacement $\Delta \mathbf{x} = \mathbf{v} \, \Delta t$ has dimensions $\text{length}$ — which is correct for a position update.
+
+Some engine teams encode dimensions in the type system (a `Meters` type that is not implicitly convertible to a `Seconds` type); others rely on convention and naming discipline. Either way, the mathematical requirement is the same: every equation must be dimensionally homogeneous.
+
+**Angular quantities** deserve special care. Radians are the natural unit for trigonometric functions and for angular velocity ($\omega = d\theta / dt$). Degrees are friendlier for artists and designers. Engine code should convert at the boundary — accept degrees from editors and configuration, convert to radians immediately — and perform all internal computation in radians.
+
+
+## The Dot Product, Cross Product, and Norm
+
+These three operations form the core toolkit for geometric queries in a game engine. Visibility tests, collision normals, projection, reflection, lighting, and camera alignment all reduce to combinations of dot products, cross products, and norms.
+
+### The Norm (Vector Length)
+
+The **Euclidean norm** (or magnitude, or length) of a vector $\mathbf{v} \in \mathbb{R}^3$ is:
+
+$$
+\|\mathbf{v}\| = \sqrt{v_x^2 + v_y^2 + v_z^2}
+$$
+
+This is the distance from the origin to the point whose coordinates are the components of $\mathbf{v}$. The norm is always non-negative, and $\|\mathbf{v}\| = 0$ if and only if $\mathbf{v} = \mathbf{0}$.
+
+The **squared norm** $\|\mathbf{v}\|^2 = v_x^2 + v_y^2 + v_z^2$ avoids the square root and is sufficient for many engine queries. Comparing squared distances is equivalent to comparing distances; testing whether a vector is shorter than a threshold $r$ can be done as $\|\mathbf{v}\|^2 < r^2$. In a tight loop over thousands of entities, avoiding unnecessary square roots is a measurable performance win.
+
+**Normalization** produces a **unit vector** (a vector of length 1) pointing in the same direction:
+
+$$
+\hat{\mathbf{v}} = \frac{\mathbf{v}}{\|\mathbf{v}\|}
+$$
+
+Unit vectors represent pure directions. Surface normals, light directions, camera forward vectors, and basis vectors are all unit vectors. The normalization operation is undefined for the zero vector and numerically unstable for very short vectors (see the section on numerical care below).
+
+### The Dot Product
+
+The **dot product** (or inner product, or scalar product) of two vectors $\mathbf{a}$ and $\mathbf{b}$ in $\mathbb{R}^3$ is:
+
+$$
+\mathbf{a} \cdot \mathbf{b} = a_x \, b_x + a_y \, b_y + a_z \, b_z
+$$
+
+This is the algebraic definition — a sum of component-wise products — and it yields a scalar. The geometric definition relates the dot product to the angle $\theta$ between the two vectors:
+
+$$
+\mathbf{a} \cdot \mathbf{b} = \|\mathbf{a}\| \; \|\mathbf{b}\| \cos\theta
+$$
+
+These two definitions are equivalent (the proof follows from the law of cosines applied to the triangle formed by $\mathbf{a}$, $\mathbf{b}$, and $\mathbf{a} - \mathbf{b}$). The geometric form reveals several properties that engine programmers use constantly:
+
+**Perpendicularity.** Two non-zero vectors are perpendicular (orthogonal) if and only if $\mathbf{a} \cdot \mathbf{b} = 0$. This test is used in collision detection, constraint solving, and orthonormal basis construction.
+
+**Sign and hemisphere.** If $\mathbf{a} \cdot \mathbf{b} > 0$, the angle between them is less than 90°; they point into the same hemisphere. If $\mathbf{a} \cdot \mathbf{b} < 0$, the angle exceeds 90°; they point in generally opposite directions. This is the core of back-face culling: a triangle whose normal has a negative dot product with the view direction faces away from the camera.
+
+**Cosine of the angle.** When both vectors are unit vectors ($\|\hat{\mathbf{a}}\| = \|\hat{\mathbf{b}}\| = 1$), the dot product is exactly the cosine of the angle between them: $\hat{\mathbf{a}} \cdot \hat{\mathbf{b}} = \cos\theta$. This makes the dot product the standard tool for Lambertian diffuse lighting: the intensity is proportional to $\max(0, \, \hat{\mathbf{n}} \cdot \hat{\mathbf{l}})$, where $\hat{\mathbf{n}}$ is the surface normal and $\hat{\mathbf{l}}$ is the direction to the light.
+
+**Projection.** The scalar projection of $\mathbf{a}$ onto unit vector $\hat{\mathbf{b}}$ is $\mathbf{a} \cdot \hat{\mathbf{b}}$. The vector projection — the component of $\mathbf{a}$ in the direction of $\hat{\mathbf{b}}$ — is:
+
+$$
+\text{proj}_{\hat{\mathbf{b}}} \, \mathbf{a} = (\mathbf{a} \cdot \hat{\mathbf{b}}) \; \hat{\mathbf{b}}
+$$
+
+Projection is used in shadow mapping (projecting world positions onto light space), camera controllers (extracting the forward component of a velocity), physics (decomposing forces into normal and tangential components), and many other systems.
+
+**Length from the dot product.** The squared norm of a vector is its dot product with itself: $\|\mathbf{v}\|^2 = \mathbf{v} \cdot \mathbf{v}$.
+
+### The Cross Product
+
+The **cross product** of two vectors $\mathbf{a}$ and $\mathbf{b}$ in $\mathbb{R}^3$ produces a new vector $\mathbf{c}$ that is perpendicular to both:
+
+$$
+\mathbf{a} \times \mathbf{b} = \begin{pmatrix}
+  a_y \, b_z - a_z \, b_y \\
+  a_z \, b_x - a_x \, b_z \\
+  a_x \, b_y - a_y \, b_x
+\end{pmatrix}
+$$
+
+The geometric interpretation:
+
+$$
+\|\mathbf{a} \times \mathbf{b}\| = \|\mathbf{a}\| \; \|\mathbf{b}\| \sin\theta
+$$
+
+where $\theta$ is the angle between $\mathbf{a}$ and $\mathbf{b}$. The magnitude equals the area of the parallelogram spanned by the two vectors.
+
+The direction of $\mathbf{a} \times \mathbf{b}$ is determined by the **right-hand rule** (in a right-handed coordinate system): curl the fingers of the right hand from $\mathbf{a}$ toward $\mathbf{b}$, and the thumb points in the direction of $\mathbf{a} \times \mathbf{b}$.
+
+Key properties:
+
+- **Anti-commutativity:** $\mathbf{a} \times \mathbf{b} = -(\mathbf{b} \times \mathbf{a})$. Swapping the operands reverses the direction. This is a common source of sign bugs.
+- **Parallel vectors:** $\mathbf{a} \times \mathbf{b} = \mathbf{0}$ when $\mathbf{a}$ and $\mathbf{b}$ are parallel (or one is zero). The sine of 0° and 180° is zero.
+- **Not associative:** $\mathbf{a} \times (\mathbf{b} \times \mathbf{c}) \neq (\mathbf{a} \times \mathbf{b}) \times \mathbf{c}$ in general. The vector triple product expands as $\mathbf{a} \times (\mathbf{b} \times \mathbf{c}) = \mathbf{b} \, (\mathbf{a} \cdot \mathbf{c}) - \mathbf{c} \, (\mathbf{a} \cdot \mathbf{b})$.
+
+Engine applications of the cross product include:
+
+- **Surface normals.** Given two edges of a triangle — $\mathbf{e}_1 = P_1 - P_0$ and $\mathbf{e}_2 = P_2 - P_0$ — the face normal is $\hat{\mathbf{n}} = \frac{\mathbf{e}_1 \times \mathbf{e}_2}{\|\mathbf{e}_1 \times \mathbf{e}_2\|}$. The winding order of the vertices determines which side of the triangle the normal faces.
+- **Orthonormal basis construction.** Given a single direction $\hat{\mathbf{n}}$, a local coordinate frame can be built by crossing $\hat{\mathbf{n}}$ with any non-parallel vector, normalizing the result, and crossing again to get the third axis.
+- **Torque and angular velocity.** Torque is $\boldsymbol{\tau} = \mathbf{r} \times \mathbf{F}$; the angular velocity of a point on a rotating body is $\mathbf{v} = \boldsymbol{\omega} \times \mathbf{r}$.
+- **Orientation tests.** The sign of $(\mathbf{a} \times \mathbf{b}) \cdot \mathbf{c}$ (the scalar triple product) determines on which side of the plane spanned by $\mathbf{a}$ and $\mathbf{b}$ the vector $\mathbf{c}$ lies. This is the foundation of winding-order and containment tests.
+
+### The Scalar Triple Product
+
+The **scalar triple product** of three vectors is defined as:
+
+$$
+[\mathbf{a}, \mathbf{b}, \mathbf{c}] = \mathbf{a} \cdot (\mathbf{b} \times \mathbf{c})
+$$
+
+Its absolute value equals the volume of the parallelepiped formed by the three vectors. Its sign indicates orientation: positive in a right-handed coordinate system, negative in a left-handed one. A sign of zero means the three vectors are coplanar.
+
+The scalar triple product can also be computed as a $3 \times 3$ determinant:
+
+$$
+[\mathbf{a}, \mathbf{b}, \mathbf{c}] = \det \begin{pmatrix} a_x & b_x & c_x \\ a_y & b_y & c_y \\ a_z & b_z & c_z \end{pmatrix}
+$$
+
+This is used in ray–triangle intersection tests (the Möller–Trumbore algorithm uses three scalar triple products to compute barycentric coordinates) and in determining the handedness of a coordinate frame.
+
+
+## Numerical Care
+
+Every floating-point computation in a game engine operates on an approximation of the real numbers. The IEEE 754 standard defines a 32-bit (`f32`) floating-point number as a sign bit, 8 exponent bits, and 23 mantissa bits, giving roughly 7 decimal digits of precision. A 64-bit (`f64`) value has 11 exponent bits and 52 mantissa bits, giving roughly 15–16 decimal digits. Understanding the structure of this approximation prevents a class of bugs that no amount of testing can catch reliably.
+
+### Machine Epsilon and Relative Error
+
+**Machine epsilon** $\varepsilon$ is the smallest value such that $1.0 + \varepsilon \neq 1.0$ in floating-point arithmetic. For `f32`, $\varepsilon \approx 1.19 \times 10^{-7}$; for `f64`, $\varepsilon \approx 2.22 \times 10^{-16}$.
+
+The relative error of any single floating-point operation (addition, subtraction, multiplication, division) is bounded by $\varepsilon / 2$ in round-to-nearest mode. This means that the result of a floating-point operation $\text{fl}(a \circ b)$ satisfies:
+
+$$
+\text{fl}(a \circ b) = (a \circ b)(1 + \delta), \quad |\delta| \leq \frac{\varepsilon}{2}
+$$
+
+where $\circ$ is any basic arithmetic operation. The danger is that errors accumulate across chains of operations, and certain patterns amplify error dramatically.
+
+### Catastrophic Cancellation
+
+When two nearly equal numbers are subtracted, the leading significant digits cancel and the result retains only the trailing digits — which may be dominated by rounding error. Consider computing $a - b$ where $a = 1.000\,001$ and $b = 1.000\,000$ in `f32`. Each value is correct to about 7 digits, but their difference $0.000\,001$ has only 1 significant digit. The relative error of the difference can be enormous even though the absolute error is small.
+
+Catastrophic cancellation appears in engine code when:
+
+- Computing the normal of a near-degenerate triangle (two edges nearly parallel, so their cross product is near zero).
+- Evaluating $1 - \cos\theta$ for small $\theta$ (both values are near 1; the difference loses precision). The identity $1 - \cos\theta = 2\sin^2(\theta/2)$ avoids the cancellation.
+- Subtracting two large, nearly equal world-space positions to get a small displacement. This is the fundamental precision problem of large-world engines, which Chapter 10 addresses with camera-relative rendering.
+
+### Floating-Point Comparison
+
+Comparing floating-point values with `==` is almost always wrong for computed results. The standard practice is an **epsilon comparison**, but the correct epsilon depends on the magnitude of the values being compared.
+
+An **absolute tolerance** comparison tests $|a - b| < \varepsilon_{\text{abs}}$. This works near zero but fails for large values: if $a$ and $b$ are around $10^6$, then `f32` cannot distinguish values closer than about $10^{-1}$, so an absolute tolerance of $10^{-6}$ would be meaninglessly small.
+
+A **relative tolerance** comparison tests $|a - b| < \varepsilon_{\text{rel}} \cdot \max(|a|, |b|)$. This scales with magnitude but fails near zero, where the relative error of any non-zero value compared to zero is 1.0 (or infinity if one value is exactly zero).
+
+The robust approach combines both:
+
+$$
+|a - b| < \max(\varepsilon_{\text{abs}}, \; \varepsilon_{\text{rel}} \cdot \max(|a|, |b|))
+$$
+
+In practice, engine code often uses a fixed tolerance tuned to the application — collision detection might use $10^{-4}$ meters, while a dot-product-based angle test might use $10^{-6}$. The key insight is that the tolerance is a property of the physical quantity being compared, not a universal constant.
+
+### Normalization of Near-Zero Vectors
+
+Normalizing a vector $\mathbf{v}$ requires dividing by $\|\mathbf{v}\|$. When $\|\mathbf{v}\|$ is very small, this division amplifies any error in the components. When $\|\mathbf{v}\| = 0$, the operation is undefined. Engine code must handle this:
+
+```rust
+fn safe_normalize(v: Vec3) -> Option<Vec3> {
+    let len_sq = v.dot(v);
+    if len_sq < 1e-12 {
+        None  // Too short to normalize meaningfully
+    } else {
+        Some(v / len_sq.sqrt())
+    }
+}
+```
+
+The threshold should be the square of the smallest meaningful length for the application. For a surface normal, this is related to the smallest triangle area the engine will process. For a velocity, it might be the smallest movement the physics system will consider non-stationary.
+
+::: {.callout-warning appearance="simple" title="Normalization Drift"}
+
+Vectors that are normalized once and then transformed repeatedly (by rotation, interpolation, or accumulated operations) will drift away from unit length. The drift is small per operation but accumulates over many frames. Re-normalize after any chain of operations that must produce a unit vector. Quaternion drift has the same character and the same remedy.
+
+:::
+
+### Special Values: NaN, Infinity, and Denormals
+
+IEEE 754 defines special values that engine code must handle defensively:
+
+- **NaN** (Not a Number) results from operations like $0/0$, $\sqrt{-1}$, or $\infty - \infty$. NaN is not equal to anything, including itself: `(x != x)` is the canonical NaN test. NaN propagates through arithmetic — any operation involving NaN produces NaN — so a single NaN in a transform matrix will corrupt every vertex it touches.
+- **Infinity** ($\pm\infty$) results from overflow or division by zero. Unlike NaN, infinity compares normally ($\infty > x$ for any finite $x$) and participates in arithmetic ($\infty + 1 = \infty$, $1 / \infty = 0$).
+- **Denormals** (subnormal numbers) are very small values near the underflow boundary. They preserve the property that $a \neq b \implies a - b \neq 0$, but operations on denormals can be 10–100× slower on some hardware. Engines sometimes flush denormals to zero for performance (`_MM_SET_FLUSH_ZERO_MODE` on x86).
+
+The engine-level defense is to validate inputs at system boundaries, produce meaningful defaults or errors when invalid values are detected, and use debug-mode assertions to catch NaN propagation early.
+
+
+## Matrices and Linear Transformations
+
+A **linear transformation** is a function $T : \mathbb{R}^n \to \mathbb{R}^m$ that preserves addition and scalar multiplication:
+
+$$
+T(\mathbf{a} + \mathbf{b}) = T(\mathbf{a}) + T(\mathbf{b}), \qquad T(s \, \mathbf{a}) = s \, T(\mathbf{a})
+$$
+
+Every linear transformation can be represented as multiplication by a matrix. A matrix $\mathbf{M}$ of size $m \times n$ maps vectors in $\mathbb{R}^n$ to vectors in $\mathbb{R}^m$:
+
+$$
+\mathbf{v}' = \mathbf{M} \, \mathbf{v}
+$$
+
+For game engines working in three dimensions, the matrices of interest are $3 \times 3$ (linear transforms: rotation, scale, shear) and $4 \times 4$ (affine and projective transforms via homogeneous coordinates).
+
+### Matrix Multiplication
+
+The product of two matrices $\mathbf{A}$ ($m \times n$) and $\mathbf{B}$ ($n \times p$) is a matrix $\mathbf{C}$ ($m \times p$) where:
+
+$$
+C_{ij} = \sum_{k=1}^{n} A_{ik} \, B_{kj}
+$$
+
+Matrix multiplication is **associative** ($\mathbf{A}(\mathbf{B}\mathbf{C}) = (\mathbf{A}\mathbf{B})\mathbf{C}$) but **not commutative** ($\mathbf{A}\mathbf{B} \neq \mathbf{B}\mathbf{A}$ in general). In a game engine, this means the order in which transforms are composed matters: scaling then rotating produces a different result than rotating then scaling.
+
+The **identity matrix** $\mathbf{I}$ has ones on the diagonal and zeros elsewhere; $\mathbf{I} \, \mathbf{v} = \mathbf{v}$ for all $\mathbf{v}$.
+
+The **inverse** $\mathbf{M}^{-1}$, when it exists, satisfies $\mathbf{M}^{-1} \mathbf{M} = \mathbf{M} \, \mathbf{M}^{-1} = \mathbf{I}$. Not all matrices are invertible; a matrix is invertible if and only if its determinant is non-zero. Geometrically, a non-invertible matrix collapses at least one dimension to zero (e.g., a scale of zero along one axis).
+
+The **transpose** $\mathbf{M}^\top$ is obtained by swapping rows and columns: $(M^\top)_{ij} = M_{ji}$. An **orthogonal matrix** $\mathbf{Q}$ satisfies $\mathbf{Q}^\top \mathbf{Q} = \mathbf{I}$, which means its inverse is simply its transpose. Rotation matrices are orthogonal — this is why inverting a rotation is cheap.
+
+### The Determinant
+
+The **determinant** of a square matrix is a scalar that encodes the signed volume scaling of the transformation. For a $3 \times 3$ matrix:
+
+$$
+\det(\mathbf{M}) = M_{00}(M_{11}M_{22} - M_{12}M_{21}) - M_{01}(M_{10}M_{22} - M_{12}M_{20}) + M_{02}(M_{10}M_{21} - M_{11}M_{20})
+$$
+
+Key properties:
+
+- $|\det(\mathbf{M})|$ is the factor by which the transformation scales volumes.
+- $\det(\mathbf{M}) > 0$ preserves orientation (handedness); $\det(\mathbf{M}) < 0$ reverses it (a reflection).
+- $\det(\mathbf{M}) = 0$ means the transformation is singular (non-invertible) — it collapses space to a lower dimension.
+- $\det(\mathbf{A}\mathbf{B}) = \det(\mathbf{A}) \cdot \det(\mathbf{B})$.
+- For a rotation matrix, $\det(\mathbf{R}) = 1$.
+
+### Common 3D Transformations as Matrices
+
+**Scaling** by factors $(s_x, s_y, s_z)$:
+
+$$
+\mathbf{S} = \begin{pmatrix} s_x & 0 & 0 \\ 0 & s_y & 0 \\ 0 & 0 & s_z \end{pmatrix}
+$$
+
+Uniform scaling ($s_x = s_y = s_z$) preserves angles and relative proportions. Non-uniform scaling distorts the object and requires special handling of normals (see below).
+
+**Rotation about the $x$-axis** by angle $\theta$:
+
+$$
+\mathbf{R}_x(\theta) = \begin{pmatrix} 1 & 0 & 0 \\ 0 & \cos\theta & -\sin\theta \\ 0 & \sin\theta & \cos\theta \end{pmatrix}
+$$
+
+**Rotation about the $y$-axis:**
+
+$$
+\mathbf{R}_y(\theta) = \begin{pmatrix} \cos\theta & 0 & \sin\theta \\ 0 & 1 & 0 \\ -\sin\theta & 0 & \cos\theta \end{pmatrix}
+$$
+
+**Rotation about the $z$-axis:**
+
+$$
+\mathbf{R}_z(\theta) = \begin{pmatrix} \cos\theta & -\sin\theta & 0 \\ \sin\theta & \cos\theta & 0 \\ 0 & 0 & 1 \end{pmatrix}
+$$
+
+All rotation matrices are orthogonal ($\mathbf{R}^\top = \mathbf{R}^{-1}$) and have determinant 1.
+
+**Rotation about an arbitrary axis** $\hat{\mathbf{n}}$ by angle $\theta$ is given by the Rodrigues rotation formula:
+
+$$
+\mathbf{R}(\hat{\mathbf{n}}, \theta) = \cos\theta \, \mathbf{I} + (1 - \cos\theta) \, \hat{\mathbf{n}} \hat{\mathbf{n}}^\top + \sin\theta \, [\hat{\mathbf{n}}]_\times
+$$
+
+where $[\hat{\mathbf{n}}]_\times$ is the **skew-symmetric matrix** of $\hat{\mathbf{n}}$:
+
+$$
+[\hat{\mathbf{n}}]_\times = \begin{pmatrix} 0 & -n_z & n_y \\ n_z & 0 & -n_x \\ -n_y & n_x & 0 \end{pmatrix}
+$$
+
+This matrix has the property that $[\hat{\mathbf{n}}]_\times \, \mathbf{v} = \hat{\mathbf{n}} \times \mathbf{v}$, converting the cross product into a matrix multiplication.
+
+
+## Homogeneous Coordinates and Affine Transforms
+
+A linear transformation maps the origin to the origin. Translation — moving every point by a fixed displacement — is not a linear transformation in $\mathbb{R}^3$: it does not satisfy $T(\mathbf{0}) = \mathbf{0}$. **Affine transformations** combine linear transformations with translation:
+
+$$
+\mathbf{v}' = \mathbf{M} \, \mathbf{v} + \mathbf{t}
+$$
+
+where $\mathbf{M}$ is a $3 \times 3$ matrix and $\mathbf{t}$ is a translation vector. Affine transforms preserve parallelism and ratios of distances along lines, but not angles or lengths (unless $\mathbf{M}$ is orthogonal).
+
+The inconvenience of the separate $+\mathbf{t}$ term is that affine transforms do not compose by simple matrix multiplication. **Homogeneous coordinates** solve this by embedding $\mathbb{R}^3$ into $\mathbb{R}^4$. A point $P = (x, y, z)$ becomes $(x, y, z, 1)$, and a direction $\mathbf{d} = (d_x, d_y, d_z)$ becomes $(d_x, d_y, d_z, 0)$. The affine transform becomes a $4 \times 4$ matrix:
+
+$$
+\begin{pmatrix} x' \\ y' \\ z' \\ 1 \end{pmatrix}
+= \begin{pmatrix}
+  M_{00} & M_{01} & M_{02} & t_x \\
+  M_{10} & M_{11} & M_{12} & t_y \\
+  M_{20} & M_{21} & M_{22} & t_z \\
+  0 & 0 & 0 & 1
+\end{pmatrix}
+\begin{pmatrix} x \\ y \\ z \\ 1 \end{pmatrix}
+$$
+
+For a direction vector with $w = 0$, the translation column has no effect — exactly the correct behavior, since directions should not be translated.
+
+The $4 \times 4$ form allows affine transforms to compose by ordinary matrix multiplication:
+
+$$
+\mathbf{T}_{\text{combined}} = \mathbf{T}_2 \cdot \mathbf{T}_1
+$$
+
+applies $\mathbf{T}_1$ first, then $\mathbf{T}_2$. This composition order — rightmost matrix applied first — is a convention that holds for column-vector notation ($\mathbf{M}\mathbf{v}$). Row-vector engines ($\mathbf{v}\mathbf{M}$) use the opposite convention. Mixing the two is a pervasive source of bugs when porting shader code or integrating middleware.
+
+### Coordinate Spaces in an Engine
+
+A game engine maintains a hierarchy of coordinate spaces. Each space is defined by an origin and a set of basis vectors. Transforming between spaces is the core operation of the rendering pipeline.
+
+**Object space** (or local space, model space): the coordinate system in which a mesh was authored. The origin is typically at the object's pivot point. Vertex positions in a mesh file are in object space.
+
+**World space:** the global coordinate system of the simulation. Each object's **model matrix** $\mathbf{M}$ transforms from object space to world space. For hierarchical objects (a wheel attached to a car), the model matrix is the product of the parent chain: $\mathbf{M}_{\text{wheel}} = \mathbf{M}_{\text{car}} \cdot \mathbf{M}_{\text{wheel-local}}$.
+
+**View space** (or camera space, eye space): the coordinate system centered at the camera, with the camera looking down one axis (typically $-z$ in right-handed systems or $+z$ in left-handed). The **view matrix** $\mathbf{V}$ transforms from world space to view space. It is the inverse of the camera's model matrix.
+
+**Clip space:** the coordinate system after projection. The **projection matrix** $\mathbf{P}$ transforms from view space to clip space. In clip space, the visible volume is a canonical cube (or cuboid), and the GPU's clipping hardware discards primitives outside it.
+
+**Normalized device coordinates (NDC):** obtained from clip space by the perspective divide — dividing each component by $w$:
+
+$$
+\begin{pmatrix} x_{\text{ndc}} \\ y_{\text{ndc}} \\ z_{\text{ndc}} \end{pmatrix}
+= \begin{pmatrix} x_{\text{clip}} / w_{\text{clip}} \\ y_{\text{clip}} / w_{\text{clip}} \\ z_{\text{clip}} / w_{\text{clip}} \end{pmatrix}
+$$
+
+After the perspective divide, visible geometry maps to $[-1, 1]$ in $x$ and $y$ (in most APIs). The $z$ range depends on the API and depth convention: OpenGL traditionally uses $[-1, 1]$, while Vulkan, Metal, DirectX, and `wgpu` use $[0, 1]$.
+
+**Screen space:** the final 2D pixel coordinates, obtained from NDC by the viewport transform. The origin and axis orientation depend on the API — `wgpu` places the origin at the top-left, with $y$ increasing downward.
+
+The full vertex transformation pipeline is:
+
+$$
+\mathbf{v}_{\text{clip}} = \mathbf{P} \cdot \mathbf{V} \cdot \mathbf{M} \cdot \mathbf{v}_{\text{object}}
+$$
+
+These three matrices are typically precomputed as the **model-view-projection** matrix $\mathbf{MVP} = \mathbf{P} \cdot \mathbf{V} \cdot \mathbf{M}$ and passed to the vertex shader as a uniform.
+
+### Transforming Normals
+
+Surface normals do not transform the same way as positions or tangent vectors. If a model matrix $\mathbf{M}$ includes non-uniform scaling, applying $\mathbf{M}$ to a normal will produce a vector that is no longer perpendicular to the surface.
+
+The correct transformation for normals is the **inverse transpose** of the upper-left $3 \times 3$ part of $\mathbf{M}$:
+
+$$
+\mathbf{n}' = (\mathbf{M}^{-1})^\top \, \mathbf{n}
+$$
+
+The proof: if $\mathbf{t}$ is a tangent vector on the surface, then $\mathbf{n} \cdot \mathbf{t} = 0$ by definition. After transformation, we need $\mathbf{n}' \cdot \mathbf{t}' = 0$, where $\mathbf{t}' = \mathbf{M} \, \mathbf{t}$. Using the identity $\mathbf{n}' \cdot \mathbf{t}' = (\mathbf{n}')^\top \mathbf{M} \, \mathbf{t}$, the requirement is that $(\mathbf{n}')^\top \mathbf{M} = \mathbf{n}^\top$, giving $\mathbf{n}' = (\mathbf{M}^{-1})^\top \mathbf{n}$.
+
+For pure rotations (orthogonal $\mathbf{M}$), the inverse transpose is $\mathbf{M}$ itself, so normals transform the same way as tangent vectors. For uniform scaling, the inverse transpose differs by a scalar factor that normalization removes. The inverse transpose is only distinctly necessary when the transformation includes non-uniform scaling or shear.
+
+
+## Rotations and Orientation
+
+Representing orientation — the rotational state of an object — is one of the most frequently discussed topics in game-engine mathematics. Three representations are in common use, each with distinct trade-offs.
+
+### Euler Angles
+
+**Euler angles** represent an orientation as three successive rotations about the coordinate axes: typically yaw (rotation about $y$), pitch (rotation about $x$), and roll (rotation about $z$), though the axis order varies by convention. The orientation is:
+
+$$
+\mathbf{R} = \mathbf{R}_y(\text{yaw}) \cdot \mathbf{R}_x(\text{pitch}) \cdot \mathbf{R}_z(\text{roll})
+$$
+
+Euler angles are intuitive for humans — yaw, pitch, and roll correspond to natural descriptions of aircraft orientation — and they are compact (three scalars). They are the preferred representation for user-facing editor controls and serialization where readability matters.
+
+Their serious disadvantage is **gimbal lock**: when the pitch approaches $\pm 90°$, the yaw and roll axes align, and one degree of freedom is lost. Mathematically, the mapping from Euler angles to rotation matrices is not injective near the singularity — many different Euler angle triples map to the same rotation — and small changes in orientation require discontinuous jumps in the angle values. This makes Euler angles unsuitable for smooth interpolation and for any system (physics, animation, camera) that must represent arbitrary orientations without singularities.
+
+### Rotation Matrices
+
+A $3 \times 3$ rotation matrix $\mathbf{R}$ represents orientation unambiguously and without gimbal lock. It is orthogonal ($\mathbf{R}^\top \mathbf{R} = \mathbf{I}$) and has determinant 1. Composing rotations is a matrix multiplication. Inverting a rotation is a transpose. Transforming a vector is a matrix-vector multiply.
+
+The cost is storage (9 floats, of which only 3 are independent) and drift: after many multiplications, accumulated floating-point error causes the matrix to deviate from orthogonality. Re-orthogonalization (typically by Gram-Schmidt or by extracting and reconstructing from a quaternion) is needed periodically.
+
+### Quaternions
+
+A **quaternion** is a four-component extension of the complex numbers:
+
+$$
+q = w + x\mathbf{i} + y\mathbf{j} + z\mathbf{k}
+$$
+
+where $\mathbf{i}^2 = \mathbf{j}^2 = \mathbf{k}^2 = \mathbf{i}\mathbf{j}\mathbf{k} = -1$. The multiplication rules follow from these definitions:
+
+$$
+\mathbf{i}\mathbf{j} = \mathbf{k}, \quad \mathbf{j}\mathbf{k} = \mathbf{i}, \quad \mathbf{k}\mathbf{i} = \mathbf{j}
+$$
+
+$$
+\mathbf{j}\mathbf{i} = -\mathbf{k}, \quad \mathbf{k}\mathbf{j} = -\mathbf{i}, \quad \mathbf{i}\mathbf{k} = -\mathbf{j}
+$$
+
+A **unit quaternion** ($\|q\| = \sqrt{w^2 + x^2 + y^2 + z^2} = 1$) represents a rotation. The relationship to axis-angle is direct: a rotation of angle $\theta$ about unit axis $\hat{\mathbf{n}}$ is:
+
+$$
+q = \cos\frac{\theta}{2} + \sin\frac{\theta}{2} \, (n_x \mathbf{i} + n_y \mathbf{j} + n_z \mathbf{k})
+$$
+
+or equivalently $q = (\cos\frac{\theta}{2}, \; \sin\frac{\theta}{2} \, \hat{\mathbf{n}})$.
+
+To rotate a vector $\mathbf{v}$ by quaternion $q$, embed $\mathbf{v}$ as a pure quaternion $p = (0, \mathbf{v})$ and compute:
+
+$$
+p' = q \, p \, q^{-1}
+$$
+
+For unit quaternions, $q^{-1} = q^* = (w, -x, -y, -z)$ (the conjugate), so inversion is trivial.
+
+**Quaternion multiplication** composes rotations:
+
+$$
+q_1 q_2 = \begin{pmatrix}
+  w_1 w_2 - \mathbf{v}_1 \cdot \mathbf{v}_2 \\
+  w_1 \mathbf{v}_2 + w_2 \mathbf{v}_1 + \mathbf{v}_1 \times \mathbf{v}_2
+\end{pmatrix}
+$$
+
+where $\mathbf{v}_1 = (x_1, y_1, z_1)$ and $\mathbf{v}_2 = (x_2, y_2, z_2)$ are the vector parts.
+
+**Advantages of quaternions over rotation matrices:**
+
+1. **Compact:** 4 floats instead of 9 (or 16 in $4 \times 4$ form).
+2. **Smooth interpolation:** Spherical linear interpolation (SLERP) produces a constant-angular-velocity path with no gimbal lock.
+3. **Easy normalization:** Renormalizing a quaternion ($q / \|q\|$) is cheaper and more numerically stable than re-orthogonalizing a $3 \times 3$ matrix.
+4. **No gimbal lock:** The quaternion representation is singularity-free.
+5. **Efficient composition:** Quaternion multiplication is 16 multiplies and 12 additions, versus 27 multiplies and 18 additions for $3 \times 3$ matrix multiplication.
+
+**The double-cover issue:** Quaternions $q$ and $-q$ represent the same rotation. This is because $(-q) \, p \, (-q)^{-1} = q \, p \, q^{-1}$. Interpolation algorithms must account for this by checking the sign of $q_1 \cdot q_2$ (quaternion dot product) and negating one quaternion if the dot product is negative, ensuring the interpolation takes the short path around the rotation space.
+
+**Conversion between representations.** A quaternion $q = (w, x, y, z)$ converts to a $3 \times 3$ rotation matrix:
+
+$$
+\mathbf{R} = \begin{pmatrix}
+  1 - 2(y^2 + z^2) & 2(xy - wz) & 2(xz + wy) \\
+  2(xy + wz) & 1 - 2(x^2 + z^2) & 2(yz - wx) \\
+  2(xz - wy) & 2(yz + wx) & 1 - 2(x^2 + y^2)
+\end{pmatrix}
+$$
+
+Extracting a quaternion from a rotation matrix is also possible but requires care to avoid numerical instability when the trace is near $-1$ (the Shepperd method selects the largest diagonal element to maximize numerical stability).
+
+### Interpolating Rotations
+
+Smooth rotation interpolation is essential for animation, camera systems, and physics. The two standard methods for quaternion interpolation are:
+
+**SLERP** (Spherical Linear Interpolation) traces a great-circle arc on the unit quaternion sphere:
+
+$$
+\text{slerp}(q_0, q_1, t) = \frac{\sin((1-t)\Omega)}{\sin\Omega} \, q_0 + \frac{\sin(t\Omega)}{\sin\Omega} \, q_1
+$$
+
+where $\Omega = \cos^{-1}(q_0 \cdot q_1)$ is the angle between the quaternions. SLERP produces constant angular velocity — the rotation speed is uniform across the interpolation — which is geometrically correct but requires trigonometric functions.
+
+**NLERP** (Normalized Linear Interpolation) is the cheaper alternative:
+
+$$
+\text{nlerp}(q_0, q_1, t) = \frac{(1-t) \, q_0 + t \, q_1}{\|(1-t) \, q_0 + t \, q_1\|}
+$$
+
+NLERP linearly interpolates the components and renormalizes. It does not produce constant angular velocity — the rotation accelerates in the middle and decelerates at the ends — but the deviation is small for small angles, and the computational cost is significantly lower. For many engine applications (blending nearby animation poses, smooth camera transitions over small angles), NLERP is sufficient and preferred.
+
+::: {.callout-note appearance="simple" title="When to Use Each Rotation Representation"}
+
+- **Euler angles:** User-facing editor controls, serialized configuration, and compact display. Convert to quaternion or matrix immediately for computation.
+- **Quaternions:** Runtime orientation storage, interpolation, animation blending, physics angular state. The default choice for runtime rotation representation.
+- **Rotation matrices:** The vertex shader's transform, constructing view and projection matrices, and anywhere matrix composition is the natural expression.
+
+:::
+
+### Handedness and Convention
+
+A coordinate system's **handedness** (right-handed or left-handed) determines the direction of the cross product and the positive rotation direction. In a right-handed system, $\mathbf{e}_x \times \mathbf{e}_y = \mathbf{e}_z$; in a left-handed system, $\mathbf{e}_x \times \mathbf{e}_y = -\mathbf{e}_z$.
+
+Engines do not agree on handedness, nor on which axis is "up," nor on whether matrices are stored row-major or column-major, nor on whether the projection maps to $z \in [-1, 1]$ or $z \in [0, 1]$, nor on whether positive $z$ points into the screen or out of it. These are all conventions — the mathematics is the same — but mixing conventions between an engine, a modeling tool, a shader, and a physics library is a reliable source of reflected geometry, inverted normals, and mirrored textures.
+
+The defense is to document conventions explicitly at each system boundary and to convert at the boundary rather than pushing convention knowledge into every consumer. The engine should have exactly one canonical convention, and every import path (model loader, texture loader, physics bridge) should convert to that convention on the way in.
+
+
+## Projection and Depth
+
+The projection matrix transforms from three-dimensional view space to two-dimensional screen imagery by way of clip space. Two projection types are standard.
+
+### Perspective Projection
+
+**Perspective projection** simulates the way the human eye (or a camera lens) perceives depth: objects farther from the camera appear smaller. The projection is defined by a vertical field of view $\text{fov}_y$, an aspect ratio $a = w/h$, and near and far clip planes $n$ and $f$.
+
+The perspective projection matrix (for column vectors, with $z_{\text{NDC}} \in [0, 1]$ as used by `wgpu`, Vulkan, Metal, and DirectX) is:
+
+$$
+\mathbf{P}_{\text{persp}} = \begin{pmatrix}
+  \frac{1}{a \tan(\text{fov}_y / 2)} & 0 & 0 & 0 \\
+  0 & \frac{1}{\tan(\text{fov}_y / 2)} & 0 & 0 \\
+  0 & 0 & \frac{f}{n - f} & \frac{n f}{n - f} \\
+  0 & 0 & -1 & 0
+\end{pmatrix}
+$$
+
+The $-1$ in the fourth row copies $-z_{\text{view}}$ into $w_{\text{clip}}$, so the perspective divide ($x_{\text{ndc}} = x_{\text{clip}} / w_{\text{clip}}$) produces the foreshortening effect: coordinates are divided by depth, making distant objects smaller.
+
+### Orthographic Projection
+
+**Orthographic projection** preserves parallel lines and does not foreshorten. It is used for 2D games, UI rendering, shadow mapping, and engineering visualization. The projection maps a rectangular box (defined by left, right, bottom, top, near, far) to the canonical NDC cube:
+
+$$
+\mathbf{P}_{\text{ortho}} = \begin{pmatrix}
+  \frac{2}{r - l} & 0 & 0 & -\frac{r + l}{r - l} \\
+  0 & \frac{2}{t - b} & 0 & -\frac{t + b}{t - b} \\
+  0 & 0 & \frac{1}{n - f} & \frac{n}{n - f} \\
+  0 & 0 & 0 & 1
+\end{pmatrix}
+$$
+
+The fourth row is $(0, 0, 0, 1)$ — there is no perspective divide. Parallel lines remain parallel, and size is independent of distance.
+
+### Depth Precision and Reverse Depth
+
+The standard (non-reversed) perspective projection maps depth non-linearly: most of the precision is concentrated near the near plane, and the far plane receives very little. For $z_{\text{view}} \in [n, f]$, the relationship between view-space depth and NDC depth is approximately:
+
+$$
+z_{\text{ndc}} \approx \frac{f}{f - n} \left(1 - \frac{n}{z_{\text{view}}}\right)
+$$
+
+This is nearly hyperbolic. If $n = 0.1$ and $f = 10000$, roughly half the depth buffer precision covers the range $[0.1, 0.2]$, and the range $[5000, 10000]$ receives a tiny fraction of a percent. Z-fighting — visible flickering where two surfaces compete for the same depth value — is the predictable result at distance.
+
+**Reverse depth** maps the near plane to $z_{\text{ndc}} = 1$ and the far plane to $z_{\text{ndc}} = 0$, inverting the non-linearity. The near plane, which still gets the most precision, is now at the high end of the depth range, and the far plane is at the low end. Combined with a floating-point depth buffer (which has more precision near zero), the two non-linearities partially cancel, producing a much more uniform distribution of effective depth precision across the entire range.
+
+The reverse-depth perspective matrix replaces the standard depth mapping:
+
+$$
+\mathbf{P}_{\text{rev}} = \begin{pmatrix}
+  \frac{1}{a \tan(\text{fov}_y / 2)} & 0 & 0 & 0 \\
+  0 & \frac{1}{\tan(\text{fov}_y / 2)} & 0 & 0 \\
+  0 & 0 & \frac{n}{f - n} & \frac{n f}{f - n} \\
+  0 & 0 & -1 & 0
+\end{pmatrix}
+$$
+
+With reverse depth, the depth test must be changed from "less" to "greater" (or "greater-equal"), and the depth buffer should be cleared to 0.0 instead of 1.0. The far plane can even be pushed to infinity ($f \to \infty$), simplifying the matrix and eliminating the far-clip artifact entirely — an **infinite reverse-depth** projection:
+
+$$
+\mathbf{P}_{\text{inf-rev}} = \begin{pmatrix}
+  \frac{1}{a \tan(\text{fov}_y / 2)} & 0 & 0 & 0 \\
+  0 & \frac{1}{\tan(\text{fov}_y / 2)} & 0 & 0 \\
+  0 & 0 & 0 & n \\
+  0 & 0 & -1 & 0
+\end{pmatrix}
+$$
+
+Reverse depth is now the industry standard for any engine that cares about depth precision. Chapters 12 and 14 discuss the practical implications for the render graph and visibility systems.
+
+::: {.callout-note appearance="simple" title="API Depth Conventions"}
+
+- **`wgpu` / Vulkan / Metal / DirectX 12:** NDC depth range $[0, 1]$, $y$-axis up in NDC, clip-space origin at center. `wgpu` additionally places the framebuffer origin at top-left.
+- **OpenGL (legacy):** NDC depth range $[-1, 1]$, $y$-axis up. This range wastes precision compared to $[0, 1]$.
+
+When writing cross-API math, parameterize the projection matrix on the target depth range and $y$-direction rather than embedding a single convention.
+
+:::
+
+
+## Geometric Primitives and Intersection Tests
+
+Engine subsystems — collision, visibility, picking, raycasting, physics — operate on geometric primitives: rays, planes, spheres, boxes, and triangles. Each primitive is defined by a compact set of parameters, and the intersection tests between them form a vocabulary that appears throughout the codebase.
+
+### Rays
+
+A **ray** is a half-line defined by an origin point $\mathbf{o}$ and a unit direction $\hat{\mathbf{d}}$:
+
+$$
+\mathbf{r}(t) = \mathbf{o} + t \, \hat{\mathbf{d}}, \quad t \geq 0
+$$
+
+The parameter $t$ is the distance along the ray. Negative $t$ values represent points behind the origin and are usually excluded. Raycasting — finding the nearest intersection of a ray with scene geometry — is used for mouse picking, line-of-sight tests, bullet trajectories, and spatial queries.
+
+### Planes
+
+A **plane** is defined by a normal $\hat{\mathbf{n}}$ and a signed distance $d$ from the origin:
+
+$$
+\hat{\mathbf{n}} \cdot \mathbf{p} + d = 0
+$$
+
+for all points $\mathbf{p}$ on the plane. The signed distance from an arbitrary point $\mathbf{q}$ to the plane is:
+
+$$
+\text{dist}(\mathbf{q}) = \hat{\mathbf{n}} \cdot \mathbf{q} + d
+$$
+
+Positive values indicate the half-space on the normal side; negative values indicate the opposite side. This half-space classification is the foundation of frustum culling: an object whose bounding volume is entirely in the negative half-space of any frustum plane is invisible.
+
+**Ray–plane intersection.** Substituting the ray equation into the plane equation:
+
+$$
+\hat{\mathbf{n}} \cdot (\mathbf{o} + t \, \hat{\mathbf{d}}) + d = 0 \implies t = -\frac{\hat{\mathbf{n}} \cdot \mathbf{o} + d}{\hat{\mathbf{n}} \cdot \hat{\mathbf{d}}}
+$$
+
+If $\hat{\mathbf{n}} \cdot \hat{\mathbf{d}} = 0$, the ray is parallel to the plane (no intersection, or the ray lies in the plane). If $t < 0$, the intersection is behind the ray origin.
+
+### Spheres
+
+A **sphere** is defined by a center $\mathbf{c}$ and a radius $r$. A point $\mathbf{p}$ is on the sphere if $\|\mathbf{p} - \mathbf{c}\| = r$, or equivalently $\|\mathbf{p} - \mathbf{c}\|^2 = r^2$.
+
+**Ray–sphere intersection.** Let $\mathbf{m} = \mathbf{o} - \mathbf{c}$. Substituting the ray equation:
+
+$$
+\|\mathbf{m} + t \, \hat{\mathbf{d}}\|^2 = r^2
+$$
+
+Expanding: $t^2 (\hat{\mathbf{d}} \cdot \hat{\mathbf{d}}) + 2t (\mathbf{m} \cdot \hat{\mathbf{d}}) + (\mathbf{m} \cdot \mathbf{m} - r^2) = 0$.
+
+Since $\hat{\mathbf{d}}$ is a unit vector, $\hat{\mathbf{d}} \cdot \hat{\mathbf{d}} = 1$. Let $b = \mathbf{m} \cdot \hat{\mathbf{d}}$ and $c = \mathbf{m} \cdot \mathbf{m} - r^2$. The discriminant is $\Delta = b^2 - c$:
+
+- $\Delta < 0$: no intersection (the ray misses the sphere).
+- $\Delta = 0$: tangent intersection (one point).
+- $\Delta > 0$: two intersection points at $t = -b \pm \sqrt{\Delta}$. The nearest positive $t$ is the entry point.
+
+**Sphere–sphere intersection.** Two spheres with centers $\mathbf{c}_1$, $\mathbf{c}_2$ and radii $r_1$, $r_2$ intersect if and only if $\|\mathbf{c}_1 - \mathbf{c}_2\| \leq r_1 + r_2$, or equivalently $\|\mathbf{c}_1 - \mathbf{c}_2\|^2 \leq (r_1 + r_2)^2$ (avoiding the square root).
+
+### Axis-Aligned Bounding Boxes
+
+An **axis-aligned bounding box** (AABB) is defined by minimum and maximum corner points $\mathbf{p}_{\min}$ and $\mathbf{p}_{\max}$:
+
+$$
+\text{AABB} = \{ \mathbf{p} : p_{\min,x} \leq p_x \leq p_{\max,x} \;\land\; p_{\min,y} \leq p_y \leq p_{\max,y} \;\land\; p_{\min,z} \leq p_z \leq p_{\max,z} \}
+$$
+
+AABBs are the workhorse bounding volume of spatial acceleration structures (BVH, octree, grid). They are cheap to test, cheap to merge (the union of two AABBs is component-wise min and max), and naturally aligned to the coordinate axes that spatial data structures partition.
+
+**AABB–AABB intersection.** Two AABBs overlap if and only if they overlap on all three axes:
+
+$$
+(a_{\min,x} \leq b_{\max,x}) \;\land\; (a_{\max,x} \geq b_{\min,x}) \;\land\; \cdots \text{(same for } y, z \text{)}
+$$
+
+This is a separating-axis test: if any axis shows a gap, the boxes do not intersect.
+
+**Ray–AABB intersection** (the slab method). For each axis $i$, compute the entry and exit $t$ values:
+
+$$
+t_{\min,i} = \frac{p_{\min,i} - o_i}{d_i}, \qquad t_{\max,i} = \frac{p_{\max,i} - o_i}{d_i}
+$$
+
+If $d_i < 0$, swap $t_{\min,i}$ and $t_{\max,i}$. The ray enters the box at $t_{\text{enter}} = \max(t_{\min,x}, t_{\min,y}, t_{\min,z})$ and exits at $t_{\text{exit}} = \min(t_{\max,x}, t_{\max,y}, t_{\max,z})$. The ray intersects the box if and only if $t_{\text{enter}} \leq t_{\text{exit}}$ and $t_{\text{exit}} \geq 0$.
+
+When $d_i = 0$ (ray parallel to a slab), the ray misses if $o_i < p_{\min,i}$ or $o_i > p_{\max,i}$; otherwise the slab does not constrain the intersection.
+
+### Oriented Bounding Boxes
+
+An **oriented bounding box** (OBB) is an AABB that has been rotated to align with the object's local axes rather than the world axes. It is defined by a center $\mathbf{c}$, three unit axis vectors $\hat{\mathbf{u}}_0, \hat{\mathbf{u}}_1, \hat{\mathbf{u}}_2$, and three half-extents $e_0, e_1, e_2$.
+
+OBBs provide a tighter fit than AABBs for elongated or rotated objects, but their intersection tests are more expensive. The **separating axis theorem** (SAT) states that two convex shapes do not overlap if and only if there exists an axis along which their projections are disjoint. For two OBBs, the potential separating axes are: the 3 axes of each box (6 total) and the 9 cross products of one box's axes with the other's, giving 15 axes to test.
+
+### Triangles and Barycentric Coordinates
+
+A triangle $\triangle P_0 P_1 P_2$ is the fundamental rendering primitive. Any point $\mathbf{p}$ in the plane of the triangle can be expressed in **barycentric coordinates** $(u, v, w)$:
+
+$$
+\mathbf{p} = u \, P_0 + v \, P_1 + w \, P_2, \quad u + v + w = 1
+$$
+
+Since $w = 1 - u - v$, only two coordinates are independent:
+
+$$
+\mathbf{p} = P_0 + u \, (P_1 - P_0) + v \, (P_2 - P_0) = P_0 + u \, \mathbf{e}_1 + v \, \mathbf{e}_2
+$$
+
+A point is inside the triangle if and only if $u \geq 0$, $v \geq 0$, and $u + v \leq 1$.
+
+Barycentric coordinates are used for:
+
+- **Attribute interpolation:** Vertex colors, texture coordinates, normals, and any other per-vertex attribute are interpolated across the triangle face using the barycentric coordinates of each fragment. This is the interpolation the rasterizer performs for every pixel.
+- **Ray–triangle intersection:** The Möller–Trumbore algorithm simultaneously solves for the ray parameter $t$ and the barycentric coordinates $(u, v)$, giving both the intersection distance and the surface parameterization in a single system of equations.
+
+**The Möller–Trumbore intersection test.** Given ray $\mathbf{r}(t) = \mathbf{o} + t\hat{\mathbf{d}}$ and triangle $(P_0, P_1, P_2)$:
+
+$$
+\mathbf{o} + t \, \hat{\mathbf{d}} = P_0 + u \, \mathbf{e}_1 + v \, \mathbf{e}_2
+$$
+
+This is a linear system in $(t, u, v)$. Using Cramer's rule with $\mathbf{T} = \mathbf{o} - P_0$:
+
+$$
+\begin{pmatrix} t \\ u \\ v \end{pmatrix}
+= \frac{1}{\hat{\mathbf{d}} \cdot (\mathbf{e}_1 \times \mathbf{e}_2)}
+\begin{pmatrix}
+  \mathbf{T} \cdot (\mathbf{e}_1 \times \mathbf{e}_2) \\
+  \hat{\mathbf{d}} \cdot (\mathbf{T} \times \mathbf{e}_2) \\
+  \hat{\mathbf{d}} \cdot (\mathbf{e}_1 \times \mathbf{T})
+\end{pmatrix}
+$$
+
+By rewriting as $\mathbf{h} = \hat{\mathbf{d}} \times \mathbf{e}_2$ and $\mathbf{q} = \mathbf{T} \times \mathbf{e}_1$, many intermediate products can be reused. The denominator $\hat{\mathbf{d}} \cdot (\mathbf{e}_1 \times \mathbf{e}_2) = \hat{\mathbf{d}} \cdot \hat{\mathbf{n}} \, \|\mathbf{e}_1 \times \mathbf{e}_2\|$ is zero when the ray is parallel to the triangle plane (no intersection). The test validates $t > 0$, $u \geq 0$, $v \geq 0$, and $u + v \leq 1$, with early-out at each stage.
+
+### The Frustum
+
+A **view frustum** is the truncated pyramid (for perspective) or rectangular box (for orthographic) that defines the visible volume of the camera. It is bounded by six planes: near, far, left, right, top, and bottom. Each plane's normal points inward (into the visible region).
+
+**Frustum–AABB culling** tests each bounding box against the six planes. If the box is entirely in the negative half-space of any plane, it is fully outside the frustum and can be culled. If it is in the positive half-space of all six planes, it is fully inside. Otherwise, it straddles one or more planes and must be processed further (clipped or drawn).
+
+The test for a single plane reduces to checking whether the "most positive" corner of the AABB (the corner whose projection onto the plane normal is greatest) is in the negative half-space. This is the **n-vertex/p-vertex** test: compute the corner of the AABB that is farthest along the normal direction and test its signed distance.
+
+
+## Interpolation and Curves
+
+Interpolation — computing values between known samples — is pervasive in engine code. Animation, physics integration, camera motion, LOD blending, and temporal reconstruction all depend on correct interpolation.
+
+### Linear Interpolation
+
+**Linear interpolation** (lerp) between two values $a$ and $b$ at parameter $t \in [0, 1]$:
+
+$$
+\text{lerp}(a, b, t) = (1 - t) \, a + t \, b = a + t \, (b - a)
+$$
+
+The two forms are algebraically equivalent but differ numerically. The first form, $(1 - t) \, a + t \, b$, guarantees that $\text{lerp}(a, b, 0) = a$ and $\text{lerp}(a, b, 1) = b$ exactly (no floating-point error at the endpoints). The second form, $a + t(b - a)$, is susceptible to cancellation when $a$ and $b$ are close — but it uses one fewer multiply and is the standard GPU implementation.
+
+Linear interpolation works component-wise for vectors: $\text{lerp}(\mathbf{a}, \mathbf{b}, t) = (1 - t) \mathbf{a} + t \mathbf{b}$. For rotations, linear interpolation of Euler angles or quaternion components produces distortions; use SLERP or NLERP instead.
+
+**Inverse lerp** recovers the parameter $t$ from a value $v$ and the endpoints:
+
+$$
+t = \frac{v - a}{b - a}
+$$
+
+This is used for remapping: to map a value from range $[a, b]$ to range $[c, d]$, compute $t = (v - a) / (b - a)$ and then $\text{lerp}(c, d, t)$.
+
+### Bilinear and Trilinear Interpolation
+
+**Bilinear interpolation** interpolates on a 2D grid. Given four corner values $f_{00}$, $f_{10}$, $f_{01}$, $f_{11}$ at positions $(0,0)$, $(1,0)$, $(0,1)$, $(1,1)$, the interpolated value at $(s, t)$ is:
+
+$$
+f(s, t) = (1-s)(1-t) f_{00} + s(1-t) f_{10} + (1-s)t \, f_{01} + s \, t \, f_{11}
+$$
+
+This is two nested linear interpolations: first along one axis, then along the other. The result is not truly "linear" — it contains a $st$ cross-term — which is why bilinearly filtered textures show a characteristic diamond pattern on diagonal gradients.
+
+**Trilinear interpolation** extends to 3D: interpolate bilinearly on two parallel faces of a cube, then linearly between them. This is used for 3D texture sampling and voxel data interpolation.
+
+### Smooth Interpolation
+
+Linear interpolation changes direction abruptly at its endpoints. For smooth motion, a transition function with zero derivative at $t = 0$ and $t = 1$ is preferred.
+
+**Smoothstep** is a polynomial hermite interpolation that produces a smooth (continuously differentiable) transition:
+
+$$
+\text{smoothstep}(t) = 3t^2 - 2t^3
+$$
+
+The derivative is $6t(1 - t)$, which is zero at both endpoints. Smoothstep is widely used in shaders for soft transitions between states: shadow penumbras, fog falloff, and UI element fades.
+
+**Smootherstep** (due to Ken Perlin) has zero first and second derivatives at the endpoints, producing an even smoother transition:
+
+$$
+\text{smootherstep}(t) = 6t^5 - 15t^4 + 10t^3
+$$
+
+### Hermite and Bézier Curves
+
+When more control over the shape of a curve is needed, **cubic Hermite splines** and **Bézier curves** provide parametric paths through space.
+
+A **cubic Hermite spline** segment is defined by two endpoints $P_0$, $P_1$ and two tangent vectors $\mathbf{m}_0$, $\mathbf{m}_1$:
+
+$$
+\mathbf{p}(t) = (2t^3 - 3t^2 + 1) P_0 + (t^3 - 2t^2 + t) \mathbf{m}_0 + (-2t^3 + 3t^2) P_1 + (t^3 - t^2) \mathbf{m}_1
+$$
+
+The four polynomials in $t$ are the **Hermite basis functions**. They ensure that $\mathbf{p}(0) = P_0$, $\mathbf{p}(1) = P_1$, $\mathbf{p}'(0) = \mathbf{m}_0$, and $\mathbf{p}'(1) = \mathbf{m}_1$.
+
+A **Catmull-Rom spline** is a special case of the cubic Hermite spline where the tangent at each control point is derived from the neighboring points:
+
+$$
+\mathbf{m}_i = \frac{P_{i+1} - P_{i-1}}{2}
+$$
+
+This produces a curve that passes through all control points with a "natural" tangent, making it popular for camera paths and animation curves.
+
+A **cubic Bézier curve** is defined by four control points $P_0$, $P_1$, $P_2$, $P_3$:
+
+$$
+\mathbf{p}(t) = (1-t)^3 P_0 + 3(1-t)^2 t \, P_1 + 3(1-t) t^2 P_2 + t^3 P_3
+$$
+
+The curve passes through $P_0$ and $P_3$ (the endpoints), is tangent to $P_1 - P_0$ at $t = 0$ and to $P_3 - P_2$ at $t = 1$, and lies within the convex hull of the four control points. Bézier curves are the standard representation for vector graphics, font outlines, and editor-authored animation curves (the animation curve editor in most game engines edits cubic Bézier segments).
+
+### Temporal Sampling and Integration
+
+Game engines sample continuous physical processes at discrete time steps. The accuracy and stability of the simulation depend on how the time integration is performed.
+
+**Euler integration** is the simplest method. Given position $\mathbf{x}$, velocity $\mathbf{v}$, and acceleration $\mathbf{a}$:
+
+$$
+\mathbf{v}(t + \Delta t) = \mathbf{v}(t) + \mathbf{a}(t) \, \Delta t
+$$
+$$
+\mathbf{x}(t + \Delta t) = \mathbf{x}(t) + \mathbf{v}(t) \, \Delta t
+$$
+
+This is a first-order method: the error per step is $O(\Delta t^2)$, and the accumulated error over a fixed time interval is $O(\Delta t)$. Euler integration is simple but can be unstable — for stiff systems or oscillatory motion, energy may grow without bound, causing the simulation to "explode."
+
+**Semi-implicit Euler** (symplectic Euler) updates velocity first, then uses the updated velocity for the position:
+
+$$
+\mathbf{v}(t + \Delta t) = \mathbf{v}(t) + \mathbf{a}(t) \, \Delta t
+$$
+$$
+\mathbf{x}(t + \Delta t) = \mathbf{x}(t) + \mathbf{v}(t + \Delta t) \, \Delta t
+$$
+
+This is still first-order, but it is **symplectic** — it conserves a modified energy that stays close to the true energy, preventing the runaway growth that plagues explicit Euler. Semi-implicit Euler is the most common integrator in game physics for this reason.
+
+**Verlet integration** eliminates the velocity variable entirely:
+
+$$
+\mathbf{x}(t + \Delta t) = 2 \mathbf{x}(t) - \mathbf{x}(t - \Delta t) + \mathbf{a}(t) \, \Delta t^2
+$$
+
+This is second-order accurate and symplectic. Velocity, when needed, is recovered as $\mathbf{v}(t) \approx (\mathbf{x}(t + \Delta t) - \mathbf{x}(t - \Delta t)) / (2\Delta t)$. Verlet is popular for particle simulations and cloth physics because constraints can be enforced by directly modifying positions.
+
+**Runge-Kutta 4** (RK4) evaluates the derivative at four points within each step:
+
+$$
+\mathbf{k}_1 = f(t, \mathbf{y}), \quad
+\mathbf{k}_2 = f(t + \tfrac{\Delta t}{2}, \mathbf{y} + \tfrac{\Delta t}{2} \mathbf{k}_1)
+$$
+$$
+\mathbf{k}_3 = f(t + \tfrac{\Delta t}{2}, \mathbf{y} + \tfrac{\Delta t}{2} \mathbf{k}_2), \quad
+\mathbf{k}_4 = f(t + \Delta t, \mathbf{y} + \Delta t \, \mathbf{k}_3)
+$$
+$$
+\mathbf{y}(t + \Delta t) = \mathbf{y}(t) + \frac{\Delta t}{6} (\mathbf{k}_1 + 2\mathbf{k}_2 + 2\mathbf{k}_3 + \mathbf{k}_4)
+$$
+
+RK4 is fourth-order accurate ($O(\Delta t^5)$ error per step), making it far more precise than Euler for the same step size. However, it is not symplectic — it does not conserve energy in Hamiltonian systems — and it costs four derivative evaluations per step. It is used when accuracy matters more than energy conservation: orbital mechanics, fluid simulations, and high-fidelity vehicle dynamics.
+
+::: {.callout-note appearance="simple" title="Fixed versus Variable Time Steps"}
+
+The choice of integration method is entangled with the choice of time step policy. A fixed time step (e.g., 1/60 second for physics) makes the simulation deterministic and simplifies stability analysis. A variable time step (tied to the frame rate) adapts to performance but makes the simulation depend on frame rate, which can cause different behavior on different hardware. The standard approach is to decouple simulation from rendering: run physics at a fixed step, accumulate real time, and interpolate the visual state between the last two physics states. Chapter 4 discusses this in detail.
+
+:::
+
+
+## Probability, Noise, and Procedural Generation
+
+Procedural content — terrain, vegetation placement, texture variation, particle behavior, loot tables — depends on controlled randomness. The mathematical foundation is probability theory, and the engineering constraint is reproducibility.
+
+### Random Variables and Distributions
+
+A **random variable** $X$ maps outcomes of a random process to numerical values. A **probability distribution** describes the likelihood of each value.
+
+**Uniform distribution** $U(a, b)$: every value in $[a, b]$ is equally likely. The probability density function (PDF) is $f(x) = 1/(b - a)$ for $x \in [a, b]$ and zero elsewhere. Uniform random numbers are the raw material from which other distributions are constructed.
+
+**Normal (Gaussian) distribution** $N(\mu, \sigma^2)$: values cluster around the mean $\mu$ with standard deviation $\sigma$. The PDF is:
+
+$$
+f(x) = \frac{1}{\sigma\sqrt{2\pi}} \exp\left(-\frac{(x - \mu)^2}{2\sigma^2}\right)
+$$
+
+The normal distribution appears in noise generation, randomized AI behavior, and any process that arises from the sum of many small independent effects (by the central limit theorem).
+
+**Poisson distribution** $\text{Pois}(\lambda)$: models the number of events in a fixed interval, given that events occur at a constant average rate $\lambda$. Used for particle emission, spawn timing, and event scheduling.
+
+**Exponential distribution** $\text{Exp}(\lambda)$: models the time between events in a Poisson process. If events arrive at rate $\lambda$, the time to the next event is $\text{Exp}(\lambda)$ with PDF $f(t) = \lambda e^{-\lambda t}$.
+
+### Pseudo-Random Number Generation
+
+A **pseudo-random number generator** (PRNG) is a deterministic algorithm that produces a sequence of numbers that approximates the statistical properties of true randomness. Given the same **seed** (initial state), a PRNG produces exactly the same sequence — this is the property that makes procedural generation reproducible.
+
+Key properties of a PRNG for game use:
+
+- **Period:** The length of the sequence before it repeats. Modern PRNGs (xoshiro256++, PCG) have periods of $2^{128}$ or more.
+- **Statistical quality:** The output should pass standard randomness tests (TestU01, PractRand). Poor generators (e.g., the classic linear congruential generator with poor constants) produce visible patterns in spatial distributions.
+- **Speed:** The generator is called millions of times per frame in particle systems and procedural generation.
+- **Seekability:** Some generators (SplitMix, PCG) support efficient jumping to arbitrary points in the sequence, which is useful for parallelism.
+- **Independence:** For parallel procedural generation (multiple threads generating terrain chunks), each thread needs a stream that is statistically independent. Hash-based seeding (hashing the chunk coordinates to produce a per-chunk seed) is the standard approach.
+
+### Noise Functions
+
+**Noise functions** produce spatially coherent pseudo-random values: the output varies smoothly over space rather than being independently random at each point. They are the basis of procedural textures, terrain heightmaps, and natural-looking variation.
+
+**Perlin noise** (1985) is the original gradient noise algorithm. At each integer lattice point, a pseudo-random gradient vector is assigned. The noise value at a point $\mathbf{p}$ is computed by:
+
+1. Finding the integer cell containing $\mathbf{p}$.
+2. Computing the dot product of each corner's gradient with the displacement from that corner to $\mathbf{p}$.
+3. Interpolating the dot products using the smootherstep function.
+
+The result is a smooth, continuous function with zero value at integer coordinates and zero mean overall.
+
+**Simplex noise** (Perlin, 2001) replaces the hypercubic lattice with a simplicial lattice (equilateral triangles in 2D, tetrahedra in 3D), reducing the number of corners to evaluate from $2^n$ to $n + 1$ in $n$ dimensions. This makes simplex noise computationally cheaper in higher dimensions and reduces directional artifacts.
+
+**Worley noise** (cellular noise) computes the distance to the nearest of a set of randomly distributed feature points. It produces cell-like patterns (Voronoi diagrams) useful for stone, scales, cracked earth, and biological textures.
+
+### Fractal Brownian Motion
+
+A single octave of noise is too smooth for natural phenomena. **Fractal Brownian motion** (fBm) sums multiple octaves of noise at increasing frequency and decreasing amplitude:
+
+$$
+\text{fBm}(\mathbf{p}) = \sum_{i=0}^{N-1} A^i \cdot \text{noise}(F^i \cdot \mathbf{p})
+$$
+
+where $A < 1$ is the **persistence** (amplitude ratio between octaves), $F > 1$ is the **lacunarity** (frequency ratio), and $N$ is the number of octaves. The result has detail at multiple scales, mimicking the self-similar structure of mountains, clouds, and coastlines.
+
+Each octave doubles the computational cost, so the number of octaves is a quality-versus-performance trade-off. Distant terrain might use 4 octaves; nearby terrain might use 8 or more.
+
+### Poisson-Disk Sampling
+
+A common procedural task is placing objects — trees, rocks, grass clumps — so that they appear natural: neither perfectly regular nor clumped into clusters. **Poisson-disk sampling** produces a set of points where no two points are closer than a minimum distance $r$, while otherwise filling the domain as densely as possible. The result has a blue-noise spectral profile: high-frequency energy is suppressed, producing a distribution that looks random to the eye but avoids the distracting patterns of both uniform grids and pure random placement.
+
+The classic algorithm is **dart throwing**: repeatedly generate a random candidate point, accept it if it is at least $r$ from every existing sample, reject it otherwise. This is simple but slow — the acceptance rate drops as the domain fills, making the expected cost superlinear.
+
+**Bridson's algorithm** (2007) produces a Poisson-disk distribution in $O(n)$ time for $n$ output samples. It works by maintaining an active list of samples and generating candidates in the annular region $[r, 2r]$ around each active sample. A background grid with cell size $r / \sqrt{d}$ (where $d$ is the dimensionality) provides $O(1)$ distance checks. The algorithm:
+
+1. Place an initial sample at a random location. Add it to the active list and the grid.
+2. While the active list is non-empty, pick a random active sample $\mathbf{s}$.
+3. Generate $k$ candidates uniformly in the annulus $[r, 2r]$ around $\mathbf{s}$ (typically $k = 30$).
+4. For each candidate, check the grid cells within radius $r$. If no existing sample is closer than $r$, accept the candidate as a new sample.
+5. If all $k$ candidates are rejected, remove $\mathbf{s}$ from the active list (the neighborhood is full).
+
+For vegetation and object scattering, Poisson-disk sampling is often combined with **density maps**: the minimum distance $r$ varies spatially based on a texture or noise function, producing denser placement in forests and sparser placement in clearings. The variant is sometimes called **variable-density Poisson-disk sampling**.
+
+**Jittered grid sampling** is a cheaper approximation: divide the domain into cells and place one sample at a random position within each cell. This guarantees a minimum distance (no sample can be closer than the inter-cell gap) but does not achieve the full blue-noise quality. It is useful when performance matters more than distribution quality.
+
+### Deterministic Reproducibility
+
+Procedural content in a networked game or a game with replays must produce identical results on every machine and every run. This requires:
+
+1. **Identical seeds.** The seed (or the hash inputs that produce per-chunk seeds) must be shared between client and server, or between replay recorder and player.
+2. **Identical PRNG algorithm.** Different implementations of "rand()" produce different sequences. The game must use a specific, portable PRNG, not the platform's default.
+3. **Identical evaluation order.** If thread A and thread B both draw from the same PRNG, the sequence depends on scheduling. Each thread should have its own PRNG stream, seeded deterministically from the shared state.
+4. **Identical floating-point behavior.** Different compilers, optimization levels, and hardware can produce different floating-point results for the same computation. Strict IEEE 754 compliance, avoiding fast-math optimizations on critical paths, and using integer or fixed-point arithmetic for simulation state are common mitigations.
+
+::: {.callout-warning appearance="simple" title="Reproducibility versus Performance"}
+
+The strictest reproducibility (bit-identical results across platforms) conflicts with performance optimizations like auto-vectorization, fused multiply-add (FMA), and fast reciprocal square root. The engine must decide which subsystems require strict reproducibility (physics, netcode, replays) and which can tolerate platform-dependent variation (visual effects, audio spatialization). Mixing the two without clear boundaries is a source of desyncs that are extremely difficult to diagnose.
+
+:::
+
+
+## The Rendering Equation and Physically-Based Shading
+
+The mathematics of realistic image synthesis begins with a single integral equation. Every modern physically-based renderer — whether it evaluates the equation with rasterization, ray tracing, or a hybrid — is an approximation strategy for this integral.
+
+### The Rendering Equation
+
+Kajiya's **rendering equation** (1986) describes the total outgoing radiance $L_o$ from a surface point $\mathbf{p}$ in direction $\boldsymbol{\omega}_o$:
+
+$$
+L_o(\mathbf{p}, \boldsymbol{\omega}_o) = L_e(\mathbf{p}, \boldsymbol{\omega}_o) + \int_{\Omega} f_r(\mathbf{p}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \, L_i(\mathbf{p}, \boldsymbol{\omega}_i) \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i) \, d\boldsymbol{\omega}_i
+$$
+
+where:
+
+- $L_e$ is the emitted radiance (non-zero only for light sources and emissive surfaces).
+- $\Omega$ is the hemisphere of incoming directions above the surface at $\mathbf{p}$.
+- $f_r$ is the **bidirectional reflectance distribution function** (BRDF), describing how the surface scatters light from incoming direction $\boldsymbol{\omega}_i$ to outgoing direction $\boldsymbol{\omega}_o$.
+- $L_i$ is the incoming radiance from direction $\boldsymbol{\omega}_i$ — which is itself the outgoing radiance from some other surface point, making the equation recursive.
+- $\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i = \cos\theta_i$ is the cosine foreshortening factor: light arriving at a grazing angle illuminates a larger area and therefore contributes less radiance per unit solid angle.
+
+The integral is over the hemisphere of directions $\Omega$, measured in **solid angle** (steradians). A full hemisphere subtends $2\pi$ steradians.
+
+**Radiance** $L$ is the fundamental radiometric quantity: power per unit solid angle per unit projected area, measured in $\text{W} \cdot \text{sr}^{-1} \cdot \text{m}^{-2}$. It is constant along a ray in vacuum (no participating media), which is why ray tracing works: the radiance arriving at the camera from a pixel's direction equals the radiance leaving the first surface the ray hits.
+
+**Irradiance** $E$ is the total incoming power per unit area at a surface point, obtained by integrating incoming radiance over the hemisphere:
+
+$$
+E(\mathbf{p}) = \int_{\Omega} L_i(\mathbf{p}, \boldsymbol{\omega}_i) \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i) \, d\boldsymbol{\omega}_i
+$$
+
+A directional light with radiance $L$ arriving from direction $\boldsymbol{\omega}_l$ contributes irradiance $E = L \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_l)$ — which is why the Lambertian $\cos\theta$ term appears in every diffuse lighting calculation.
+
+### The BRDF
+
+The **BRDF** $f_r(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ is the ratio of outgoing radiance to incoming irradiance. It has units of $\text{sr}^{-1}$. A physically valid BRDF must satisfy two constraints:
+
+1. **Helmholtz reciprocity:** $f_r(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) = f_r(\boldsymbol{\omega}_o, \boldsymbol{\omega}_i)$. Swapping the incoming and outgoing directions does not change the BRDF value. This is a consequence of time-reversal symmetry of light transport.
+
+2. **Energy conservation:** The total reflected energy cannot exceed the incoming energy:
+
+$$
+\int_{\Omega} f_r(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_o) \, d\boldsymbol{\omega}_o \leq 1 \quad \text{for all } \boldsymbol{\omega}_i
+$$
+
+**Lambertian diffuse** is the simplest BRDF: $f_r = \rho / \pi$, where $\rho \in [0, 1]$ is the albedo (diffuse reflectance). The $1/\pi$ factor normalizes the energy: integrating a constant BRDF $c$ over the cosine-weighted hemisphere gives $c\pi$, so $c = \rho / \pi$ ensures the integral equals $\rho$.
+
+### The Cook-Torrance Microfacet Model
+
+The industry-standard specular BRDF for real-time PBR is the **Cook-Torrance microfacet model**:
+
+$$
+f_r^{\text{spec}}(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) = \frac{D(\mathbf{h}) \; F(\boldsymbol{\omega}_o, \mathbf{h}) \; G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)}{4 \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i)(\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_o)}
+$$
+
+where $\mathbf{h} = \frac{\boldsymbol{\omega}_i + \boldsymbol{\omega}_o}{\|\boldsymbol{\omega}_i + \boldsymbol{\omega}_o\|}$ is the **half vector** (the microfacet normal that would reflect $\boldsymbol{\omega}_i$ into $\boldsymbol{\omega}_o$).
+
+The three terms are:
+
+**$D(\mathbf{h})$ — Normal Distribution Function (NDF).** The fraction of microfacets whose normal aligns with $\mathbf{h}$. The **GGX** (Trowbridge-Reitz) distribution is the modern standard:
+
+$$
+D_{\text{GGX}}(\mathbf{h}) = \frac{\alpha^2}{\pi \, ((\hat{\mathbf{n}} \cdot \mathbf{h})^2 (\alpha^2 - 1) + 1)^2}
+$$
+
+where $\alpha$ is the roughness parameter (the square of the perceptual roughness that artists author). At $\alpha = 0$ the distribution is a delta function (perfect mirror); at $\alpha = 1$ it approaches a cosine lobe. GGX has a longer tail than the older Beckmann distribution, producing specular highlights with a natural falloff that better matches real materials.
+
+**$F(\boldsymbol{\omega}_o, \mathbf{h})$ — Fresnel reflectance.** The fraction of light reflected versus refracted at the surface, as a function of the angle between the view direction and the surface normal. The **Schlick approximation** is used universally in real-time rendering:
+
+$$
+F_{\text{Schlick}}(\cos\theta) = F_0 + (1 - F_0)(1 - \cos\theta)^5
+$$
+
+where $F_0$ is the reflectance at normal incidence (head-on viewing angle) and $\cos\theta = \boldsymbol{\omega}_o \cdot \mathbf{h}$. For dielectrics (non-metals), $F_0$ is typically 0.02–0.05. For metals, $F_0$ is the metal's color (metals reflect colored light even at normal incidence). The Fresnel effect is why surfaces become more reflective at grazing angles — water, floors, car paint all show this.
+
+**$G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ — Geometry function.** Accounts for microfacet self-shadowing (incoming light blocked by other microfacets) and self-masking (reflected light blocked on its way out). The **Smith-GGX** geometry function splits into two one-directional terms:
+
+$$
+G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) = G_1(\boldsymbol{\omega}_i) \cdot G_1(\boldsymbol{\omega}_o)
+$$
+
+where:
+
+$$
+G_1(\boldsymbol{\omega}) = \frac{2 \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega})}{(\hat{\mathbf{n}} \cdot \boldsymbol{\omega}) + \sqrt{\alpha^2 + (1 - \alpha^2)(\hat{\mathbf{n}} \cdot \boldsymbol{\omega})^2}}
+$$
+
+The $4 \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i)(\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_o)$ denominator in the Cook-Torrance equation normalizes the BRDF so that $D \cdot G / (4 \cos\theta_i \cos\theta_o)$ integrates correctly over the hemisphere.
+
+The full PBR shading model used in most engines combines Lambertian diffuse with Cook-Torrance specular, weighted by the metallic parameter $m$:
+
+$$
+f_r = (1 - m)(1 - F) \frac{\rho}{\pi} + f_r^{\text{spec}}
+$$
+
+Metals have no diffuse component ($m = 1$); dielectrics have both ($m = 0$). The $(1 - F)$ factor ensures energy conservation: light that is Fresnel-reflected is not also diffusely scattered.
+
+### Image-Based Lighting and the Split-Sum Approximation
+
+For environment lighting (sky, reflections from distant geometry), the rendering equation integral cannot be evaluated per-light because the light comes from all directions in a cubemap. The **split-sum approximation** (Karis, 2013) factors the integral into two precomputed parts:
+
+$$
+L_o^{\text{spec}} \approx \left(\int_{\Omega} L_i(\boldsymbol{\omega}_i) \, D(\mathbf{h}) \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i) \, d\boldsymbol{\omega}_i\right) \cdot \left(\int_{\Omega} f_r^{\text{spec}} \, (\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_i) \, d\boldsymbol{\omega}_i\right)
+$$
+
+The first factor is a **prefiltered environment map**: the cubemap convolved with the GGX distribution at each roughness level, stored as a mip chain (rougher surfaces sample coarser mips). The second factor is a **BRDF look-up table** (LUT): a 2D texture indexed by $(\hat{\mathbf{n}} \cdot \boldsymbol{\omega}_o, \alpha)$ that stores the scale and bias to apply to $F_0$. At runtime, the specular IBL evaluation is a single texture sample from the prefiltered cubemap plus a single sample from the BRDF LUT — two texture fetches instead of a hemisphere integral.
+
+
+## Spherical Harmonics
+
+**Spherical harmonics** (SH) are a set of orthonormal basis functions defined on the surface of the unit sphere. They serve the same purpose for functions on the sphere that Fourier series serve for periodic functions on the line: any square-integrable function on the sphere can be decomposed into a sum of SH basis functions, and a finite number of terms gives a smooth, band-limited approximation.
+
+In a game engine, SH are used to represent low-frequency directional signals compactly: irradiance from the sky, ambient lighting at probe locations, and the directional distribution of indirect illumination.
+
+### Definition
+
+The real spherical harmonics of degree $l$ and order $m$ (where $-l \leq m \leq l$) are defined in terms of the associated Legendre polynomials and trigonometric functions of the spherical coordinates $(\theta, \phi)$:
+
+$$
+Y_l^m(\theta, \phi) = \begin{cases}
+  \sqrt{2} \, K_l^m \cos(m\phi) \, P_l^m(\cos\theta), & m > 0 \\
+  K_l^0 \, P_l^0(\cos\theta), & m = 0 \\
+  \sqrt{2} \, K_l^{|m|} \sin(|m|\phi) \, P_l^{|m|}(\cos\theta), & m < 0
+\end{cases}
+$$
+
+where $K_l^m$ is a normalization constant and $P_l^m$ is the associated Legendre polynomial of degree $l$ and order $m$.
+
+The first few bands, written in Cartesian coordinates $(\hat{\mathbf{n}} = (x, y, z)$ on the unit sphere), are:
+
+**Band 0** (1 coefficient — constant):
+$$
+Y_0^0 = \frac{1}{2\sqrt{\pi}}
+$$
+
+**Band 1** (3 coefficients — linear, representing direction):
+$$
+Y_1^{-1} = \frac{\sqrt{3}}{2\sqrt{\pi}} y, \quad
+Y_1^{0} = \frac{\sqrt{3}}{2\sqrt{\pi}} z, \quad
+Y_1^{1} = \frac{\sqrt{3}}{2\sqrt{\pi}} x
+$$
+
+**Band 2** (5 coefficients — quadratic):
+$$
+Y_2^{-2} = \frac{\sqrt{15}}{2\sqrt{\pi}} xy, \quad
+Y_2^{-1} = \frac{\sqrt{15}}{2\sqrt{\pi}} yz, \quad
+Y_2^{0} = \frac{\sqrt{5}}{4\sqrt{\pi}} (3z^2 - 1)
+$$
+$$
+Y_2^{1} = \frac{\sqrt{15}}{2\sqrt{\pi}} xz, \quad
+Y_2^{2} = \frac{\sqrt{15}}{4\sqrt{\pi}} (x^2 - y^2)
+$$
+
+### Projection and Reconstruction
+
+To represent a spherical function $f(\boldsymbol{\omega})$ in the SH basis, we **project** it by computing the coefficients:
+
+$$
+c_l^m = \int_{\mathcal{S}^2} f(\boldsymbol{\omega}) \, Y_l^m(\boldsymbol{\omega}) \, d\boldsymbol{\omega}
+$$
+
+The function is then **reconstructed** (approximately, if truncated) by:
+
+$$
+f(\boldsymbol{\omega}) \approx \sum_{l=0}^{L} \sum_{m=-l}^{l} c_l^m \, Y_l^m(\boldsymbol{\omega})
+$$
+
+For a band-$L$ representation, the total number of coefficients is $(L+1)^2$. Game engines almost universally use **order 3** (bands 0, 1, 2), giving $3^2 = 9$ coefficients — hence the notation **SH9**. For an RGB signal, this means $9 \times 3 = 27$ floats to represent the directional distribution of light color at a point.
+
+### Why SH for Irradiance
+
+The key property that makes SH ideal for irradiance is the **convolution theorem on the sphere**: convolution of a spherical function with a rotationally symmetric kernel becomes simple multiplication of the SH coefficients. The irradiance at a surface point is the convolution of the incoming radiance with the cosine lobe $\max(0, \cos\theta)$. The cosine lobe has most of its energy in bands 0 and 1, and is nearly zero beyond band 2. This means:
+
+1. An order-3 SH representation of the incoming radiance, convolved with the cosine kernel, captures over 99% of the diffuse irradiance.
+2. The convolution is a per-coefficient multiply by the precomputed cosine-lobe SH coefficients — no integral needed at runtime.
+
+The result: **9 coefficients per color channel capture the irradiance from an arbitrary environment with less than 1% error.** This is why SH probes are the standard technique for ambient and indirect diffuse lighting.
+
+### Rotation of SH
+
+SH coefficients can be rotated to account for a change of reference frame. Each band rotates independently: the $2l + 1$ coefficients of band $l$ are multiplied by a $(2l+1) \times (2l+1)$ rotation matrix derived from the 3D rotation. Band 0 (constant) is invariant under rotation. Band 1 (3 coefficients) rotates with the same $3 \times 3$ matrix as a 3D vector. Band 2 (5 coefficients) requires a $5 \times 5$ rotation matrix. This property makes it inexpensive to re-orient SH probes when they are placed in world space.
+
+::: {.callout-note appearance="simple" title="SH Limitations"}
+
+SH represent low-frequency signals well but cannot capture sharp directional features (hard shadows, specular highlights, narrow light sources). Higher bands can represent higher-frequency detail, but the cost grows quadratically with the order, and ringing artifacts (negative lobes) appear when a sharp signal is truncated. For specular or high-frequency directional information, prefiltered cubemaps or other representations are more appropriate.
+
+:::
+
+
+## Color Spaces and Tone Mapping
+
+A game engine operates on numerical color values from pixel authoring through shading to final display. The relationship between these numbers and the colors a human perceives depends on the **color space** — the mapping between numerical triples and visible colors — and the **transfer function** — the non-linear encoding that accounts for human perceptual sensitivity.
+
+### Linear and sRGB Color
+
+**Linear color space** is the space in which lighting arithmetic is physically correct. In linear space, doubling the numerical value doubles the physical intensity. All shading, blending, and compositing must happen in linear space; otherwise, operations like interpolation and addition produce incorrect results (dark bands, washed-out blends, wrong energy ratios).
+
+**sRGB** is the standard display color space. It applies a non-linear **gamma curve** that compresses bright values and expands dark values, matching the human eye's greater sensitivity to differences in dark tones. The approximate sRGB transfer function is:
+
+$$
+C_{\text{sRGB}} \approx \begin{cases}
+  12.92 \, C_{\text{linear}}, & C_{\text{linear}} \leq 0.0031308 \\
+  1.055 \, C_{\text{linear}}^{1/2.4} - 0.055, & C_{\text{linear}} > 0.0031308
+\end{cases}
+$$
+
+The inverse (sRGB to linear) is:
+
+$$
+C_{\text{linear}} \approx \begin{cases}
+  C_{\text{sRGB}} / 12.92, & C_{\text{sRGB}} \leq 0.04045 \\
+  \left(\frac{C_{\text{sRGB}} + 0.055}{1.055}\right)^{2.4}, & C_{\text{sRGB}} > 0.04045
+\end{cases}
+$$
+
+A simplified approximation, $C_{\text{linear}} \approx C_{\text{sRGB}}^{2.2}$, is often used when the exact piecewise function is too expensive. The GPU performs sRGB conversion automatically when reading from `Rgba8UnormSrgb` textures (converting to linear on read) and when writing to sRGB render targets (converting back on write).
+
+The critical rule: **author textures in sRGB (because monitors display sRGB), but perform all arithmetic in linear space.** Albedo textures are sRGB-encoded; normal maps, roughness maps, and metallic maps contain linear data and must use non-sRGB formats.
+
+### High Dynamic Range and Luminance
+
+Real-world scenes have a dynamic range far exceeding what a display can reproduce. Sunlit outdoor scenes span roughly 10 orders of magnitude from deep shadow to the solar disk. An HDR renderer maintains the full range during shading using floating-point render targets (`Rgba16Float` or `R11G11B10Float`) and compresses the result to display range only at the final post-processing step.
+
+**Luminance** is the perceptual brightness of a color. For linear RGB, the luminance approximation is:
+
+$$
+Y = 0.2126 \, R + 0.7152 \, G + 0.0722 \, B
+$$
+
+These coefficients reflect the human eye's spectral sensitivity (the green channel contributes most to perceived brightness). Luminance is used for auto-exposure metering, bloom thresholding, and desaturation effects.
+
+### Exposure
+
+**Exposure** controls how much light reaches the final image, analogous to a camera's aperture and shutter. The engine's auto-exposure system measures scene luminance (typically via a histogram of log-luminance values) and adjusts the exposure multiplier so that the average scene brightness falls in a comfortable range.
+
+**Exposure value** (EV) is a logarithmic scale: each unit increase in EV halves the amount of light. The relationship between EV and the linear exposure multiplier $e$ is:
+
+$$
+e = \frac{1}{2^{\text{EV}}}
+$$
+
+An auto-exposure system computes the average log-luminance $\bar{L}$ of the frame (clipping outliers at configurable percentile boundaries), derives a target EV, and smoothly adapts toward it with asymmetric speeds: dark adaptation is slower than bright adaptation, matching human perception and preventing jarring brightness changes.
+
+### Tone Mapping
+
+**Tone mapping** is the process of compressing HDR radiance values to the displayable $[0, 1]$ range. A good tone mapping operator preserves contrast in the mid-tones, rolls off highlights smoothly, and maintains color fidelity.
+
+The **ACES filmic curve** (Academy Color Encoding System) is the industry standard. A simplified form used in real-time rendering is:
+
+$$
+T(x) = \frac{x(ax + b)}{x(cx + d) + e}
+$$
+
+where $a$, $b$, $c$, $d$, $e$ are fitted constants that approximate the ACES reference rendering transform (RRT) followed by the output device transform (ODT). The ACES curve compresses highlights gracefully, preserves saturation in mid-tones, and gives a "cinematic" look that has become expected in modern games.
+
+**Reinhard** tone mapping is a simpler alternative: $T(x) = x / (1 + x)$. It preserves the ratio between luminance values but tends to desaturate highlights and lacks the characteristic shoulder of the ACES curve.
+
+### Octahedral Normal Encoding
+
+Storing world-space normals in the GBuffer naively requires three components ($x$, $y$, $z$), but since normals are unit vectors ($x^2 + y^2 + z^2 = 1$), only two independent values are needed. **Octahedral encoding** is a bijective mapping from the unit sphere to the unit square $[0, 1]^2$ that can be stored in two channels of a render target.
+
+The mapping works by projecting the sphere onto a regular octahedron (whose faces are the eight octants) and then folding the lower hemisphere onto the same $[0, 1]^2$ square as the upper hemisphere:
+
+**Encoding** (unit normal to octahedral coordinates):
+
+1. Project to the octahedron: $\mathbf{p} = \mathbf{n} / (|n_x| + |n_y| + |n_z|)$.
+2. If $n_z < 0$ (lower hemisphere), fold: $p_x \leftarrow (1 - |p_y|) \cdot \text{sign}(p_x)$, $p_y \leftarrow (1 - |p_x|) \cdot \text{sign}(p_y)$.
+3. Map from $[-1, 1]$ to $[0, 1]$: $u = p_x \cdot 0.5 + 0.5$, $v = p_y \cdot 0.5 + 0.5$.
+
+**Decoding** (octahedral coordinates back to unit normal):
+
+1. Map from $[0, 1]$ to $[-1, 1]$: $p_x = u \cdot 2 - 1$, $p_y = v \cdot 2 - 1$.
+2. Recover $z$: $n_z = 1 - |p_x| - |p_y|$.
+3. If $n_z < 0$ (lower hemisphere), unfold: $n_x = (1 - |p_y|) \cdot \text{sign}(p_x)$, $n_y = (1 - |p_x|) \cdot \text{sign}(p_y)$; otherwise $n_x = p_x$, $n_y = p_y$.
+4. Normalize: $\hat{\mathbf{n}} = (n_x, n_y, n_z) / \|(n_x, n_y, n_z)\|$.
+
+Octahedral encoding preserves precision more uniformly across the sphere than alternatives like spherical coordinates (which distort at the poles) and is cheaper to encode and decode than spheremap or stereographic projections. With `Rg16Float` or `Rg16Snorm` storage, 16 bits per channel is sufficient for sub-degree angular precision.
+
+
+## Participating Media and Volumetric Rendering
+
+Volumetric effects — fog, clouds, god rays, smoke — require modeling the interaction of light with a medium that is not a surface but a volume. The mathematics of **participating media** describes how light is absorbed, scattered, and emitted as it travels through such a volume.
+
+### The Beer-Lambert Law
+
+The **Beer-Lambert law** describes the exponential attenuation of light traveling through a homogeneous absorbing medium. If light with intensity $L_0$ enters a medium with constant **extinction coefficient** $\sigma_t$ (the probability of a photon being absorbed or scattered per unit distance), the intensity after traveling distance $d$ is:
+
+$$
+L(d) = L_0 \, e^{-\sigma_t \, d}
+$$
+
+The quantity $T(d) = e^{-\sigma_t \, d}$ is the **transmittance** — the fraction of light that survives the journey. For a non-homogeneous medium (where $\sigma_t$ varies with position along the ray), the transmittance generalizes to:
+
+$$
+T(a, b) = \exp\left(-\int_a^b \sigma_t(\mathbf{r}(t)) \, dt\right)
+$$
+
+The integral $\int_a^b \sigma_t \, dt$ is the **optical depth** (or optical thickness) along the ray segment from $a$ to $b$. Higher optical depth means less transmittance — the medium is more opaque.
+
+The extinction coefficient decomposes into **absorption** $\sigma_a$ and **scattering** $\sigma_s$: $\sigma_t = \sigma_a + \sigma_s$. Absorbed light is converted to heat. Scattered light changes direction and may eventually reach the viewer from a different angle (in-scattering) — which is what makes fog glow around light sources and clouds luminous from within.
+
+### Exponential Height Fog
+
+A common engine simplification is **exponential height fog**, where the extinction coefficient decreases exponentially with altitude $h$:
+
+$$
+\sigma_t(h) = \sigma_0 \, e^{-\beta \, (h - h_0)}
+$$
+
+where $\sigma_0$ is the density at the reference height $h_0$ and $\beta$ is the **falloff rate** (higher $\beta$ means the fog is more concentrated near the ground). This models ground-hugging mist and valley fog. The optical depth along a ray through this medium can be integrated analytically for straight rays, avoiding per-step evaluation.
+
+### Phase Functions
+
+When a photon scatters, the **phase function** $p(\cos\theta)$ describes the probability that it scatters into angle $\theta$ relative to its original direction. The phase function is normalized so that integrating over the full sphere of directions gives 1:
+
+$$
+\int_{\mathcal{S}^2} p(\cos\theta) \, d\boldsymbol{\omega} = 1
+$$
+
+**Isotropic scattering** has $p = 1 / (4\pi)$ — equal probability in all directions. Real media are anisotropic.
+
+The **Henyey-Greenstein phase function** is the standard model for engine volumetrics:
+
+$$
+p_{\text{HG}}(\cos\theta) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g\cos\theta)^{3/2}}
+$$
+
+The **asymmetry parameter** $g \in (-1, 1)$ controls the scattering direction:
+
+- $g = 0$: isotropic scattering.
+- $g > 0$: **forward scattering** — light preferentially continues in its original direction. Fog and clouds are typically forward-scattering ($g \approx 0.7$–$0.85$), which is why the sun creates a bright glow ("silver lining") when viewed through thin cloud.
+- $g < 0$: **back scattering** — light preferentially reflects backward.
+
+### The Volume Rendering Integral
+
+The outgoing radiance along a ray through a participating medium combines the attenuated background radiance with the in-scattered light accumulated along the ray:
+
+$$
+L(\mathbf{o}, \hat{\mathbf{d}}) = L_{\text{bg}} \, T(0, D) + \int_0^D T(0, t) \, \sigma_s(\mathbf{r}(t)) \, L_{\text{in}}(\mathbf{r}(t), \hat{\mathbf{d}}) \, dt
+$$
+
+where $L_{\text{bg}}$ is the radiance from the surface (or sky) behind the volume, $D$ is the ray's extent through the medium, and $L_{\text{in}}$ is the in-scattered radiance at each point — itself a hemispherical integral involving the phase function and the lighting arriving from all directions.
+
+In real-time rendering, this integral is discretized by **front-to-back compositing** through a 3D grid of voxels (froxels — frustum-aligned voxels). Each froxel stores a density and an in-scattered radiance value computed from the scene's lights. The compositing step accumulates scattering and transmittance slice by slice, producing a 3D look-up texture that the final lighting shader samples to add fog, god rays, and atmospheric effects.
+
+### Rayleigh and Mie Scattering
+
+Atmospheric rendering models two scattering mechanisms:
+
+**Rayleigh scattering** describes light scattered by particles much smaller than the wavelength (air molecules). Its cross-section depends on the inverse fourth power of wavelength: $\sigma \propto \lambda^{-4}$. Short wavelengths (blue light) scatter much more than long wavelengths (red light), which is why the sky is blue, sunsets are red (the long path through the atmosphere has scattered away most blue light), and the sun itself appears yellow.
+
+**Mie scattering** describes light scattered by particles comparable to the wavelength (water droplets, dust, aerosols). Mie scattering is approximately wavelength-independent (white) and strongly forward-peaked, which is why fog and clouds appear white and show a bright halo around the sun.
+
+The **Hillaire LUT-based atmosphere model** (2020) precomputes transmittance and multiple-scattering look-up tables from the Rayleigh and Mie profiles of the atmosphere. At runtime, sky color and aerial perspective are evaluated with a few texture samples, making physically-based planetary atmosphere rendering practical at real-time frame rates.
+
+::: {.callout-note appearance="simple" title="Turbidity"}
+
+The **turbidity** parameter controls the ratio of Mie scattering (haze) to Rayleigh scattering (clear air). A turbidity of 2.0 represents a very clear day; 5.0 is a typical hazy day; values above 10 model heavy pollution or mist. Combined with the sun's altitude and the ground albedo, turbidity determines the overall color and brightness of the sky dome.
+
+:::
+
+
+## Spatial Acceleration Structures
+
+The geometric primitives and intersection tests described earlier are the building blocks. When a scene contains millions of objects, testing every primitive against every query (ray, frustum, overlap) is prohibitively expensive. **Spatial acceleration structures** organize geometry hierarchically so that queries can skip large regions of space that are provably irrelevant.
+
+### Bounding Volume Hierarchies
+
+A **bounding volume hierarchy** (BVH) is a tree of nested bounding volumes (usually AABBs). Each leaf node contains one or a few primitives. Each internal node's bounding volume encloses all the volumes of its children. A query traverses the tree top-down: if a node's bounding volume does not intersect the query (ray, frustum, AABB), the entire subtree is skipped.
+
+**Construction.** The quality of a BVH depends on how primitives are partitioned at each level. The **Surface Area Heuristic** (SAH) estimates the cost of a split by the probability that a random ray hits each child — proportional to the child's surface area. The optimal split minimizes:
+
+$$
+C_{\text{SAH}} = C_{\text{trav}} + \frac{SA(L)}{SA(P)} \, n_L \, C_{\text{isect}} + \frac{SA(R)}{SA(P)} \, n_R \, C_{\text{isect}}
+$$
+
+where $SA(L)$, $SA(R)$, $SA(P)$ are the surface areas of the left child, right child, and parent bounding volumes; $n_L$, $n_R$ are the primitive counts; and $C_{\text{trav}}$, $C_{\text{isect}}$ are estimated traversal and intersection costs. The split axis and position are chosen from a set of candidates (typically the spatial median, object median, or SAH bin boundaries along each axis).
+
+**Traversal.** Ray-BVH traversal is a stack-based depth-first search. At each internal node, both children are tested against the ray. If both hit, the nearer child is visited first (to find an early hit that can prune the far child). A well-built BVH reduces ray-scene intersection from $O(n)$ to $O(\log n)$ expected time.
+
+**TLAS/BLAS.** GPU ray tracing uses a **two-level acceleration structure**: a per-mesh **Bottom-Level Acceleration Structure** (BLAS) built over the mesh's triangles, and a per-scene **Top-Level Acceleration Structure** (TLAS) built over the transformed bounding boxes of all BLAS instances. This separation allows instances to be repositioned (by updating their transform in the TLAS) without rebuilding the per-mesh BLAS.
+
+### Octrees
+
+An **octree** recursively subdivides 3D space into eight equal octants. Starting from a root cell that encloses the entire scene, each cell is split into eight children when it contains more than a threshold number of primitives. The resulting tree has a branching factor of 8 and a depth proportional to $\log_8$ of the spatial resolution.
+
+Octrees are used for:
+
+- **Voxel storage.** A **sparse voxel octree** (SVO) stores occupied voxels as leaves, skipping empty regions entirely. The memory cost is proportional to the occupied surface area rather than the volume.
+- **Culling.** Hierarchical frustum or occlusion culling can skip entire octree nodes whose bounding box is outside the frustum or occluded.
+- **GI clipmaps.** Cascaded 3D voxel textures for global illumination use the same octant subdivision principle at multiple scales around the camera.
+
+**Traversal** for ray-octree intersection uses a **hierarchical DDA** (Digital Differential Analyzer): at each level, the ray is stepped through the cells of the current node, and only cells that the ray intersects are descended into. This avoids visiting children the ray misses entirely.
+
+### Uniform Grids
+
+A **uniform grid** partitions space into equal-sized cells. An object is assigned to every cell it overlaps. Queries test only the cells the query volume intersects.
+
+Grid strengths: $O(1)$ cell lookup from coordinates ($\text{cell} = \lfloor (\mathbf{p} - \mathbf{p}_{\min}) / \text{cell\_size} \rfloor$), simple implementation, and excellent cache coherence for spatially localized queries. Weaknesses: wasted memory when geometry is unevenly distributed (most cells empty, a few overcrowded), and no adaptation to varying density.
+
+Uniform grids are the standard choice for the streaming system's spatial index: world cells are fixed-size tiles, and the set of active cells is determined by the camera position with an $O(1)$ lookup.
+
+### Hierarchical Depth Buffer
+
+A **hierarchical Z-buffer** (HZB) is a mip chain of the depth buffer. Each mip level stores the maximum (or minimum, depending on depth direction) depth of the corresponding $2 \times 2$ block in the level below. The finest level is the full-resolution depth buffer; the coarsest level is a single pixel representing the entire screen.
+
+**Occlusion culling** with the HZB works by projecting an object's bounding box onto the screen, determining which mip level has pixels covering the projected area, and comparing the object's nearest depth to the HZB value at that level. If the object is behind the HZB value (fully occluded by closer geometry), it can be skipped without rasterization. This is a conservative test: it may falsely classify a visible object as "possibly visible" but will never falsely cull a visible object.
+
+The HZB is built as a compute-shader post-process after the depth prepass. Each mip level is a parallel reduction of the previous level — a min or max operation depending on the depth direction (with reverse depth, the HZB stores the minimum depth, and objects are culled if their maximum depth is less than the HZB value).
+
+
+## Skeletal Animation Mathematics
+
+Skeletal animation transforms a static mesh into a living character by driving its vertices with a hierarchy of **bones** (or joints). The mathematics connects three representations: the **bind pose** (the skeleton's reference configuration), the **animated pose** (the skeleton's current configuration from animation data), and the **skinned vertex positions** (the final deformed mesh).
+
+### The Joint Hierarchy
+
+A skeleton is a tree of joints. Each joint $j$ has a local transform $\mathbf{T}_j^{\text{local}}$ (translation, rotation, scale) relative to its parent. The **world transform** (or model-space transform) of joint $j$ is the product of local transforms along the chain from the root:
+
+$$
+\mathbf{T}_j^{\text{world}} = \mathbf{T}_{\text{root}}^{\text{local}} \cdot \mathbf{T}_{\text{child}_1}^{\text{local}} \cdot \, \cdots \, \cdot \mathbf{T}_j^{\text{local}}
+$$
+
+Computing world transforms for the entire skeleton requires traversing the tree in parent-before-child order and multiplying each joint's local transform onto its parent's world transform. This is an $O(n)$ operation for $n$ joints and is typically done on the CPU before uploading the bone palette to the GPU.
+
+### The Bind Pose and Inverse Bind Matrices
+
+The **bind pose** (or rest pose, or T-pose) is the skeleton configuration in which the mesh was authored. At bind time, each joint $j$ has a world transform $\mathbf{B}_j$. The **inverse bind matrix** $\mathbf{B}_j^{-1}$ transforms a vertex from model space into the local space of joint $j$ as it was at bind time.
+
+At runtime, the animated world transform of joint $j$ is $\mathbf{T}_j^{\text{world}}$. The **skinning matrix** that transforms a vertex from its bind-pose position to its animated position is:
+
+$$
+\mathbf{S}_j = \mathbf{T}_j^{\text{world}} \cdot \mathbf{B}_j^{-1}
+$$
+
+Conceptually: $\mathbf{B}_j^{-1}$ moves the vertex from model space into the joint's bind-pose local space, and $\mathbf{T}_j^{\text{world}}$ then places it in the joint's current animated position. If the animation is the bind pose itself ($\mathbf{T}_j^{\text{world}} = \mathbf{B}_j$), then $\mathbf{S}_j = \mathbf{I}$ — the mesh is unchanged, as expected.
+
+### Linear Blend Skinning
+
+Each vertex is influenced by one or more joints, weighted by **blend weights** $(w_0, w_1, \ldots, w_{k-1})$ that sum to 1. The **skinned position** is:
+
+$$
+\mathbf{v}' = \sum_{i=0}^{k-1} w_i \, \mathbf{S}_{j_i} \, \mathbf{v}
+$$
+
+where $\mathbf{v}$ is the bind-pose vertex position (as a homogeneous 4-vector), $j_i$ is the index of the $i$-th influencing joint, and $\mathbf{S}_{j_i}$ is that joint's skinning matrix. Most engines limit $k$ to 4 influences per vertex (4 weights, 4 joint indices), which is sufficient for the vast majority of character meshes and allows the data to be packed into a single `[f32; 4]` + `[u16; 4]` vertex attribute pair.
+
+Normals and tangent vectors are skinned with the same weighted sum, using the upper-left $3 \times 3$ part of the skinning matrices (or their inverse transposes if non-uniform scaling is present). The skinned normal must be re-normalized after blending because the weighted sum of unit vectors is not generally a unit vector.
+
+**The bone palette.** The GPU receives the skinning matrices as a uniform buffer (or storage buffer) — the **bone palette**. A typical character has 50–200 joints, so the palette is 50–200 `Mat4` values ($3.2$–$12.8$ KB). The vertex shader (or a compute-shader skinning pass) indexes into this palette using the per-vertex joint indices and computes the weighted sum.
+
+::: {.callout-warning appearance="simple" title="Artifacts of Linear Blend Skinning"}
+
+Linear blend skinning (LBS) produces **volume collapse** artifacts at joints with large rotations: the elbow of a character at 90° flexion will appear to shrink because linearly blending two rotation matrices does not produce a rotation matrix — the blend "cuts the corner" of the rotation arc. **Dual quaternion skinning** (DQS) addresses this by blending transforms as dual quaternions, which preserves volume. The trade-off is higher computational cost and slight bulging at some joint configurations.
+
+:::
+
+### Pose Blending
+
+Animation systems frequently need to blend multiple poses: transitioning between a walk and a run cycle, layering an upper-body aim pose onto a lower-body locomotion pose, or applying additive damage reactions.
+
+**Linear blend** of two poses interpolates each joint's local transform independently:
+
+$$
+\mathbf{T}_j^{\text{blend}} = \text{lerp}(\mathbf{T}_j^{A}, \mathbf{T}_j^{B}, \alpha)
+$$
+
+For translation and scale, this is component-wise lerp. For rotation (quaternions), this is NLERP or SLERP. The blend weight $\alpha$ can vary per joint (using a **bone mask**), enabling partial-body blending — for example, blending only the spine and arm joints while leaving the legs unaffected.
+
+**Additive blending** applies a **delta pose** on top of a base pose. The additive pose stores the difference from a reference pose: $\Delta\mathbf{T}_j = \mathbf{T}_j^{\text{add}} \cdot (\mathbf{T}_j^{\text{ref}})^{-1}$. At runtime, the additive is composed with the base: $\mathbf{T}_j^{\text{result}} = \Delta\mathbf{T}_j \cdot \mathbf{T}_j^{\text{base}}$. For quaternion rotations, the composition is quaternion multiplication; for translations, it is addition of the delta displacement.
+
+### Inverse Kinematics
+
+**Forward kinematics** (FK) computes the world position of an end effector (hand, foot) from the joint angles along the chain. **Inverse kinematics** (IK) solves the reverse problem: given a desired end-effector position, find the joint angles that place it there.
+
+**Two-bone IK** is the most common solver in game engines (used for foot placement on terrain, hand reaching for objects). Given a chain of two bones (shoulder → elbow → hand, or hip → knee → foot) with lengths $l_1$ and $l_2$, and a target position $\mathbf{t}$ for the end effector:
+
+1. Compute the distance $d = \|\mathbf{t} - \mathbf{p}_{\text{root}}\|$ from the chain root to the target.
+2. Clamp $d$ to $[|l_1 - l_2|, \; l_1 + l_2]$ (the reachable range).
+3. Apply the **law of cosines** to find the interior angle at the middle joint:
+
+$$
+\cos\theta_{\text{mid}} = \frac{l_1^2 + l_2^2 - d^2}{2 l_1 l_2}
+$$
+
+4. The root joint angle is derived similarly. The pole vector (a hint direction, e.g. "elbow points outward") resolves the remaining rotational ambiguity around the root-to-target axis.
+
+**FABRIK** (Forward And Backward Reaching Inverse Kinematics) is an iterative solver for chains of arbitrary length. It alternates between reaching backward from the target (pulling each joint toward the target) and reaching forward from the root (enforcing the root constraint), converging quickly for typical character chains.
+
+
+## Signed Distance Fields
+
+A **signed distance field** (SDF) is a scalar field $\phi(\mathbf{p})$ that returns the shortest distance from point $\mathbf{p}$ to the nearest surface. The sign indicates which side of the surface the point is on: negative inside, positive outside (or vice versa, by convention).
+
+$$
+\phi(\mathbf{p}) = \begin{cases}
+  +d, & \mathbf{p} \text{ outside the surface} \\
+  0, & \mathbf{p} \text{ on the surface} \\
+  -d, & \mathbf{p} \text{ inside the surface}
+\end{cases}
+$$
+
+where $d = \min_{\mathbf{q} \in \mathcal{S}} \|\mathbf{p} - \mathbf{q}\|$ is the unsigned distance to the closest point on the surface $\mathcal{S}$.
+
+### Properties
+
+The SDF is a **Lipschitz-continuous** function with Lipschitz constant 1: $|\phi(\mathbf{p}) - \phi(\mathbf{q})| \leq \|\mathbf{p} - \mathbf{q}\|$. In particular, $\|\nabla\phi\| = 1$ almost everywhere. This property is what makes SDFs useful for ray tracing: the distance value at any point gives a safe step size — a sphere of radius $|\phi(\mathbf{p})|$ centered at $\mathbf{p}$ is guaranteed to contain no surface crossing.
+
+The **gradient** $\nabla\phi$ at the surface equals the surface normal: $\hat{\mathbf{n}} = \nabla\phi / \|\nabla\phi\|$. In a discrete SDF (stored in a 3D texture), the gradient is estimated with central differences:
+
+$$
+\frac{\partial \phi}{\partial x} \approx \frac{\phi(x + h, y, z) - \phi(x - h, y, z)}{2h}
+$$
+
+### Sphere Tracing
+
+**Sphere tracing** (Hart, 1996) is the standard algorithm for rendering SDFs. A ray is marched through the field by stepping forward by the SDF value at each point:
+
+1. Start at the ray origin: $t = 0$.
+2. Evaluate $d = \phi(\mathbf{o} + t \hat{\mathbf{d}})$.
+3. If $d < \varepsilon$, a surface hit is found at distance $t$.
+4. Otherwise, advance: $t \leftarrow t + d$. (The Lipschitz property guarantees no surface is skipped.)
+5. Repeat until hit, or $t$ exceeds the maximum range.
+
+The step size is adaptive — large steps in open space, small steps near surfaces — making sphere tracing efficient for smooth geometry. It converges poorly near sharp edges (where the SDF value is small but the surface is still distant along the ray), but for the typical game-engine use case (soft shadows, ambient occlusion, GI probe queries), this is not a limiting factor.
+
+### CSG Operations on SDFs
+
+SDFs compose elegantly via **constructive solid geometry** (CSG). Given two SDFs $\phi_A$ and $\phi_B$:
+
+- **Union:** $\phi_{A \cup B}(\mathbf{p}) = \min(\phi_A(\mathbf{p}), \phi_B(\mathbf{p}))$
+- **Intersection:** $\phi_{A \cap B}(\mathbf{p}) = \max(\phi_A(\mathbf{p}), \phi_B(\mathbf{p}))$
+- **Subtraction:** $\phi_{A \setminus B}(\mathbf{p}) = \max(\phi_A(\mathbf{p}), -\phi_B(\mathbf{p}))$
+
+**Smooth union** blends two SDFs with a smooth transition controlled by a blending radius $k$:
+
+$$
+\phi_{\text{smooth}}(\mathbf{p}) = -\frac{1}{k} \ln(e^{-k\phi_A} + e^{-k\phi_B})
+$$
+
+or the cheaper polynomial approximation. These operations make SDFs the natural representation for procedural modeling (terrain sculpting, cave carving, organic shapes) and for the Lumen-style GI pipeline where per-mesh distance fields are merged into a global SDF for cone and ray tracing.
+
+### Primitive SDFs
+
+Common analytic SDFs for basic shapes:
+
+- **Sphere** of radius $r$ centered at $\mathbf{c}$: $\phi(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - r$.
+- **Box** with half-extents $\mathbf{b}$: $\phi(\mathbf{p}) = \|\max(|\mathbf{p}| - \mathbf{b}, 0)\| + \min(\max(|p_x| - b_x, |p_y| - b_y, |p_z| - b_z), 0)$.
+- **Plane** with normal $\hat{\mathbf{n}}$ and offset $d$: $\phi(\mathbf{p}) = \hat{\mathbf{n}} \cdot \mathbf{p} + d$.
+- **Capsule** (line segment with radius): distance to the nearest point on the line segment, minus the radius.
+- **Torus** with major radius $R$ and minor radius $r$: $\phi(\mathbf{p}) = \|(\sqrt{p_x^2 + p_z^2} - R, \, p_y)\| - r$.
+
+These primitives, combined with the CSG operations and domain transformations (translation, rotation, repetition, symmetry), form a complete vocabulary for procedural SDF modeling.
+
+
+## Implicit Surfaces and Isosurface Extraction
+
+Voxel-based geometry in a game engine is stored as a **scalar field** — a 3D grid of density or distance values. Converting this field into renderable triangle meshes requires **isosurface extraction**: finding the surface where the field crosses a threshold value (the **isolevel**, typically zero for SDFs or a density threshold for volumetric data).
+
+### Implicit Surface Definition
+
+An **implicit surface** is the set of points where a scalar function $f(\mathbf{p})$ equals a constant $c$:
+
+$$
+\mathcal{S} = \{ \mathbf{p} \in \mathbb{R}^3 : f(\mathbf{p}) = c \}
+$$
+
+The surface normal at any point on $\mathcal{S}$ is the normalized gradient of $f$:
+
+$$
+\hat{\mathbf{n}} = \frac{\nabla f}{\|\nabla f\|}
+$$
+
+Unlike explicit surface representations (triangle meshes, parametric surfaces), implicit surfaces handle topology changes naturally — two blobs merging, a torus pinching off — because the surface is defined by a field condition rather than by explicit connectivity.
+
+### Marching Cubes
+
+The **Marching Cubes** algorithm (Lorensen and Cline, 1987) extracts a triangle mesh from a scalar field sampled on a regular 3D grid. For each cell (cube) in the grid:
+
+1. **Classify vertices.** Each of the 8 cube vertices is classified as inside ($f < c$) or outside ($f \geq c$), producing an 8-bit index.
+2. **Look up edge intersections.** A precomputed table (256 entries, one per bit pattern) identifies which of the 12 cube edges are crossed by the isosurface.
+3. **Interpolate crossing positions.** Along each crossed edge, linear interpolation finds the approximate surface point:
+
+$$
+\mathbf{p}_{\text{cross}} = \mathbf{p}_a + \frac{c - f(\mathbf{p}_a)}{f(\mathbf{p}_b) - f(\mathbf{p}_a)} (\mathbf{p}_b - \mathbf{p}_a)
+$$
+
+4. **Emit triangles.** The look-up table specifies how to connect the edge crossings into triangles (up to 5 triangles per cube).
+
+Marching Cubes produces watertight meshes (no cracks between adjacent cells, since neighboring cells share edge vertices) and handles arbitrary topology. Its limitations are that it cannot represent sharp features (edges and corners are always smoothed by the linear interpolation) and that the triangle count is proportional to the surface area at grid resolution, which can be large.
+
+### Dual Contouring
+
+**Dual Contouring** (Ju et al., 2002) addresses the sharp-feature limitation. Instead of placing vertices on cell edges, it places one vertex per cell that contains a sign change, positioned to minimize the error with respect to the Hermite data (intersection positions and normals on cell edges). The vertex position is found by solving a least-squares system:
+
+$$
+\mathbf{v}^* = \arg\min_{\mathbf{v}} \sum_i (\hat{\mathbf{n}}_i \cdot (\mathbf{v} - \mathbf{p}_i))^2
+$$
+
+where $(\mathbf{p}_i, \hat{\mathbf{n}}_i)$ are the edge intersection positions and normals. This is a $3 \times 3$ linear system (solvable via the pseudo-inverse or QR decomposition) that produces a vertex position that respects the local surface geometry, including sharp edges and corners.
+
+Faces are generated by connecting dual vertices across edges that contain a sign change — each edge shared by four cells produces a quad (two triangles) connecting the four cells' dual vertices. Dual Contouring produces adaptive meshes with sharp features but requires Hermite data (surface normals at edge crossings) in addition to scalar values, and can produce self-intersecting geometry if the vertex placement is not clamped to the cell.
+
+### Transvoxel
+
+When a voxel world uses multiple levels of detail — coarse cells in the distance, fine cells nearby — the boundary between LOD levels produces cracks in the extracted mesh because the grid resolutions do not match. The **Transvoxel** algorithm (Lengyel, 2010) solves this with special **transition cells** at LOD boundaries that are topologically compatible with both the fine and coarse grids.
+
+A transition cell has its vertices sampled at the fine resolution on the high-LOD face and at the coarse resolution on the low-LOD face. A dedicated look-up table (512 entries, indexed by the classification of 9 vertices — 4 at fine resolution on one face, 4 at coarse resolution, 1 at the center) specifies the triangulation. The result is a watertight mesh across LOD transitions with no visible cracks.
+
+
+## Depth Reconstruction
+
+Many rendering techniques — deferred lighting, screen-space reflections, volumetric fog, decals — need to recover the 3D world-space position of a pixel from its depth buffer value. This is the inverse of the projection pipeline.
+
+### From Depth Buffer to View-Space Position
+
+Given a depth buffer value $z_{\text{ndc}}$ and the pixel's normalized device coordinates $(x_{\text{ndc}}, y_{\text{ndc}})$, the clip-space position is:
+
+$$
+\mathbf{p}_{\text{clip}} = \begin{pmatrix} x_{\text{ndc}} \\ y_{\text{ndc}} \\ z_{\text{ndc}} \\ 1.0 \end{pmatrix}
+$$
+
+Note: NDC coordinates run from $-1$ to $1$ in $x$ and $y$ (with appropriate sign conventions), and $z_{\text{ndc}}$ is the raw depth buffer sample. For `wgpu`, the depth range is $[0, 1]$ and $y$ is flipped relative to the screen (the framebuffer origin is top-left, but NDC $y$ increases upward).
+
+Applying the **inverse projection matrix** yields a homogeneous view-space position:
+
+$$
+\mathbf{p}_{\text{view}}^{h} = \mathbf{P}^{-1} \, \mathbf{p}_{\text{clip}}
+$$
+
+The actual view-space position is obtained by dividing by $w$:
+
+$$
+\mathbf{p}_{\text{view}} = \frac{1}{w_{\text{view}}} \begin{pmatrix} x_{\text{view}} \\ y_{\text{view}} \\ z_{\text{view}} \end{pmatrix}
+$$
+
+### From View Space to World Space
+
+The view-space position transforms to world space via the **inverse view matrix**:
+
+$$
+\mathbf{p}_{\text{world}} = \mathbf{V}^{-1} \, \mathbf{p}_{\text{view}}
+$$
+
+In practice, the two steps are combined into a single **inverse view-projection** matrix:
+
+$$
+\mathbf{p}_{\text{world}}^{h} = (\mathbf{P} \cdot \mathbf{V})^{-1} \, \mathbf{p}_{\text{clip}}
+$$
+
+followed by the perspective divide. This is the standard depth-reconstruction path used in deferred lighting shaders.
+
+### Optimized Reconstruction
+
+The full $4 \times 4$ matrix multiply can be avoided in common cases. For a standard perspective projection, the view-space $z$ can be recovered directly from the depth buffer value:
+
+$$
+z_{\text{view}} = \frac{n \, f}{f - z_{\text{ndc}} (f - n)}
+$$
+
+(for $z_{\text{ndc}} \in [0, 1]$, non-reversed). With reverse depth:
+
+$$
+z_{\text{view}} = \frac{n \, f}{f \, z_{\text{ndc}} + n \, (1 - z_{\text{ndc}})} = \frac{n \, f}{n + z_{\text{ndc}} (f - n)}
+$$
+
+Once $z_{\text{view}}$ is known, the view-space $x$ and $y$ are computed from the screen-space coordinates and the projection parameters:
+
+$$
+x_{\text{view}} = z_{\text{view}} \cdot x_{\text{ndc}} \cdot \tan(\text{fov}_x / 2), \qquad
+y_{\text{view}} = z_{\text{view}} \cdot y_{\text{ndc}} \cdot \tan(\text{fov}_y / 2)
+$$
+
+This avoids the matrix multiply entirely and is the preferred method in performance-critical shaders. The per-frame constants $\tan(\text{fov}/2)$ and the near/far plane values are passed as uniforms.
+
+### Motion Vectors and Temporal Reprojection
+
+**Motion vectors** encode the screen-space displacement of each pixel between the current and previous frames. For static geometry:
+
+$$
+\mathbf{v}_{\text{motion}} = \mathbf{p}_{\text{screen}}^{\text{curr}} - \mathbf{p}_{\text{screen}}^{\text{prev}}
+$$
+
+where the previous-frame screen position is computed by transforming the current world-space position with the previous frame's view-projection matrix:
+
+$$
+\mathbf{p}_{\text{clip}}^{\text{prev}} = \mathbf{P}_{\text{prev}} \cdot \mathbf{V}_{\text{prev}} \cdot \mathbf{p}_{\text{world}}
+$$
+
+followed by the perspective divide and viewport transform.
+
+For skinned or otherwise deformed geometry, the vertex shader must output both the current and previous clip-space positions (using the current and previous bone palettes), because the world-space position itself has changed.
+
+Motion vectors are stored in a dedicated GBuffer target (typically `Rg16Float`) and consumed by temporal anti-aliasing (TAA), temporal upscaling (TAAU), motion blur, and temporal denoising of ray-traced effects.
+
+
+## Camera-Relative Rendering and Large-World Precision
+
+Standard `f32` coordinates lose precision far from the origin. At 10 km from the origin, the ULP (unit in the last place) of a 32-bit float is about 1 mm; at 100 km, it grows to about 1 cm. For an open-world game with a planet-scale map, this manifests as vertex jitter — geometry visibly vibrates because the vertex positions cannot be represented with sub-pixel accuracy.
+
+### The Problem
+
+The vertex transformation computes $\mathbf{v}_{\text{clip}} = \mathbf{P} \cdot \mathbf{V} \cdot \mathbf{M} \cdot \mathbf{v}_{\text{local}}$, where all values are `f32`. The world-space position $\mathbf{v}_{\text{world}} = \mathbf{M} \cdot \mathbf{v}_{\text{local}}$ can have very large coordinates (e.g., $(50000, 200, 50000)$ meters). The view matrix $\mathbf{V}$ then subtracts the camera position to produce view-space coordinates near zero — but the subtraction happens after the large values have already lost precision. This is the catastrophic cancellation problem from the numerical care section, applied to the rendering pipeline.
+
+### Camera-Relative Rendering
+
+The solution is to compute all vertex positions **relative to the camera** before they enter `f32` arithmetic. The engine stores world positions in `f64` (double precision) on the CPU and computes the camera-relative offset per object:
+
+$$
+\mathbf{v}_{\text{camera-rel}} = (\mathbf{p}_{\text{object}}^{f64} - \mathbf{p}_{\text{camera}}^{f64})^{\text{cast to f32}} + \mathbf{v}_{\text{local}}
+$$
+
+The subtraction happens in `f64`, where there is no precision loss. The result is cast to `f32` — but because it is now a small displacement relative to the camera (typically within a few kilometers), the `f32` representation has ample precision.
+
+In practice, the implementation modifies the view matrix to have zero translation (the camera is always at the origin of view space), and each object's model matrix incorporates the `f64`-computed offset:
+
+$$
+\mathbf{M}_{\text{camera-rel}} = \begin{pmatrix}
+  R & \mathbf{t}_{\text{offset}} \\
+  0 & 1
+\end{pmatrix}
+$$
+
+where $\mathbf{t}_{\text{offset}} = (\mathbf{p}_{\text{object}}^{f64} - \mathbf{p}_{\text{camera}}^{f64})$ cast to `f32`. The vertex shader then computes $\mathbf{v}_{\text{clip}} = \mathbf{P} \cdot \mathbf{V}_{\text{zero-translate}} \cdot \mathbf{M}_{\text{camera-rel}} \cdot \mathbf{v}_{\text{local}}$, and all intermediate values are small enough for `f32` to represent accurately.
+
+### Cell-Anchored Precision
+
+For very large worlds, even the per-object offset can be large (if objects are far from the camera). The **cell-anchored** approach subdivides the world into uniform cells and computes a per-cell anchor offset:
+
+$$
+\mathbf{t}_{\text{cell-offset}} = (\mathbf{p}_{\text{cell-anchor}}^{f64} - \mathbf{p}_{\text{camera}}^{f64})^{\text{cast to f32}}
+$$
+
+Each vertex within the cell adds its cell-local position (already small, since the cell is typically 256–1024 meters across):
+
+$$
+\mathbf{v}_{\text{view}} = \mathbf{t}_{\text{cell-offset}} + \mathbf{v}_{\text{cell-local}}
+$$
+
+This keeps all `f32` values within a bounded range regardless of the absolute world position, making planet-scale rendering possible without vertex jitter.
+
+::: {.callout-note appearance="simple" title="Double Precision on the GPU"}
+
+GPU hardware supports `f64` operations, but at half the throughput of `f32` (or worse). The camera-relative technique avoids any `f64` work on the GPU. All `f64` arithmetic happens on the CPU during extraction — computing offsets and building model matrices — while the vertex shader operates entirely in `f32`. The only cost is the per-object or per-cell offset computation, which is negligible compared to the rendering workload.
+
+:::
+
+
+## Further Study
+
+This appendix covers the mathematical tools that appear most frequently in the main chapters. Readers who wish to go deeper will find the following directions productive:
+
+**Linear algebra.** A rigorous treatment of vector spaces, linear maps, eigenvalues, and the singular value decomposition appears in any standard linear algebra text. Strang's *Introduction to Linear Algebra* and Axler's *Linear Algebra Done Right* are widely recommended for different audiences — the former for computational intuition, the latter for abstract clarity.
+
+**Computational geometry.** Ericson's *Real-Time Collision Detection* is the definitive reference for the intersection tests, bounding volumes, and spatial data structures used in game engines. It covers every test discussed here and many more, with numerical robustness analysis.
+
+**Numerical analysis.** Higham's *Accuracy and Stability of Numerical Algorithms* is the authoritative treatment of floating-point error analysis. For the reader who wants to understand why a particular computation loses precision, this is the source.
+
+**Quaternions.** Kuipers' *Quaternions and Rotation Sequences* provides the most thorough treatment of quaternion algebra and its application to rotation and orientation in three dimensions.
+
+**Physically-based rendering.** Pharr, Jakob, and Humphreys' *Physically Based Rendering: From Theory to Implementation* (PBRT) is the authoritative treatment of the rendering equation, BRDFs, light transport, and sampling. For the real-time PBR shading model specifically, the course notes from the SIGGRAPH "Real-Time Rendering" and "Physically Based Shading" courses — particularly Karis (2013) and Burley (2012) — document the choices made by modern engines.
+
+**Spherical harmonics.** Green's "Spherical Harmonic Lighting: The Gritty Details" (2003) is the most accessible introduction for game developers. Ramamoorthi and Hanrahan's "An Efficient Representation for Irradiance Environment Maps" (2001) proves the mathematical basis for why order-3 SH suffice for irradiance.
+
+**Participating media.** Pharr et al. (PBRT) covers the full volume rendering equation. For real-time approximations, Hillaire's "A Scalable and Production Ready Sky and Atmosphere Rendering Technique" (2020) describes the LUT-based atmosphere model used in modern engines.
+
+**Noise and procedural generation.** The original papers by Perlin (1985, 2002) remain readable and instructive. Worley's "A Cellular Texture Basis Function" (1996) introduces cellular noise. Bridson's "Fast Poisson Disk Sampling in Arbitrary Dimensions" (2007) gives the $O(n)$ algorithm. The *Texturing & Modeling: A Procedural Approach* book by Ebert et al. is the comprehensive reference.
+
+**Isosurface extraction.** Lorensen and Cline's "Marching Cubes" (1987) is the foundational paper. Ju et al.'s "Dual Contouring of Hermite Data" (2002) introduced the sharp-feature variant. Lengyel's *Transvoxel Algorithm* (2010) solves LOD transitions. Newman and Yi's "A Survey of the Marching Cubes Algorithm" (2006) provides a comprehensive comparison of variants.
+
+**Signed distance fields.** Hart's "Sphere Tracing" (1996) describes the rendering algorithm. Quilez's online articles (iquilezles.org) are the practical reference for SDF primitives, CSG operations, and domain transformations used in real-time applications.
+
+**Skeletal animation.** Parent's *Computer Animation: Algorithms and Techniques* covers the mathematics of joint hierarchies, skinning, IK solvers, and motion blending. Kavan et al.'s "Skinning with Dual Quaternions" (2007) describes the volume-preserving alternative to linear blend skinning.
+
+**Time integration.** Hairer, Lubich, and Wanner's *Geometric Numerical Integration* covers symplectic integrators, Verlet, and the mathematical structure that makes certain integration methods preserve physical invariants.
+
+**Spatial acceleration structures.** Wald's "On Fast Construction of SAH-based Bounding Volume Hierarchies" (2007) describes the surface area heuristic. Pharr et al. (PBRT) covers BVH construction and traversal in depth. For GPU ray tracing, the Vulkan and DirectX ray tracing specifications describe the TLAS/BLAS model.
+
+The glossary (Appendix B) defines terms that appear in both this appendix and the main text. The bibliography (Appendix C) provides full citations for all referenced works.
