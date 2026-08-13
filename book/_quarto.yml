@@ -15,8 +15,8 @@ book:
     - introduction.md
     - part: "Game Engine Foundations"
       chapters:
-        - 01-engine-renaissance.md
-        - 02-architectural-foundations.md
+        - chapters/01-engine-renaissance.md
+        - chapters/02-architectural-foundations.md
         # - 02-core-loop-and-frame-lifecycle.md
         # - 03-memory-handles-and-instrumentation.md
         # - 04-resource-pipeline-and-virtual-filesystem.md
