@@ -1,38 +1,51 @@
-# Engine Architecture at a Glance
+# High-Level Architecture
 
-In the previous chapter, we established the purpose of a game engine and briefly touched on the sub-systems that make up a game engine. We demonstrated that a modern engine is more than a stack of libraries that happen to share a process, but rather a set of domains with different responsibilities, rates of work, data lifetimes, and ownership rules. Its architecture is the set of agreements that lets those domains cooperate without becoming entangled. This chapter describes the high level architecture of a game engine from a systems perspective.
+Chapter 1 surveyed the subsystems that make up a modern game engine: rendering, physics, audio, input, networking, streaming, scripting, and tools. It traced those subsystems from their earliest forms through the decades of accumulated experience that refined them. By the end of that history, a pattern had emerged: the subsystems that survived across engine generations were not the ones with the most features. They were the ones whose responsibilities were clear, whose boundaries were explicit, and whose data flowed through deliberate contracts rather than ad-hoc access.
 
-The running example throughout the book is **Smallworld**: a game engine designed in Rust on top of `wgpu` for worlds in which voxel volumes and triangle meshes are first-class geometry. Smallworld is not presented as the only valid engine design. It is a concrete vehicle for asking how an engine designed in 2026 can preserve the industry's hard-won architectural lessons without inheriting constraints that no longer serve its goals. The map in this chapter is deliberately more general than the Smallworld example. Most modern engines need equivalent domains, even when they name them differently. Smallworld provides a concrete answer to the questions those domains raise.
+This chapter takes that observation and makes it structural. We have a list of subsystems and the historical insight that they must cooperate without becoming entangled. The question is *how*. A modern engine is more than a stack of libraries that happen to share a process. It is a set of domains with different responsibilities, rates of work, data lifetimes, and ownership rules. Its architecture is the set of agreements that lets those domains cooperate. This chapter describes the high-level architecture of a game engine from a systems perspective. Three questions shape this discussion:
+
+1. **Organization.** Which responsibilities belong together, and which belong apart? (The reference architecture.)
+2. **Lifecycle.** In what order does the engine establish and run those responsibilities? (Boot and the main loop.)
+3. **Contracts.** What data, control, and ownership may cross from one responsibility to another? (Domain contracts.)
+
+The map in this chapter is deliberately general: most modern engines need equivalent domains, even when they name them differently.
 
 ## What You Will Learn in This Chapter {.unnumbered}
 
-- How to divide an engine into conceptual domains and packages.
+- How to divide a game engine into conceptual domains and packages.
 - The difference between the game-facing World and engine-side runtime services.
 - How assets, frame data, commands, and feedback move through an engine.
 - Why ownership boundaries matter more than a particular module layout.
+- How inversion of control lets the engine coordinate work that a library-style API cannot.
 - How the rest of the book zooms from this map into individual architectural contracts.
 
 ## From Feature List to Architectural Questions
 
-It is tempting to describe an engine as a list of features: rendering, physics, audio, input, networking, and tools. While a list like this is useful as a general inventory to inform technology decisions, it doesn't tell us how each of those depend on one another.
+It is tempting to describe an engine as a list of features: rendering, physics, audio, input, networking, and tools. While a list like this is useful as a general inventory to inform technology decisions, it does not tell us how each of those features depends on the others, who owns the data they share, or what happens when two features collide at runtime.
+
+Consider a small studio that builds its engine by bolting subsystems together as needs arise. The team starts with a renderer and a scene graph. Physics arrives next, integrated by giving the physics library direct references to scene-graph nodes so that simulation results can update transforms in place. Audio follows, and because it needs to know where the listener is, it too receives a reference to the scene graph. Networking comes last, and it needs to replicate scene-graph state, so it reads and writes the same nodes that physics, audio, and rendering depend on.
+
+Each integration was reasonable in isolation. Together, they have produced a system where the physics thread holds a write lock on transforms that the renderer needs to read; audio stalls when a texture load happens to hold the scene-graph mutex; and shutdown crashes because destruction order is implicit (the audio system tears down its listener reference after the scene graph has already been freed). The studio's programmers spend more time debugging cross-system interactions than building gameplay features. The engine's feature list is impressive, but its architecture is an unstructured dependency graph in which any change to one subsystem can break any other.
+
+The root cause is not that the team's engineers were careless. It is that a feature list, by itself, contains no information about boundaries. It does not say who owns the scene graph's transforms, whether reading them requires synchronization, when it is safe to destroy them, or what representation the audio system should receive instead of a raw pointer. A feature list tells you *what* the engine can do. An architecture tells you *how those capabilities relate to each other*, and it is the relationships, not the capabilities, that determine whether the engine can grow, be debugged, be ported, or be maintained by people who were not present when it was written.
+
+This failure mode is not hypothetical. It is the recurring lesson that drove the industry toward explicit architectural discipline. Gregory traces the evolution from monolithic engines to layered architectures over several engine generations, showing how each layer of separation emerged in response to a specific class of coupling failure [@gregory2026game]. The three questions around organization, lifecycle and engine contracts that we listed in the introduction to this chapter are the antidote.
 
 For example, a game system needs to ask for a mesh, but it should not need to know whether that mesh is decoded, waiting in an upload queue, or resident in GPU memory. A renderer needs a transform and material for a visible entity, but it should not be allowed to mutate the live game world while simulation is running. A streaming system needs to make residency decisions, but it should do so against named budgets rather than quietly allocating until the driver fails.
-
-An architecture must answer three questions that a feature list leaves open:
-
-- **Organization:** Which responsibilities belong together, and which belong apart?
-- **Lifecycle:** In what order does the engine establish and run those responsibilities?
-- **Contracts:** What data, control, and ownership may cross from one responsibility to another?
 
 The rest of this chapter answers those questions in that order. It first gives a static map of the engine's domains and their allowed dependencies. It then follows the map through boot and the main loop. Finally, it identifies the small set of contracts that keep the domains independent while they work together.
 
 ## A Reference Architecture: Domains, Layers, and Extension
 
-The first question is organizational: what are the engine's major responsibility domains? At a high level, a modern game engine has a game-facing layer, a group of engine services, and a set of platform-facing adapters. The game is not permitted to reach into every service directly. It receives a stable vocabulary—components, handles, commands, events, and configuration—and the engine translates that vocabulary into platform and hardware work.
+The first question is organizational: what are the engine's major responsibility domains? At a high level, a modern game engine has a game-facing layer, a group of engine services, and a set of platform-facing adapters. The game is not permitted to reach into every service directly. It receives a stable vocabulary (components, handles, commands, events, and configuration) and the engine translates that vocabulary into platform and hardware work.
+
+This layered arrangement did not appear by accident. It emerged because early engines that let gameplay code touch hardware directly could not be ported, extended, or maintained by teams larger than the original authors. Doom's renderer was intimately tied to its BSP traversal and VGA column-drawing code. Changing the display resolution, adding a new rendering technique, or porting to a different platform meant rewriting code that was entangled with gameplay logic. When id Software moved to Quake, the separation between game logic (QuakeC) and engine internals (the C renderer, the networking layer) was a direct response to that experience. Gameplay mods could be written without touching the renderer; the renderer could be replaced (GLQuake, software Quake) without rewriting gameplay mods.
+
+The same insight has been rediscovered and refined across every major engine lineage. Unreal Engine's module system separates game modules from engine runtime, renderer, and platform layers through a dependency graph enforced by the build system. Unity's package architecture isolates the rendering pipeline (URP, HDRP) from gameplay scripting, and its entity system (the Entities package) from the traditional MonoBehaviour model. Godot's scene/server split places a thin, script-facing scene tree over a set of dedicated servers (RenderingServer, PhysicsServer, AudioServer) that own their internal state and communicate through message-like APIs. Despite their differences in language, scale, and target audience, all three express the same layered insight: game-facing concepts sit above engine services, which sit above platform adapters, and dependencies flow downward.
 
 Figure \ref{fig:engine-package-map} describes a game engine's top-level package map. The game application is constrained by a public API and plugin and extension packages attach through registered seams. The World, asset pipeline, and renderer are peer runtime domains, where shared foundations provide common mechanisms without becoming game state. Platform adapters terminate operating-system and hardware dependencies. Each band expresses package ownership and permitted dependency direction.
 
-\begin{figure}[!htb]
+\begin{figure}[!tb]
 {\centering
 \includegraphics[width=\textwidth]{figures/engine-package-map.pdf}\par}
 \caption{A conceptual package map for a modern game engine. Public and extension APIs give games controlled ways to add capabilities; runtime domains cooperate through explicit data, ownership, and scheduling contracts.}
@@ -44,13 +57,19 @@ The three runtime domains have deliberately different jobs: The **game-facing Wo
 
 The plugin band identifies the controlled ways a game can expand the engine. A plugin may register component types and systems, an asset importer or processor, a render pass or material implementation, or a tool panel. Each extension receives the narrow contract appropriate to its role; it does not receive arbitrary access to private renderer state, platform handles, or another domain's mutable data. This makes customization a first-class design feature without dissolving the boundaries the map establishes.
 
-The map is deliberately a map of *responsibilities*, not a call graph. It says which concerns belong together and where a dependency may terminate; it does not imply unrestricted access between components. The next two subsections examine the two most important divisions in that map: the game-facing World and the engine services around it.
+The shared foundation layer at the bottom of the runtime band deserves a note. Types such as math primitives, generational handles, a job scheduler, logging, and profiling instrumentation are used by multiple domains but do not carry game state or rendering state. They belong to no single domain; they belong to all of them. Placing them in a shared crate (or set of crates) prevents circular dependencies: the World crate and the Render crate can both depend on the Foundation crate without depending on each other. This is a common pattern across engines. Unreal Engine's `Core` module provides similar shared infrastructure (containers, math, delegates, logging) that every other module depends on without introducing horizontal coupling between unrelated systems.
+
+The map is deliberately a map of *responsibilities*, not a call graph. It says which concerns belong together and where a dependency may terminate; it does not imply unrestricted access between components. The next three subsections examine the most important divisions in that map: the game-facing World, the engine services around it, and the enforcement of the layers themselves.
 
 ### The Game-Facing World
 
 The **World** is the engine's model of the running game. It holds entities, components, system state, and the data that game rules are allowed to inspect and change. A common modern realization is an entity-component-system (ECS) model: entities are stable IDs, components are plain data, and systems operate over queries. This choice keeps composition and bulk processing explicit. Chapter 3 establishes the general data and ownership contracts; Chapter 8 examines ECS and the game-facing World in depth.
 
-The World is not the entire engine. It should not contain a graphics-device connection, a presentation surface, compiled rendering programs, or a decoded-texture cache. Nor should it become a dumping ground for every runtime service. Its job is to represent game state and provide the stable, game-facing API through which gameplay changes that state. The renderer can then change its hardware strategy without rewriting game rules.
+The World is not the entire engine, and one of the most common architectural mistakes in engine design is treating it as though it were. The temptation is real: the World already has an entity system, a query mechanism, and a way to attach data to identities. Why not put the GPU device handle in a "singleton component"? Why not store decoded texture caches as a resource in the World? Why not let the streaming system track its residency state as components on the entities it manages?
+
+The answer is that each of these decisions turns the World into a God Object. When GPU handles live in the World, every subsystem that queries the World can accidentally depend on the renderer's internal representation. When texture caches live in the World, changing the caching strategy requires updating every query that touches cached data. When streaming state lives in the World, the streaming system's internal decisions (which chunks to evict, which LOD to request) become visible to gameplay code that has no business knowing about them. The World becomes the place where all subsystems meet, and changing any subsystem means changing the World's layout, which means auditing every other subsystem that queries it.
+
+The correct boundary is clear: the World should represent game state and provide the stable, game-facing API through which gameplay changes that state. GPU handles, render caches, staging pools, and streaming queues belong in engine-side structures that the game never sees. The renderer can then change its hardware strategy without rewriting game rules, and the streaming system can evolve its eviction policy without touching gameplay queries. Gregory discusses this separation extensively in the context of keeping game-object models focused on gameplay composition rather than engine plumbing [@gregory2026game].
 
 ### Engine Services
 
@@ -61,15 +80,21 @@ The services surrounding the World solve problems that are real but not game-spe
 - **Physics, audio, networking, and persistence** have their own update rates and external contracts. They exchange compact data with the World rather than borrowing arbitrary pieces of it indefinitely.
 - **Tools and diagnostics** observe, inspect, profile, and author the engine. They are a production subsystem, not an afterthought.
 
-These services do not all need the same internal representation. A game-facing World benefits from data structures that make gameplay composition and queries clear; a renderer, cache, or streaming queue may instead benefit from dense purpose-built storage. This is the central distinction: organize game data around gameplay composition; organize engine internals around their actual access patterns. Chapters 3 and 8 return to that distinction, first as a contract and then as a concrete game-object model.
+These services do not all need the same internal representation. A game-facing World benefits from data structures that make gameplay composition and queries clear; a renderer, cache, or streaming queue may instead benefit from dense purpose-built storage. The render domain, for example, maintains its own retained scene graph organized for spatial traversal and draw-call batching. The asset system maintains its own registry of loaded resources indexed by handle. The streaming coordinator maintains its own priority queues ordered by distance and importance. None of these structures need to be ECS archetypes, and forcing them into the World's component model would obscure their access patterns and reduce their performance.
+
+This is the central distinction: organize game data around gameplay composition; organize engine internals around their actual access patterns. Confusing the two is a common and costly mistake. When an engine tries to use the same ECS representation for both gameplay and rendering, it either compromises gameplay composition (by adding renderer-specific fields to gameplay components, polluting the game's data model) or compromises rendering performance (by scattering GPU-relevant data across archetype tables designed for gameplay queries). The correct approach is to let each domain choose the representation that serves its workload and define explicit translation points between them. Chapters 3 and 8 return to that distinction, first as a contract and then as a concrete game-object model.
 
 ### Layers Become Enforceable Boundaries
 
-The diagram becomes architecture only when package structure makes it enforceable. A healthy dependency direction flows from game-facing concepts toward engine implementation and then toward platform adapters—not back upward.
+The diagram becomes architecture only when package structure makes it enforceable. A healthy dependency direction flows from game-facing concepts toward engine implementation and then toward platform adapters, not back upward.
 
-The omitted connections in Figure \ref{fig:engine-package-map} are as important as its visible bands: neither the game nor the World imports a graphics API or the private render implementation. When game code can import renderer internals, a convenient one-off feature often becomes a permanent coupling. When the World can allocate GPU resources, every future renderer change must preserve gameplay's access to those resources. A clean package graph prevents that dependency from being expressed in the first place.
+The omitted connections in Figure \ref{fig:engine-package-map} are as important as its visible bands: neither the game nor the World imports a graphics API or the private render implementation. When game code can import renderer internals, a convenient one-off feature often becomes a permanent coupling. A programmer adds a quick call to the renderer's frustum-culling function to decide whether a sound effect should play. The call works, and because it works, it stays. Six months later, the team wants to restructure the culling system, but removing that function signature would break gameplay code. Convenience became a dependency, and the dependency became a constraint on future evolution.
 
-Smallworld realizes this rule with a public game-facing API, opaque handles, and a render domain that owns the graphics interface. Later chapters will introduce the Rust and `wgpu` types that make this boundary concrete. Other engines may use different language mechanisms, modules, or plugin systems. The durable rule is the same: platform details should terminate at a narrow adapter layer rather than leak through the game model.
+When the World can allocate GPU resources, every future renderer change must preserve gameplay's access to those resources. When platform types leak upward through the layers, a windowing-library upgrade requires touching gameplay code. Unreal Engine prevents this through its module dependency system: game modules declare their dependencies explicitly, and the build system rejects cycles. Godot prevents it through server encapsulation: the `RenderingServer` owns its internal state and exposes only opaque resource IDs (RIDs) to the scene tree. The mechanism differs, but the principle is the same.
+
+Smallworld realizes this rule with a public game-facing API, opaque handles, and a render domain that owns the graphics interface. In Rust, this enforcement is structural: the game crate depends on the public API crate, which re-exports only the types the game may use. The render crate is a sibling, not a dependency of the game crate. Attempting to import a render-internal type from game code produces a compile error, not a code-review comment. Later chapters will introduce the specific `wgpu` types that make this boundary concrete. The durable rule is language-independent: platform details should terminate at a narrow adapter layer rather than leak through the game model.
+
+The cost of maintaining these boundaries is not zero. When a game programmer wants a quick visual effect, the fastest path is often to call the renderer directly. When a tool needs to display a debug overlay, the fastest path is to grab the GPU device and issue draw calls. Each shortcut is small and individually harmless. Collectively, they erode the boundary until it no longer provides its guarantees. An architecture that makes the shortcuts physically impossible (through module visibility, crate boundaries, or build-system enforcement) is more durable than one that relies on discipline alone. This is why the omitted connections in the package map are design decisions, not oversights.
 
 ## An Engine in Time: Boot and the Main Loop
 
@@ -85,29 +110,61 @@ The package map answers what the engine contains and which dependencies it permi
 
 ### Boot Once: Establish the Runtime
 
-When a game starts, it hands the engine configuration—such as its preferred window mode, rendering policy, and initial content—and an application object containing its game-specific behavior. The engine then establishes its runtime in a dependency-aware order:
+When a game starts, it hands the engine a configuration struct (specifying window mode, rendering policy, initial content, and performance budgets) and an application object containing the game's specific behavior. The engine then establishes its runtime in a dependency-aware order:
 
 1. **Create the platform connection.** The engine obtains a native window or display surface, starts receiving operating-system events, and establishes clocks and file access.
 2. **Discover the graphics environment.** It asks the available graphics adapters what they support: formats, memory limits, presentation modes, and optional features. The engine selects a suitable device and configures rendering paths that fit those capabilities. This is why a modern renderer is not simply a fixed list of effects: it adapts its implementation to the machine it is running on.
 3. **Start execution services.** The engine prepares its job workers, message queues, diagnostics, and any dedicated execution contexts used for rendering, audio, or asynchronous IO. Input is collected into an engine-owned buffer; audio and rendering services receive the command paths through which the game will later request work.
 4. **Create the first World.** The engine invokes the game's initialization code and constructs an initial world from a description such as a menu scene, a level, or a loading screen. That description identifies entities and assets, rather than requiring every texture, mesh, sound, and world cell to be resident immediately.
-5. **Begin loading and prepare the first presentation.** Asset work proceeds from storage into CPU memory, through decoding and processing, and—where required—into graphics memory. The engine can show a loading screen, menu, or placeholder scene while this work continues. The important point is that the first World can already be alive and responsive while its content becomes available.
+5. **Begin loading and prepare the first presentation.** Asset work proceeds from storage into CPU memory, through decoding and processing, and (where required) into graphics memory. The engine can show a loading screen, menu, or placeholder scene while this work continues. The important point is that the first World can already be alive and responsive while its content becomes available.
 
-By the end of boot, the engine owns the runtime infrastructure and the World. The game has not surrendered authorship of its rules; rather, control has inverted. The engine now calls game code at defined lifecycle points and gives it the narrow game-facing context needed at each point. Chapter 3 explains the ownership boundaries that make this inversion safe.
+This ordering is not arbitrary. It is dependency-aware: each step relies only on resources established by earlier steps. Get the ordering wrong and circular dependencies appear. A common example: the renderer needs the asset system to load compiled shaders, but the asset system needs the renderer's staging pool to upload texture data into GPU memory. If both try to initialize simultaneously, each blocks waiting for the other. The solution is to recognize the asymmetry: the renderer can be initialized with a minimal set of built-in shaders (compiled into the binary or loaded from a known path) before the asset system comes online. The asset system can then register the staging pool as an upload target after the renderer has created it. Dependency-ordered initialization makes this sequencing explicit, while ad-hoc "lazy init" patterns hide the ordering behind opaque first-use checks that can silently break when a new subsystem changes the order of first access.
+
+
+\floattop
+
+```{#lst-engine-config .rust lst-cap="EngineConfig: the game's declaration of engine preferences"}
+struct EngineConfig {
+    title:           String,
+    window_mode:     WindowMode,
+    fixed_timestep:  f32,
+    pipeline_mode:   PipelineMode,
+    pacing:          PacingConfig,
+    render_budget:   RenderBudget,
+    log_level:       LogLevel,
+}
+```
+
+The same principle applies at a smaller scale within each step. When the engine creates the graphics device, it must request the features and limits that later subsystems will need. If the renderer requests compute-shader support but the asset system also needs compute shaders for GPU-accelerated texture compression, the feature request must account for both consumers. A dependency-ordered boot makes these requirements visible: each subsystem declares what it needs, and the boot sequence aggregates those declarations before creating the device. The alternative, where subsystems discover missing features at first use and crash or silently degrade, produces bugs that depend on the order in which the player happens to trigger features.
+
+The historical parallel is instructive. Early engines often initialized subsystems in whatever order the main function listed them, relying on the programmer to remember the correct sequence. Adding a new subsystem meant finding the right insertion point by trial and error. Unreal Engine's module system improved on this with explicit module dependencies and a topological initialization order. Godot's server architecture improved on it differently: each server initializes independently because it owns its state and communicates through messages rather than shared initialization-time references. Smallworld follows the explicit-dependency approach, where the boot sequence is a known, tested, linear order that can be debugged by reading a single function.
+
+@lst-engine-config shows the configuration struct that the game passes to the engine at the entry point, declaring its preferences for window mode, simulation rate, rendering policy, and performance budgets.
+
+
+By the end of boot, the engine owns the runtime infrastructure and the World. The game has not surrendered authorship of its rules; rather, control has inverted. The engine now calls game code at defined lifecycle points and gives it the narrow game-facing context needed at each point. This inversion of control is central to the engine's architecture and deserves careful examination, which we provide in the contracts section below. Chapter 3 explains the ownership boundaries that make this inversion safe.
 
 ### Run Continuously: Advance, Present, and Respond
 
 Once boot is complete, the engine enters its main loop. A useful high-level reading is that three kinds of work proceed together:
 
-- **The game side** receives buffered input, advances time, runs game rules and simulation, updates the World, and issues requests such as “play this sound” or “load this asset.” Fixed-rate simulation work and frame-rate update work may occur at different cadences; the next chapter explains why.
+- **The game side** receives buffered input, advances time, runs game rules and simulation, updates the World, and issues requests such as "play this sound" or "load this asset." Fixed-rate simulation work and frame-rate update work may occur at different cadences; the next chapter explains why.
 - **The render side** receives a description of the current scene, prepares the resources needed to draw it, records graphics work, and presents an image in the window. It may be rendering a slightly earlier game state while the game side is already preparing the next one.
 - **Continuous services** keep working alongside both: audio mixes small blocks of sound samples, streaming reads and prepares content, jobs finish in the background, and the platform delivers resize, focus, and shutdown events. UI belongs to this loop as well: it consumes input, changes game-visible state, and is composed into the presented image.
 
-This cycle is not merely “update, then draw.” It is a coordination problem across work with different rates, different latency requirements, and different owners. A resize must be handled even when simulation is paused; audio must continue producing samples even when no frame is presented; streaming must respect memory and bandwidth budgets while the player moves. This brings us to the third question: which contracts let domains coordinate without breaking the boundaries established by the package map?
+This cycle is not merely "update, then draw." It is a coordination problem across work with different rates, different latency requirements, and different owners. Simulation may advance at a stable 60 Hz; frames arrive when the display and graphics work allow; audio must produce samples continuously at 48 kHz regardless of frame rate; streaming must respect memory and bandwidth budgets while the player moves. A resize must be handled even when simulation is paused; audio must continue producing samples even when no frame is presented; streaming must proceed even when the renderer is stalled on a GPU fence.
+
+The solution, adopted in some form by every modern engine, is a fixed phase structure: a defined sequence of named phases that repeat each tick, where each phase has a known owner, a known set of inputs, and a known set of outputs. Figure \ref{fig:main-loop-phases} shows the two phase sequences that form Smallworld's main loop.
+
+\input{figures/main-loop-phases.tex}
+
+The **game tick** runs on the Game Thread. It drains platform events into a polled snapshot (Input), advances deterministic simulation at a fixed rate (Fixed), runs frame-rate-dependent game logic (Update), propagates derived state such as hierarchies and bounds (Late), builds an owned render-facing description of the current frame (Extract), and resets change tracking for the next tick (Clear). The **render tick** runs on a dedicated Render Thread. It waits for the game tick's packet (Receive), applies deltas to its private retained scene (Prepare), determines what each camera can see (Cull), records GPU commands through the render graph (Record), submits them (Submit), and presents the image to the display (Present). The two ticks overlap: the Game Thread prepares frame N+1 while the Render Thread draws frame N. They synchronize only at the Extract/Receive boundary, where an owned value transfers through a bounded channel.
+
+Each phase reads only what the previous phase produced. No phase reaches back into a previous phase's private state. The ordering is an invariant, not a suggestion: if Extract ran before Late, the packet would contain stale hierarchy data; if Update ran before Fixed, game logic would see last tick's physics state. Chapter 4 defines the exact timing rules, pacing policy, and lifecycle event handling in detail. For now, the important architectural observation is that the main loop's coordination role is what motivates the contracts between domains. Without explicit contracts, the scheduler cannot reason about what each domain needs, what it produces, and when it is safe to hand control to the next consumer.
 
 ## Contracts Between Domains
 
-The package map names the engine's domains; the lifecycle diagram shows them becoming active. Contracts govern the traffic between them. Without explicit contracts, a useful package layout quickly degenerates into every subsystem reaching into every other subsystem's state.
+The package map names the engine's domains; the lifecycle diagram shows them becoming active. Contracts govern the traffic between them. Without explicit contracts, a useful package layout quickly degenerates into every subsystem reaching into every other subsystem's state, reproducing exactly the entangled dependency graph that the layered architecture was supposed to prevent.
 
 At this level, three contracts matter more than the exact queue, data structure, or thread count:
 
@@ -115,29 +172,86 @@ At this level, three contracts matter more than the exact queue, data structure,
 2. **The engine owns runtime control and calls game code at defined phases.**
 3. **Ownership, feedback, and exceptional events remain explicit.**
 
-The following sections explain the reasoning behind those contracts. Later chapters turn each into concrete Rust types, queues, phases, and performance budgets.
+The following sections explain the reasoning behind those contracts and trace them through concrete examples. Later chapters turn each into concrete Rust types, queues, phases, and performance budgets.
 
 ### Data Contracts: Translate Intent, Do Not Share Internals
 
-The same logical thing takes different forms as it moves through an engine. A tree might begin as authored source data, become a named asset known to the game, appear in the World as a transform and an asset reference, and finally become draw-ready data in the renderer. Each representation serves the next domain's work rather than attempting to be universal.
+The same logical thing takes different forms as it moves through an engine. Consider the journey of a mesh from creation to screen. An artist authors a tree model in a 3D modeling tool and exports it as a source file (FBX, glTF, or a proprietary format). The engine's asset pipeline imports that source data, processes it (optimizing the vertex layout, generating LOD levels, compressing textures, building a bounding volume), and produces a cooked asset stored in the engine's content directory. When a game system spawns an entity with a `MeshRenderer` component, it provides an `AssetHandle<Mesh>` that names the cooked asset. The asset system resolves that handle: if the asset is not yet resident, it schedules a load; if it is resident, it returns a reference to the CPU-side mesh data. During the extract phase, the engine reads the entity's transform and mesh handle and writes them into a `FramePacket` entry that the render domain will consume. The render domain receives this entry and translates it into its own retained representation: a draw command referencing a GPU vertex buffer, an index buffer, a material pipeline, and a set of bind groups. Finally, the command encoder records the draw call, and the GPU executes it.
 
-This translation is valuable for two reasons. First, game code can express *what it wants*—a mesh, material, sound, light, or streaming request—without knowing where its bytes live or which hardware feature will realize it. Second, the receiving subsystem can organize the data around its own access pattern: sequential rendering work, background IO, real-time audio mixing, or spatial queries. The result is less coupling and fewer accidental promises about memory layout, timing, or platform capabilities.
+Each of these transformations crosses a boundary and changes representation. The source file becomes a cooked asset (crossing the authoring-to-runtime boundary). The cooked asset becomes a handle in the World (crossing the asset-to-gameplay boundary). The handle and transform become a FramePacket entry (crossing the game-to-render boundary, which Chapter 3 will call the Game-Render Firewall). The FramePacket entry becomes a GPU draw command (crossing the render-domain-to-hardware boundary). At no point does a downstream consumer see the upstream representation directly. The game never handles raw vertex data. The renderer never reads the live World. The GPU never references the asset system's internal registry.
 
-The boundary between simulation and rendering is the clearest example. The game side supplies an owned description of the scene it wants presented; the render side converts that description into graphics work without reading or mutating the live World. Smallworld calls its version of this handoff a `FramePacket`, but the durable lesson is independent of that name: cross a domain boundary with a deliberate, self-contained representation. Chapter 3 establishes why this game--render firewall is necessary; the rendering chapters later develop its packet and render-scene implementation.
+Notice what each boundary buys. Because the game holds only a handle, the asset system is free to evict the mesh from CPU memory after uploading it to the GPU, or to replace it with a lower-LOD version, without the game's knowledge. Because the renderer receives an extracted description rather than a live World reference, it can reorder, batch, or cull draw commands without concern for simulation side effects. Because the GPU receives recorded commands rather than pointers into the renderer's data structures, the renderer can double-buffer its state or reorganize its memory pools between frames. Each boundary is a point of freedom: the implementation on either side can change independently, so long as the representation at the boundary remains stable.
+
+This translation is valuable for two reasons. First, game code can express *what it wants* (a mesh, material, sound, light, or streaming request) without knowing where its bytes live or which hardware feature will realize it. Second, the receiving subsystem can organize the data around its own access pattern: sequential rendering work, background IO, real-time audio mixing, or spatial queries. The result is less coupling and fewer accidental promises about memory layout, timing, or platform capabilities.
+
+The boundary between simulation and rendering is the clearest example. The game side supplies an owned description of the scene it wants presented; the render side converts that description into graphics work without reading or mutating the live World. Smallworld calls its version of this handoff a `FramePacket`, but the durable lesson is independent of that name: cross a domain boundary with a deliberate, self-contained representation. Unreal Engine's `FSceneProxy` mechanism, which copies game-thread data into renderer-owned proxies, follows the same principle [@epic-parallel-rendering]. Godot's `RenderingServer` accepts resource IDs and drawing commands through a message-like interface, keeping its internal scene representation private [@godot-rendering-server]. Chapter 3 establishes why this game-render firewall is necessary; the rendering chapters later develop its packet and render-scene implementation.
 
 ### Control Contracts: The Engine Drives the Game
 
 Data flows downward through increasingly specialized representations. **Control flows differently.** The platform starts the engine; the engine owns the main loop; and the engine calls game code at defined lifecycle points. This inversion of control lets the runtime coordinate input, simulation, rendering, audio, streaming, UI, and shutdown without letting any individual game feature take over the process.
 
+To understand why inversion of control matters, consider the alternative. In a **library model**, the game owns the main loop and calls engine services as needed:
+
+```
+// Library model: game owns the loop
+loop {
+    let input = input_lib::poll();
+    game.update(input);
+    let scene = game.build_scene();
+    renderer::draw(scene);      // blocks until GPU finishes
+    audio::mix();               // missed if draw was slow
+    streaming::tick();           // starved if mix ran long
+}
+```
+
+This works for simple cases, but it breaks down as complexity grows. Who decides when to poll input relative to simulation? Who ensures that audio gets its samples on time even when a frame is slow? Who handles a window resize that arrives between `update` and `draw`? Who coordinates shutdown so that saves flush before the IO system is torn down? In the library model, the game programmer must solve all of these coordination problems manually, and each new subsystem adds a new interaction to manage. The library model also prevents the engine from overlapping work across frames. Because the game owns the call sequence, it cannot allow the renderer to work on frame N while simulation prepares frame N+1; that would require the engine to schedule both activities, which the library model does not permit.
+
+The pattern is familiar from other domains. A web framework like Rails or Django does not let the application own the HTTP request loop; the framework receives the request and calls the application's handler at a defined point. A GUI toolkit does not let the application own the event loop; the toolkit dispatches events and calls the application's callbacks. The reason is the same in all cases: when the runtime must coordinate multiple concurrent concerns (HTTP pipelining, event delivery, UI repainting), centralized control over the loop is the only tractable design. Game engines discovered this independently, but the underlying principle is identical.
+
+In the **engine model**, the engine owns the loop and calls game code at defined phases. @lst-app-trait shows the trait that a game implements to participate in the engine's lifecycle, along with the engine's entry point that takes ownership of the loop.
+
+```{#lst-app-trait .rust lst-cap="The App trait: the engine calls game code, not the other way around"}
+trait App {
+    fn init(&mut self, ctx: &mut GameContext);
+    fn update(&mut self, ctx: &mut GameContext, dt: f32);
+    fn fixed_update(&mut self, ctx: &mut GameContext, fixed_dt: f32);
+    fn shutdown(&mut self);
+}
+
+impl Engine {
+    fn run(config: EngineConfig, app: impl App + 'static) -> !;
+}
+```
+
+The `run` function's return type, `-> !` (Rust's "never" type), signals that the engine takes permanent ownership of the process. The game does not get control back after calling `run`. This is the structural expression of inversion of control: the game provides its behavior through the `App` trait, and the engine decides when to invoke each method.
+
 The game therefore provides rules, content, configuration, and extensions. The engine decides when to poll input, when simulation may advance, when to invoke gameplay systems, when to ask for a scene description, and when to present an image. A game can customize the engine through the registered extension seams in Figure~\ref{fig:engine-package-map}, but those extensions participate in the engine's schedule rather than creating private loops or bypassing ownership boundaries.
 
-This distinction matters because the engine must reconcile incompatible cadences. Simulation may advance at a stable rate; frames arrive when the display and graphics work allow; audio must produce samples continuously; streaming and asset processing may take much longer than one frame. The Core Loop and Frame Lifecycle chapter will define those schedules and the associated pacing policy.
+@lst-game-context-ch2 shows the context struct that the engine passes to the game at each lifecycle callback. The game receives mutable access to the World and to command-issuing services (assets, audio, events) but only immutable access to platform state (input, time, window). This asymmetry is deliberate: the game observes the external environment but does not control it.
+
+```{#lst-game-context-ch2 .rust lst-cap="GameContext: what the game receives at each phase"}
+struct GameContext<'a> {
+    world:  &'a mut World,
+    input:  &'a Input,
+    time:   &'a Time,
+    assets: &'a mut AssetServer,
+    audio:  &'a mut AudioCommands,
+    events: &'a mut EventBus,
+    window: &'a WindowState,
+}
+```
+
+This distinction matters because the engine must reconcile incompatible cadences. Simulation may advance at a stable rate; frames arrive when the display and graphics work allow; audio must produce samples continuously; streaming and asset processing may take much longer than one frame. Without centralized control, each subsystem would need to negotiate its own scheduling with every other subsystem, and the result would be the same tangled dependency graph that the layered architecture was designed to prevent. Chapter 4 defines those schedules and the associated pacing policy. Chapter 5 examines the input phase in detail, showing how platform events are quarantined into a polled snapshot that the engine provides to game code as the immutable `input` borrow in `GameContext`.
 
 ### Feedback and Lifecycle Contracts: Make the Reverse Path Deliberate
 
-Most useful work moves from game intent toward platform effects: World changes become a presented image, an audio request becomes sound, and a streaming request becomes resident content. Some information must travel back, but it should return as **feedback**, not as a hidden backdoor into another domain's state. Examples include loading progress, GPU timing, completed work, memory pressure, and a failed asset request. The receiving domain can use that information to adjust future decisions without taking ownership of the source domain's internals.
+Most useful work moves from game intent toward platform effects: World changes become a presented image, an audio request becomes sound, and a streaming request becomes resident content. Some information must travel back, but it should return as **feedback**, not as a hidden backdoor into another domain's state.
 
-Exceptional events follow similarly explicit paths. Resize, focus changes, device loss, shutdown, asset failure, and budget pressure are not ordinary gameplay data, and they cannot wait behind a stalled frame. Treating them as first-class lifecycle events keeps the engine responsive when normal work is paused, backpressured, or recovering. The Core Loop and Frame Lifecycle chapter returns to these cases; streaming, rendering, audio, and tooling chapters explain their domain-specific consequences.
+Consider what happens without explicit feedback. The game spawns an entity and requests a mesh load. The asset system begins loading the mesh from disk. How does the game know when the mesh is ready? In a naive design, the game polls the asset system every frame: "is my mesh loaded yet?" This works, but it means the game must track every pending request and retry every frame. Worse, if the load fails (corrupted file, missing dependency, exceeded memory budget), the game discovers the failure only when it polls, and the error information is limited to "not loaded." An explicit feedback contract inverts this: the asset system sends a completion event (or a failure event with diagnostic information) through a defined channel, and the game processes it during a known phase. The game does not need to poll; it receives notification. The error is rich: "asset `tree_oak_01` failed to load because texture `bark_diffuse` exceeded the streaming budget by 4 MB."
+
+The same principle applies to rendering feedback. The renderer can report GPU frame timing, memory pressure, occlusion query results, and dynamic-resolution decisions. This information travels back to the game side through a dedicated feedback channel, not through shared mutable state. The game can use it to adjust quality settings, spawn fewer particles, or warn the player that performance is degraded. The renderer does not need to know what the game does with the information; the game does not need to know how the renderer measured it. The feedback contract defines the vocabulary and the delivery mechanism; each domain retains its internal freedom.
+
+Exceptional events follow similarly explicit paths. Resize, focus changes, device loss, shutdown, asset failure, and budget pressure are not ordinary gameplay data, and they cannot wait behind a stalled frame. A window resize, for example, invalidates the GPU's swap chain and requires the renderer to reconfigure its surface. If this event is queued behind ordinary gameplay data and the gameplay tick is slow, the user sees a stretched or corrupted image for several frames. Treating resize as a first-class lifecycle event with its own delivery channel keeps the engine responsive when normal work is paused, backpressured, or recovering. Chapter 4 returns to these cases with a detailed lifecycle event protocol; streaming, rendering, audio, and tooling chapters explain their domain-specific consequences.
 
 ### Ownership: The Contract Beneath the Others
 
@@ -149,7 +263,13 @@ The data, control, and feedback contracts are all expressions of a deeper rule: 
 - The **audio domain** owns its mixer and real-time callback state.
 - The **platform layer** owns native windows, event pumps, and device integration.
 
-When one domain needs something another owns, it receives a handle, an immutable view, or an owned message—not an unrestricted mutable reference. Rust makes this style of design unusually natural because the type system can represent transfer, borrowing, and sharing directly. The principle itself is language-independent and has survived in many successful engines.
+When one domain needs something another owns, it receives a handle, an immutable view, or an owned message, never an unrestricted mutable reference. This rule sounds simple, but decades of C++ engine development demonstrate how easily it is violated. In a traditional C++ engine, a mesh loaded by the asset system might be wrapped in a `std::shared_ptr<Mesh>` and held by three different owners: the asset cache (so the mesh can be reused), the World (so the entity can reference it), and the GPU resource pool (so the renderer can draw it). Each owner believes it has a legitimate claim to the mesh's lifetime. The result is unpredictable destruction timing. When the entity is removed from the World, its `shared_ptr` drops, but the mesh persists because the asset cache and GPU pool still hold references. When the asset cache is flushed, the mesh persists because the GPU pool still holds a reference. The mesh is logically freed but never reclaimed. Worse, if the GPU pool is destroyed before the asset cache (a destruction-order bug that is easy to introduce during refactoring), the mesh's destructor may attempt to release a GPU buffer through a device that no longer exists, producing a crash that only appears during shutdown.
+
+Rust's ownership model makes this class of bug unrepresentable [@rust-book]. A value has one owner. References are either shared and immutable or exclusive and mutable, never both at once. Transferring ownership is explicit (a `move`). When a domain sends data across a boundary, the type system ensures that the sender can no longer access it. The engine does not need conventions, code review, or runtime checks to enforce ownership discipline; the compiler rejects violations before the program runs. This does not mean that Rust eliminates all resource-management complexity (GPU resources still need explicit lifetime management through handles and arenas), but it does mean that the most common ownership violations in C++ engines are compile-time errors in Rust.
+
+The handle-based alternative avoids the `shared_ptr` problem entirely. Instead of sharing a `Mesh` object among three owners, the asset system owns the mesh and issues an opaque `AssetHandle<Mesh>`. The World stores the handle (a lightweight generational index, typically 8 bytes). The render domain receives the handle as part of the extracted scene description. When the render domain needs the mesh's GPU data, it looks up the handle in its own resource pool, where it has already uploaded the vertex and index buffers. No domain shares a pointer to the mesh object. No domain can extend the mesh's lifetime by forgetting to release a reference. If the asset system decides to evict the mesh, it invalidates the handle; the next lookup returns a "not resident" result, and the game or renderer can respond with a fallback. Destruction timing is deterministic because there is exactly one owner.
+
+This pattern is not unique to Rust or to Smallworld. Unreal Engine's RHI layer uses resource handles internally for GPU objects. Godot's servers use RID (Resource ID) integers as the only externally visible reference to internal resources. The handle pattern has been the standard in high-performance systems (database connection pools, file descriptor tables, GPU resource managers) for decades. What Rust adds is compile-time enforcement: attempting to share a mutable reference where a handle was expected is a type error, not a code-review finding.
 
 ### Smallworld's Guiding Principles
 
@@ -157,23 +277,50 @@ Smallworld records the architectural commitments introduced in this chapter as f
 
 1. **Data-driven game state.** The game-facing World uses entities, plain-data components, and systems over queries rather than a primary inheritance hierarchy.
 2. **Thread ownership.** Each execution context owns its mutable state; work crosses the major boundaries through explicit messages and narrowly defined sharing rules.
-3. **Game--render firewall.** The renderer owns device-local resources and command submission; the World supplies an extracted, render-relevant description rather than live mutable game state.
+3. **Game-render firewall.** The renderer owns device-local resources and command submission; the World supplies an extracted, render-relevant description rather than live mutable game state.
 4. **Handle-based resources.** Games hold stable, opaque references while the engine owns loading, residency, caching, and GPU representation.
 5. **Named budgets.** Frame time, memory, upload bandwidth, and streaming range are explicit, observable limits with a defined policy when the limit is reached.
 
-The rest of the book explains why each commitment exists, what failure modes it prevents, and how its implementation realizes it.
+These five principles recur throughout the book. Each later chapter will show how its domain realizes or depends on one or more of these commitments, what failure modes the commitment prevents, and how the implementation makes the commitment concrete.
 
-## How the Rest of the Book Uses This Map
-
-This chapter established the map, its lifecycle, and its contracts. The following chapters are guided zooms.
-
-- **Engine Runtime Contracts** defines the World–render firewall, the hybrid data model, and thread ownership contracts.
-- **Core Loop and Frame Lifecycle** defines how the domains advance in time, pace frames, and respond to lifecycle events.
-- **Resource, streaming, and rendering chapters** follow the data path from authored assets to visible geometry and lighting.
-- **Physics, animation, audio, networking, and tools chapters** examine the services that cooperate with the World without dissolving its boundaries.
-
-Readers should return to this map whenever a later subsystem introduces a new handle, thread, queue, or package. The design question is always the same: which domain owns this state, and what is the smallest explicit contract through which another domain may use it?
+The fifth principle, named budgets, deserves particular emphasis because it is the one most often left implicit in engine design. Every engine has budgets, whether or not it acknowledges them. GPU memory is finite. Upload bandwidth per frame is finite. The number of draw calls the GPU can execute within a 16.67 ms frame is finite. When these limits are implicit, the engine runs normally during development and fails unpredictably in production: a level with one too many unique textures triggers an out-of-memory crash; a streaming system that was fast enough during testing saturates the upload queue when the player moves quickly through a dense area. Making budgets explicit (a `RenderBudget` with a stated triangle count, a `StreamingBudget` with a stated bytes-per-frame limit, a `MemoryBudget` with a stated pool size) transforms these silent failures into observable, debuggable events. The engine can report "streaming budget exceeded by 12 MB" rather than crashing with "out of memory" in an allocation whose call stack is three subsystems removed from the cause.
 
 ## Chapter Summary {.unnumbered}
 
-A modern engine is best understood as a group of cooperating ownership domains rather than a feature checklist. The game-facing World represents game state; engine services manage assets, rendering, simulation support, and tools; platform adapters contain operating-system and GPU details. Data descends through stable handles and extracted representations, while control moves through defined phases and explicit lifecycle paths. Smallworld is one concrete Rust and `wgpu` realization of this model. The next chapter establishes the most important of its contracts: the game–render firewall.
+A modern engine is best understood as a group of cooperating ownership domains rather than a feature checklist. This chapter established the architectural map that the rest of the book will zoom into:
+
+1. **Organization.** The engine is divided into a game-facing World, a set of engine services (rendering, assets, streaming, physics, audio, tools), a shared foundation layer, and a platform adapter band. Dependencies flow downward; the omitted upward connections are as architecturally significant as the ones drawn. The layered pattern emerged historically because engines that allowed unrestricted cross-layer access could not be ported, maintained, or extended.
+
+2. **Lifecycle.** The engine boots in a dependency-aware order (platform, graphics discovery, execution services, World creation, initial loading) and then enters a main loop where game-side simulation, render-side presentation, and continuous services (audio, streaming, IO) proceed concurrently. The main loop is a coordination problem, not a sequential pipeline.
+
+3. **Contracts.** Three contracts govern inter-domain traffic. The data contract requires that information crossing a boundary adopt a representation chosen for its consumer, not a shared internal format. The control contract inverts the traditional library relationship: the engine owns the loop and calls game code at defined phases, rather than the game calling engine services directly. The ownership contract ensures that domains communicate through handles, immutable views, or owned messages, never shared mutable references. Rust's type system makes ownership violations compile-time errors rather than runtime bugs.
+
+4. **Guiding principles.** Smallworld carries these contracts as five named commitments: data-driven game state, thread ownership, the game-render firewall, handle-based resources, and named budgets.
+
+The following chapters are guided zooms into this map.
+
+**Engine Runtime Contracts** (Chapter 3) defines the World-render firewall, the hybrid data model, and thread ownership contracts.
+
+**Core Loop and Frame Lifecycle** (Chapter 4) defines how the domains advance in time, pace frames, and respond to lifecycle events.
+
+**Input and Platform Interaction** (Chapter 5) traces the path from raw platform signals to game-facing intent. Subsequent chapters on resources, streaming, rendering, physics, animation, audio, networking, and tools each examine a specific domain and its contracts with the rest of the engine. Readers should return to this chapter's map whenever a later subsystem introduces a new handle, thread, queue, or package.
+
+The design question is always the same: which domain owns this state, and what is the smallest explicit contract through which another domain may use it?
+
+## Review Questions {.unnumbered}
+
+1. Why does an engine architecture need explicit contracts between domains, rather than letting each subsystem access whatever data it needs? Describe a concrete failure that results from the absence of such contracts.
+
+2. Trace the path of a mesh from authored source data to a visible pixel. Name each domain boundary the data crosses and how its representation changes at each boundary.
+
+3. The chapter describes inversion of control: the engine calls game code, not the other way around. What would break if the game owned the main loop and called engine services as a library? Give at least two coordination problems that the library model cannot solve cleanly.
+
+4. Why should the game-facing World not contain GPU handles, render caches, or streaming state? What antipattern results if it does, and how does it affect the engine's ability to evolve its renderer independently of gameplay?
+
+5. The five guiding principles include "named budgets." Give an example of a budget that, if left implicit, could cause a failure that is difficult to diagnose. Explain how making that budget explicit changes the failure from a crash into a debuggable event.
+
+6. Boot order is dependency-aware. Describe a circular dependency that could arise between the renderer and the asset system, and explain how the engine resolves it without resorting to lazy initialization.
+
+7. The ownership contract states that domains communicate through handles, immutable views, or owned messages rather than shared mutable references. How does Rust's type system make this contract enforceable at compile time? Contrast this with how a C++ engine would enforce the same contract.
+
+8. The chapter's package map (Figure \ref{fig:engine-package-map}) omits certain connections deliberately. Pick one omitted connection (for example, game code importing renderer internals) and explain what architectural damage would result if it were allowed.

@@ -1,0 +1,45 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Game tick label
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.4,1.4) {Game tick};
+
+  % Game tick phases
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (gi) at (1.2,1.1) {\textbf{Input}\\\tiny drain events};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (gf) at (2.9,1.1) {\textbf{Fixed}\\\tiny physics, sim};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (gu) at (4.6,1.1) {\textbf{Update}\\\tiny game logic};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (gl) at (6.3,1.1) {\textbf{Late}\\\tiny propagate};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (ge) at (8.0,1.1) {\textbf{Extract}\\\tiny build packet};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (gc) at (9.7,1.1) {\textbf{Clear}\\\tiny reset tracker};
+  \draw[-Latex, line width=0.4pt] (gi.east) -- (gf.west);
+  \draw[-Latex, line width=0.4pt] (gf.east) -- (gu.west);
+  \draw[-Latex, line width=0.4pt] (gu.east) -- (gl.west);
+  \draw[-Latex, line width=0.4pt] (gl.east) -- (ge.west);
+  \draw[-Latex, line width=0.4pt] (ge.east) -- (gc.west);
+
+  % Render tick label
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.4,-0.8) {Render tick};
+
+  % Render tick phases
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rr) at (1.2,-1.1) {\textbf{Receive}\\\tiny wait packet};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rp) at (2.9,-1.1) {\textbf{Prepare}\\\tiny upload, delta};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rc) at (4.6,-1.1) {\textbf{Cull}\\\tiny visibility};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rd) at (6.3,-1.1) {\textbf{Record}\\\tiny GPU cmds};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rs) at (8.0,-1.1) {\textbf{Submit}\\\tiny queue};
+  \node[engine-package, text width=1.15cm, minimum height=0.7cm] (rp2) at (9.7,-1.1) {\textbf{Present}\\\tiny swapchain};
+  \draw[-Latex, line width=0.4pt] (rr.east) -- (rp.west);
+  \draw[-Latex, line width=0.4pt] (rp.east) -- (rc.west);
+  \draw[-Latex, line width=0.4pt] (rc.east) -- (rd.west);
+  \draw[-Latex, line width=0.4pt] (rd.east) -- (rs.west);
+  \draw[-Latex, line width=0.4pt] (rs.east) -- (rp2.west);
+
+  % Channel transfer
+  \draw[-Latex, line width=0.55pt] (ge.south) -- node[right, font=\sffamily\tiny, align=left] {owned\\packet} (rr.north);
+
+  % Feedback
+  \draw[-Latex, line width=0.4pt, dashed] (rp2.north west) to[bend left=14] node[above, font=\sffamily\tiny] {feedback} (gi.south);
+\end{tikzpicture}
+\caption{The game tick and render tick as fixed phase sequences. Each phase has a known owner and a known set of inputs and outputs. The two ticks run on separate threads, synchronized only by the owned packet transfer at the Extract/Receive boundary. Chapter~4 defines the exact timing, pacing, and lifecycle rules.}
+\label{fig:main-loop-phases}
+\end{figure}
+\FloatBarrier

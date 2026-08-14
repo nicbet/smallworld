@@ -49,6 +49,15 @@
 % placement over leaving a large hole in the surrounding prose.
 \AtBeginDocument{\floatplacement{codelisting}{!pb}}
 
+% \floattop — place the next codelisting at the top of a page instead of the
+% default bottom.  Uses an AfterEndEnvironment hook to reset the placement
+% automatically after the listing closes, so no manual reset is needed.
+\usepackage{etoolbox}
+\newcommand{\floattop}{%
+  \floatplacement{codelisting}{!t}%
+  \AfterEndEnvironment{codelisting}{\floatplacement{codelisting}{!pb}}%
+}
+
 % Quarto callouts: float to top/bottom like figures instead of sitting inline.
 % Quarto emits callouts with `enhanced jigsaw` + `breakable`; floating and
 % breakable are mutually exclusive in tcolorbox, so we override the style to
