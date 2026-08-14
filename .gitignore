@@ -16,3 +16,5 @@
 book/.quarto/
 book/**/*.quarto_ipynb
 book/_output/
+/.quarto/
+**/*.quarto_ipynb
