@@ -21,6 +21,7 @@
 
 - Explain why CPU memory, GPU memory, upload bandwidth, and frame time need named limits.
 - Frame budgets as arbitration rules among competing services rather than late-stage optimization.
+- **Deferred from Chapter 3:** Chapter 3 introduces the named-budgets principle with a failure-mode story (silent VRAM exhaustion) but defers the concrete types. This section should present the `MemoryBudget` struct (limit, used, high-water mark), show how every GPU pool carries its budget, and explain the arbitration policy (evict LRU, lower LOD, or reject).
 
 ### Resource Lifetime and Residency
 

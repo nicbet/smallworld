@@ -26,6 +26,7 @@
 
 - Establish device-local resources and command submission as renderer-owned state.
 - Explain how asset and streaming work can prepare uploads without breaking that invariant.
+- **Deferred from Chapter 3:** Chapter 3 introduces the staging pool principle (exclusive write regions, fence-based reclamation, multi-threaded resource creation) but defers implementation. This section should present the `StagingRef` type, the `ResourceOp` channel, the allocation/reclamation lifecycle, and compare with UE5's `RHIStagingBuffer` and Vulkan/D3D12 staging patterns in detail.
 
 #### Feedback Is Advisory
 

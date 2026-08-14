@@ -1,21 +1,28 @@
 \begin{table}[!tb]
 \centering
 \small
-\renewcommand{\arraystretch}{1.18}
-\begin{tabular}{p{2.9cm}p{5.1cm}p{5.1cm}}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.35\textwidth}p{0.35\textwidth}@{}}
 \toprule
-\textbf{Execution context} & \textbf{Owns} & \textbf{Communicates through} \\
+\textbf{Context} & \textbf{Owns (persistent state)} & \textbf{Communicates via} \\
 \midrule
-Game Thread (main) & World, input, time, systems, asset server & Owned render description to the Render Thread; advisory feedback back \\
-Render Thread (dedicated) & GPU context, render scene, pools, graph, targets & Render descriptions in; advisory feedback out \\
-Game Worker Pool & No persistent state; borrows work items & Scoped tasks such as \texttt{join()} and \texttt{parallel\_for()} \\
-Render Worker Pool & No persistent state; borrows work items & Scoped tasks such as \texttt{join()} and \texttt{parallel\_for()} \\
-Streaming Coordinator & Demand priority queue and budget arbiter & Demand from game; \texttt{UploadBatch} to renderer \\
-Audio Thread (dedicated) & Mixer, voices, and output stream & Drained \texttt{AudioCommands} \\
-IO Pool & No persistent state; blocking IO and decode tasks & Tasks from asset and streaming services \\
+Game Thread         & World, input, time, systems, asset server
+                    & Render description $\rightarrow$ Render Thread; feedback $\leftarrow$ Render Thread \\[3pt]
+Render Thread       & GPU context, retained render scene, resource pools, render graph
+                    & Descriptions in; feedback out \\[3pt]
+Game Worker Pool    & Nothing persistent; borrows work
+                    & Scoped tasks: \texttt{join()}, \texttt{parallel\_for()} \\[3pt]
+Render Worker Pool  & Nothing persistent; borrows work
+                    & Scoped tasks: \texttt{join()}, \texttt{parallel\_for()} \\[3pt]
+Streaming Coord.    & Demand queue, budget arbiter
+                    & Demand $\leftarrow$ Game; \texttt{UploadBatch} $\rightarrow$ Render \\[3pt]
+Audio Thread        & Mixer, voices, output stream
+                    & \texttt{AudioCommands} drained per frame \\[3pt]
+IO Pool             & Nothing persistent
+                    & Tasks from asset server and streaming \\
 \bottomrule
 \end{tabular}
-\caption{Thread ownership map. Persistent mutable state belongs to a named execution context; worker pools borrow bounded work rather than accumulating their own engine state.}
+\caption{Thread ownership map. Each named context owns its persistent mutable state; worker pools borrow bounded work rather than accumulating state of their own.}
 \label{tab:thread-ownership}
 \end{table}
 \FloatBarrier
