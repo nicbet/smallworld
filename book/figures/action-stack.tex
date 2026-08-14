@@ -1,0 +1,40 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Stack frame
+  \draw[line width=0.5pt, black!40] (-0.3,-0.5) rectangle (5.3,4.5);
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north west] at (-0.2,4.4) {Action Map Stack};
+  \node[font=\sffamily\tiny\itshape, black!50, anchor=south east] at (5.2,4.05) {top = active};
+
+  % Top of stack arrow
+  \draw[-Latex, line width=0.5pt, black!55] (5.6,3.5) -- (5.6,4.3);
+  \node[font=\sffamily\tiny\itshape, black!50, anchor=west] at (5.7,3.9) {input};
+
+  % Stack entries (bottom to top)
+  % Gameplay map (bottom, blocked)
+  \node[engine-package, minimum width=4.8cm, minimum height=0.9cm, fill=black!5] (gameplay) at (2.5,0.3) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (2.5,0.55) {gameplay};
+  \node[font=\sffamily\tiny, black!65] at (2.5,0.05) {jump, move, fire, interact};
+  \node[font=\sffamily\tiny\itshape, black!35, anchor=east] at (5.1,0.3) {blocked};
+
+  % UI map (top, active)
+  \node[engine-package, minimum width=4.8cm, minimum height=0.9cm, fill=black!10] (ui) at (2.5,3.5) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (2.5,3.75) {ui};
+  \node[font=\sffamily\tiny, black!65] at (2.5,3.25) {navigate, select, back, cancel};
+  \node[font=\sffamily\tiny, black!60, anchor=east] at (5.1,3.5) {passthrough: false};
+
+  % Blocked indicator
+  \draw[line width=0.4pt, black!25, dashed] (-0.1,1.1) -- (5.1,1.1);
+  \node[font=\sffamily\tiny\itshape, black!35, anchor=west] at (5.5,1.1) {blocked below};
+
+  % Push/pop annotations
+  \draw[-Latex, line width=0.4pt, black!55] (-1.0,2.0) -- (-0.4,3.3);
+  \node[font=\sffamily\tiny, black!55, anchor=east, text width=1.8cm, align=right] at (-1.1,2.0) {pause menu\\opens:\\push \texttt{ui}};
+
+  \draw[-Latex, line width=0.4pt, black!55] (6.5,2.0) -- (5.9,0.6);
+  \node[font=\sffamily\tiny, black!55, anchor=west, text width=1.8cm, align=left] at (6.6,2.0) {menu closes:\\pop \texttt{ui}\\gameplay resumes};
+\end{tikzpicture}
+\caption{The action-map context stack. The \texttt{ui} map sits above \texttt{gameplay} with \texttt{passthrough: false}, blocking gameplay actions while the pause menu is open. Popping the \texttt{ui} map restores gameplay input.}
+\label{fig:action-stack}
+\end{figure}
+\FloatBarrier

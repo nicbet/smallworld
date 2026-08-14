@@ -49,9 +49,18 @@
 % placement over leaving a large hole in the surrounding prose.
 \AtBeginDocument{\floatplacement{codelisting}{!pb}}
 
-% Quarto callouts reserve a small column for their icon. Keep that visual cue,
-% but tighten only the lists inside the box so their bullets do not create a
-% second, oversized indentation.
+% Quarto callouts: float to top/bottom like figures instead of sitting inline.
+% Quarto emits callouts with `enhanced jigsaw` + `breakable`; floating and
+% breakable are mutually exclusive in tcolorbox, so we override the style to
+% replace `breakable` with `float=!tb`.  Callouts should be kept short enough
+% that page-breaking is unnecessary.  Deferred to \AtBeginDocument because
+% Quarto loads tcolorbox after the preamble.
+\AtBeginDocument{%
+  \tcbset{enhanced jigsaw/.append style={float=!tb, breakable=false}}%
+}
+
+% Tighten lists inside callout boxes so the icon column and bullet indent
+% do not create a double indentation.
 \AtBeginEnvironment{tcolorbox}{%
   \setlist[itemize]{leftmargin=1.25em, labelsep=0.4em}%
   \setlist[enumerate]{leftmargin=1.5em, labelsep=0.4em}%

@@ -1,0 +1,45 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % OS Event Pump box
+  \node[engine-package, minimum width=2.8cm, minimum height=1.6cm] (os) at (0,0) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (0,0.45) {OS Event Pump};
+  \node[font=\sffamily\tiny, black!65, text width=2.4cm, align=center] at (0,-0.15) {key codes, mouse moves,\\focus, resize, device connect};
+
+  % Irregular event arrows
+  \draw[-Latex, line width=0.4pt, densely dotted] (1.55,0.35) -- (3.05,0.35);
+  \draw[-Latex, line width=0.4pt, densely dotted] (1.55,0.1) -- (3.05,0.1);
+  \draw[-Latex, line width=0.4pt, densely dotted] (1.55,-0.15) -- (3.05,-0.15);
+  \draw[-Latex, line width=0.4pt, densely dotted] (1.55,-0.4) -- (3.05,-0.4);
+  \node[font=\sffamily\tiny\itshape, black!50, anchor=south] at (2.3,0.45) {irregular callbacks};
+
+  % INPUT phase box (the quarantine boundary)
+  \node[engine-package, minimum width=2.2cm, minimum height=1.6cm, fill=black!10] (input) at (4.2,0) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (4.2,0.45) {INPUT Phase};
+  \node[font=\sffamily\tiny, black!65, text width=1.8cm, align=center] at (4.2,-0.15) {drain, translate,\\edge detect,\\freeze snapshot};
+
+  % Quarantine boundary line
+  \draw[line width=0.6pt, black!40, dashed] (3.05,1.2) -- (3.05,-1.2);
+  \node[font=\sffamily\tiny\itshape, black!45, anchor=south, rotate=90] at (2.9,0.0) {quarantine};
+
+  % Clean output arrow
+  \draw[-Latex, line width=0.7pt] (5.35,0.0) -- (6.85,0.0);
+  \node[font=\sffamily\tiny\itshape, black!50, anchor=south] at (6.1,0.05) {frozen snapshot};
+
+  % Input snapshot box
+  \node[engine-package, minimum width=2.8cm, minimum height=1.6cm] (snap) at (8.2,0) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (8.2,0.45) {Polled Snapshot};
+  \node[font=\sffamily\tiny, black!65, text width=2.4cm, align=center] at (8.2,-0.15) {\texttt{Input} + \texttt{WindowState}\\immutable for this tick};
+
+  % Consumer arrows
+  \draw[-Latex, line width=0.35pt] (9.65,0.3) -- (10.75,0.8);
+  \node[font=\sffamily\tiny, anchor=west] at (10.8,0.8) {FIXED};
+  \draw[-Latex, line width=0.35pt] (9.65,0.0) -- (10.75,0.0);
+  \node[font=\sffamily\tiny, anchor=west] at (10.8,0.0) {UPDATE};
+  \draw[-Latex, line width=0.35pt] (9.65,-0.3) -- (10.75,-0.8);
+  \node[font=\sffamily\tiny, anchor=west] at (10.8,-0.8) {LATE};
+\end{tikzpicture}
+\caption{The input quarantine. The OS event pump delivers irregular callbacks; the INPUT phase drains them into a single frozen snapshot. All subsequent phases read the same immutable \texttt{Input} and \texttt{WindowState}, with no platform types visible past the boundary.}
+\label{fig:input-quarantine}
+\end{figure}
+\FloatBarrier

@@ -41,7 +41,7 @@ The better model treats time as an engine service: a struct maintained by the en
 
 ### Three Clocks, One Struct
 
-Smallworld's `Time` struct encodes three separate notions of time and the bookkeeping required to convert between them, as shown in @lst-time-struct.
+@lst-time-struct shows Smallworld's `Time` struct, which encodes three separate notions of time and the bookkeeping required to convert between them.
 
 The three clocks serve distinct consumers, as shown in Figure \ref{fig:three-clocks}.
 
@@ -76,7 +76,7 @@ Glenn Fiedler's widely cited article "Fix Your Timestep!" [@gaffer-fix-timestep]
 
 ### The Fixed Timestep and the Accumulator
 
-The fixed timestep decouples the physics simulation's update rate from the rendering frame rate. The mechanism is an accumulator that tracks how much game time has been supplied but not yet consumed by fixed-rate work. Each frame, the engine adds the current `game_delta` to the accumulator. It then runs the FIXED phase zero or more times, subtracting `fixed_dt` from the accumulator each time, until the accumulator holds less than one full step. The remainder stays in the accumulator for the next frame (refer to @lst-accumulator for the complete pattern).
+The fixed timestep decouples the physics simulation's update rate from the rendering frame rate. The mechanism is an accumulator that tracks how much game time has been supplied but not yet consumed by fixed-rate work. Each frame, the engine adds the current `game_delta` to the accumulator. It then runs the FIXED phase zero or more times, subtracting `fixed_dt` from the accumulator each time, until the accumulator holds less than one full step. The remainder stays in the accumulator for the next frame. @lst-accumulator gives the complete pattern, including bounded catch-up and the alpha computation.
 
 ```{#lst-accumulator .rust lst-cap="Accumulator-based fixed stepping"}
 fn advance_fixed_timestep(time: &mut Time) {
@@ -123,7 +123,7 @@ The fixed timestep introduces a visual problem. Because fixed steps do not align
 
 Without interpolation, objects updated at fixed rate will appear to stutter, especially when the rendering frame rate is not an integer multiple of the fixed rate. At 144 fps with a 60 Hz fixed step, roughly 2.4 fixed steps occur per frame on average. Some frames display state from one step ago; others display state from two steps ago. The visual result is a rhythmic micro-jitter.
 
-The solution is to interpolate visual state between the previous and current fixed-tick positions using `alpha`, as in @lst-interpolation:
+The solution is to interpolate visual state between the previous and current fixed-tick positions using `alpha`. @lst-interpolation demonstrates the lerp and slerp blending that the EXTRACT phase applies.
 
 ```{#lst-interpolation .rust lst-cap="Interpolating visual transforms between fixed ticks"}
 fn interpolated_transform(prev: &Transform, curr: &Transform, alpha: f64) -> Transform {
@@ -234,7 +234,7 @@ Within each phase, individual systems can still declare dependencies on each oth
 
 The overlapped pipeline is the default because it offers the best throughput in the common case. But some applications need minimum latency more than maximum throughput. VR headsets have strict motion-to-photon budgets where an extra frame of latency can cause discomfort. Competitive multiplayer games may prioritize input responsiveness over frame rate.
 
-For these cases, Smallworld supports **lockstep mode**: the Game Thread waits for the Render Thread to finish the current frame before beginning the next tick. The pipeline collapses from two frames to one. CPU-side feedback arrives from the immediately preceding frame rather than frame *N-2*. The cost is throughput: the total frame time is now the sum of game and render work, not the maximum. @lst-pipeline-mode shows the configuration:
+For these cases, Smallworld supports **lockstep mode**: the Game Thread waits for the Render Thread to finish the current frame before beginning the next tick. The pipeline collapses from two frames to one. CPU-side feedback arrives from the immediately preceding frame rather than frame *N-2*. The cost is throughput: the total frame time is now the sum of game and render work, not the maximum. The choice between overlapped and lockstep is a single enum in the engine configuration (@lst-pipeline-mode).
 
 ```{#lst-pipeline-mode .rust lst-cap="Selecting pipeline mode"}
 EngineConfig {
@@ -256,7 +256,7 @@ Good pacing is not about making everything run as fast as possible. It is about 
 
 The most fundamental pacing mechanism is the simplest. Modern graphics drivers can buffer multiple frames of submitted work in their internal queues. This is efficient for throughput --- the GPU is never idle between frames --- but it adds latency. If the driver buffers three frames, the image currently being displayed may reflect input that was processed three frames ago, and no amount of application-level optimization can recover that latency.
 
-Smallworld's Render Thread enforces a maximum number of GPU frames in flight. Before submitting frame *N+1*, it waits on the GPU-completion signal for frame *N-1* (when `max_gpu_frames_in_flight` is 1, the default). This bounds worst-case input latency to a deterministic, configurable value rather than leaving it driver-dependent. @lst-queue-throttle shows the pattern:
+Smallworld's Render Thread enforces a maximum number of GPU frames in flight. Before submitting frame *N+1*, it waits on the GPU-completion signal for frame *N-1* (when `max_gpu_frames_in_flight` is 1, the default). This bounds worst-case input latency to a deterministic, configurable value rather than leaving it driver-dependent. @lst-queue-throttle illustrates how the SUBMIT phase waits on the oldest in-flight frame before allowing a new submission.
 
 ```{#lst-queue-throttle .rust lst-cap="GPU queue-depth throttle in the SUBMIT phase"}
 fn submit_with_throttle(
@@ -292,7 +292,7 @@ Smallworld's DRS controller uses three properties:
 
 3. **Step-limited changes.** The resolution scale changes by at most a fixed increment per frame. This keeps the temporal upscaler's history valid --- large jumps in resolution invalidate accumulated history and produce a visible pop.
 
-@lst-pacing-config collects these controls into a single configuration struct:
+@lst-pacing-config collects these controls into a single configuration struct, including vsync, target frame time, queue depth, DRS parameters, and the latency mode selector.
 
 ```{#lst-pacing-config .rust lst-cap="Pacing configuration"}
 struct PacingConfig {
@@ -350,7 +350,7 @@ The technique is tuning-sensitive: an optimistic margin misses vsync and drops a
 
 ### Render-to-Game Feedback
 
-The pipeline is not unidirectional. After each frame is submitted and presented, the Render Thread sends a `FrameFeedback` back to the Game Thread through a dedicated feedback channel. @lst-frame-feedback shows the struct:
+The pipeline is not unidirectional. After each frame is submitted and presented, the Render Thread sends a `FrameFeedback` back to the Game Thread through a dedicated feedback channel. @lst-frame-feedback defines the struct, which carries a frame index, optional GPU timing, occlusion statistics, and generic readback results.
 
 ```{#lst-frame-feedback .rust lst-cap="Render-to-game feedback"}
 struct FrameFeedback {
@@ -460,7 +460,7 @@ Smallworld replaces implicit drop ordering with an explicit five-stage teardown 
 
 **Stage 5: Destroy.** GPU resources are dropped, the device is dropped, the window is dropped, and the process exits. `Engine::run()` has a return type of `!` (never returns), reflecting that the process lifecycle is the engine's lifecycle.
 
-The ordering that bites most often in practice is Stage 1 before Stage 2: shutdown callbacks that save must run while the IO machinery is alive, not during destruction. This is a specific instance of a general principle --- never tear down infrastructure before its consumers have finished their final work. @lst-teardown shows the protocol in code:
+The ordering that bites most often in practice is Stage 1 before Stage 2: shutdown callbacks that save must run while the IO machinery is alive, not during destruction. This is a specific instance of a general principle: never tear down infrastructure before its consumers have finished their final work. @lst-teardown translates the five stages into Rust, showing the explicit ordering of shutdown, channel closure, thread joins, and GPU idle.
 
 ```{#lst-teardown .rust lst-cap="Staged teardown protocol"}
 fn teardown(engine: &mut Engine) {

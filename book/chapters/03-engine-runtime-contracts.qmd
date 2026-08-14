@@ -123,7 +123,7 @@ The Unity engine ships its Entities package as an ECS implementation, while Unre
 
 Neither engine thereby abandons every object-oriented API; the important conclusion is narrower and more durable. When the question is how to represent the mutable game World, composition of data is a better foundation than a class hierarchy. This is Smallworld's data-driven-game-state commitment.
 
-An entity is an opaque ID — a generational index into a `SlotMap`. It has no type, no base class, no vtable. What makes a "player" different from a "tree" is not inheritance but the set of components attached, as shown in @lst-entity-composition:
+An entity is an opaque ID — a generational index into a `SlotMap`. It has no type, no base class, no vtable. What makes a "player" different from a "tree" is not inheritance but the set of components attached. @lst-entity-composition contrasts a player entity (transform, mesh, physics, audio) with a light entity (transform, light source) to show how the same spawn-and-attach API produces fundamentally different game objects.
 
 ```{#lst-entity-composition .rust lst-cap="Composing game objects from components"}
 // A player: transform + mesh + physics + audio + behavior
@@ -184,7 +184,7 @@ aesthetic, but it is load-bearing:
 
 ### The Engine/Game Component Split
 
-A useful component model draws a clean line between **engine components** (defined and consumed by the engine) and **game components** (defined by each game project). Engine components such as `Transform`, `MeshRenderer`, `LightSource`, and `RigidBody` have semantic meaning to the engine — the extract step can convert a `MeshRenderer` into a draw command, and the physics system can simulate a `RigidBody`. Game components remain opaque to the engine. @lst-game-components shows this distinction in Smallworld:
+A useful component model draws a clean line between **engine components** (defined and consumed by the engine) and **game components** (defined by each game project). Engine components such as `Transform`, `MeshRenderer`, `LightSource`, and `RigidBody` have semantic meaning to the engine — the extract step can convert a `MeshRenderer` into a draw command, and the physics system can simulate a `RigidBody`. Game components remain opaque to the engine. @lst-game-components illustrates the distinction: `Health` and `Inventory` attach with the same API as engine components, but no engine system iterates over them.
 
 ```{#lst-game-components .rust lst-cap="Game-defined components remain opaque to the engine"}
 // Game-defined components — the engine doesn't know about these
@@ -202,7 +202,7 @@ The engine iterates over its known component types during the LATE phase (hierar
 
 An entity archetype should be authorable as data rather than reconstructed in code every time a level loads. This lets designers change the initial composition and tuning of a game object without editing gameplay source, and it keeps asset references out of hard-coded constructors.
 
-**Asset descriptors** are a lightweight realization: serializable RON, JSON, or binary files that describe an entity archetype. @lst-enemy-descriptor shows the shape of a Smallworld descriptor:
+**Asset descriptors** are a lightweight realization: serializable RON, JSON, or binary files that describe an entity archetype. @lst-enemy-descriptor defines an `EnemyDescriptor` with asset paths for mesh, material, and loot table alongside tuning values for health and speed.
 
 ```{#lst-enemy-descriptor .rust lst-cap="A serializable descriptor for an enemy archetype"}
 struct EnemyDescriptor {
@@ -220,7 +220,7 @@ This is the data-driven principle in action: the _structure_ of a goblin (what c
 
 ### Handle-Based Resources
 
-The next commitment completes the data-driven picture: **handle-based resources**. Games hold opaque handles. Lifetime, caching, and GPU upload are engine-managed. @lst-resource-handles separates immutable assets from mutable resources:
+The next commitment completes the data-driven picture: **handle-based resources**. Games hold opaque handles. Lifetime, caching, and GPU upload are engine-managed. @lst-resource-handles defines both handle types: `AssetHandle<T>` for immutable shared assets and `ResourceHandle<T>` for mutable resources such as materials.
 
 ```{#lst-resource-handles .rust lst-cap="Opaque handles separate game references from engine-managed lifetime"}
 struct AssetHandle<T> {
@@ -292,10 +292,10 @@ The primary inter-thread communication model is **Communicating Sequential Proce
 
 In Smallworld, the general CSP pattern manifests as:
 
-- **Game → Render:** an owned render description via a bounded channel. Game → Render lifecycle events (`Resized`, `Quit`, `DeviceLost`) use a separate out-of-band control channel.
-- **Render → Game:** time-stamped advisory feedback uses a separate channel.
-- **Game → Audio:** `AudioCommands` drained each frame.
-- **Game → Streaming:** Demand requests via a demand channel. Streaming → Render: `UploadBatch` via an upload channel.
+- **Game $\rightarrow$ Render:** an owned render description via a bounded channel. Game $\rightarrow$ Render lifecycle events (`Resized`, `Quit`, `DeviceLost`) use a separate out-of-band control channel.
+- **Render $\rightarrow$ Game:** time-stamped advisory feedback uses a separate channel.
+- **Game $\rightarrow$ Audio:** `AudioCommands` drained each frame.
+- **Game $\rightarrow$ Streaming:** Demand requests via a demand channel. Streaming $\rightarrow$ Render: `UploadBatch` via an upload channel.
 
 Each channel carries owned values. Once a value is sent, the sender no longer has access to it. Once received, the receiver has exclusive ownership. This makes the main cross-thread communication explicit and prevents hidden mutable aliases at those boundaries. Figure \ref{fig:csp-message-flow} shows the data-plane routes; the control channel remains separate from the render-description path.
 
@@ -315,7 +315,7 @@ This is permissible because:
 
 3. **Fence reclamation.** The region is not returned to the pool until the GPU has completed the copy — tracked by the submission fence. No thread can read, write, or reallocate the region while the GPU is using it.
 
-@lst-staging-reference is the small owned value that describes a completed staging allocation to the Render Thread:
+@lst-staging-reference defines the small owned value that describes a completed staging allocation to the Render Thread: a buffer identifier, an offset, and a size.
 
 ```{#lst-staging-reference .rust lst-cap="A staging-pool reference transferred to the renderer"}
 struct StagingRef {
@@ -335,7 +335,7 @@ Every pool — GPU meshes, GPU textures, staging buffers, deformed-vertex output
 
 Without explicit budgets, GPU memory can grow until the driver exhausts it and streaming distance can be tuned only by subjective feel. A modern engine makes these decisions observable and configurable. In Smallworld, every budget is a configuration value, visible in the profiler, and available to quality-scaling logic.
 
-@lst-gpu-budget makes the budget state explicit in the pool that consumes it:
+@lst-gpu-budget makes the budget state explicit in the pool that consumes it, carrying a byte limit, current usage, and high-water mark for profiling.
 
 ```{#lst-gpu-budget .rust lst-cap="A named budget attached to a GPU resource pool"}
 struct MemoryBudget {

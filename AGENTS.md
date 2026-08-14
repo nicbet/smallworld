@@ -52,17 +52,4 @@ The core idea for this book and the smallworld engine is: consider decades of ga
 
 The `docs/architecture.md` document is the engine’s technical specification: the decisions, boundaries, data models, and implementation direction.
 
-The book’s job is to be the architectural textbook around it:
-
-- Explain the industry lessons behind each decision.
-- Distinguish durable winners from historical compromises.
-- Show why Rust and wgpu let the design start from a cleaner baseline.
-- Teach readers how to reason from constraints to architecture, rather than merely describe Smallworld’s code.
-- Use Smallworld as the concrete, running example of a modern engine design.
-
-That gives the book a clear thesis: preserve what decades of shipped engines proved valuable; discard accidental legacy; use modern systems tools to build an understandable, high-performance engine for 2026 onward.
-
-### Rules
-
-- Book edits may be done without following the xpo workflow.
-- Chapters should follow the blueprint recorded in `book/support/chapter-blueprint`
+Reference `.claude/skills/book/SKILL.md` for detailed instructions before writing book content.

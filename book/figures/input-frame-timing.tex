@@ -1,0 +1,60 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Time arrow
+  \draw[-Latex, line width=0.45pt] (0.3,3.2) -- node[above, font=\sffamily\scriptsize] {time} (13.3,3.2);
+
+  % Frame boundaries
+  \draw[line width=0.3pt, black!30] (1.0,-1.0) -- (1.0,3.0);
+  \draw[line width=0.3pt, black!30] (6.5,-1.0) -- (6.5,3.0);
+  \draw[line width=0.3pt, black!30] (12.0,-1.0) -- (12.0,3.0);
+  \node[font=\sffamily\tiny\itshape, black!40] at (3.75,2.85) {Frame N};
+  \node[font=\sffamily\tiny\itshape, black!40] at (9.25,2.85) {Frame N+1};
+
+  % OS events (top row, scattered)
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,2.2) {OS events};
+  \foreach \x in {1.5, 2.1, 2.8, 4.5, 5.0, 5.3, 7.2, 8.0, 9.5, 10.2, 11.0} {
+    \draw[line width=0.5pt, black!50] (\x,2.0) -- (\x,2.4);
+  }
+  \node[font=\sffamily\tiny\itshape, black!45, anchor=south] at (3.4,2.45) {arrive at OS cadence};
+
+  % INPUT phase (snapshot creation)
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,1.2) {INPUT};
+  \node[engine-package, text width=1.0cm, minimum height=0.5cm, fill=black!10] (inp1) at (1.6,1.2) {drain};
+  \node[engine-package, text width=1.0cm, minimum height=0.5cm, fill=black!10] (inp2) at (7.1,1.2) {drain};
+
+  % Snapshot freeze markers
+  \draw[-Latex, line width=0.4pt, densely dashed, black!50] (2.2,1.2) -- (2.8,1.2);
+  \node[font=\sffamily\tiny, black!55] at (3.6,1.2) {snapshot frozen};
+  \draw[-Latex, line width=0.4pt, densely dashed, black!50] (7.7,1.2) -- (8.3,1.2);
+  \node[font=\sffamily\tiny, black!55] at (9.1,1.2) {snapshot frozen};
+
+  % Game phases (consumers)
+  \node[font=\sffamily\bfseries\scriptsize, anchor=east] at (0.2,0.2) {Phases};
+  % Frame N phases
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (fix1) at (2.8,0.2) {FIXED};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (upd1) at (3.9,0.2) {UPD};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (lat1) at (5.0,0.2) {LATE};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (ext1) at (6.1,0.2) {EXT};
+  \draw[-Latex, line width=0.3pt] (fix1.east) -- (upd1.west);
+  \draw[-Latex, line width=0.3pt] (upd1.east) -- (lat1.west);
+  \draw[-Latex, line width=0.3pt] (lat1.east) -- (ext1.west);
+
+  % Frame N+1 phases
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (fix2) at (8.3,0.2) {FIXED};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (upd2) at (9.4,0.2) {UPD};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (lat2) at (10.5,0.2) {LATE};
+  \node[engine-package, text width=0.7cm, minimum height=0.45cm, font=\sffamily\tiny] (ext2) at (11.6,0.2) {EXT};
+  \draw[-Latex, line width=0.3pt] (fix2.east) -- (upd2.west);
+  \draw[-Latex, line width=0.3pt] (upd2.east) -- (lat2.west);
+  \draw[-Latex, line width=0.3pt] (lat2.east) -- (ext2.west);
+
+  % "Same snapshot" bracket (drawn manually to avoid loading decorations library)
+  \draw[line width=0.35pt, black!50] (2.4,-0.15) -- (2.4,-0.35) -- (6.5,-0.35) -- (6.5,-0.15);
+  \draw[line width=0.35pt, black!50] (4.45,-0.35) -- (4.45,-0.45);
+  \node[font=\sffamily\tiny\itshape, black!45, anchor=north] at (4.45,-0.45) {all read Frame N snapshot};
+\end{tikzpicture}
+\caption{Input frame timing. OS events arrive irregularly throughout a frame. The INPUT phase drains them into a frozen snapshot at tick start. All subsequent phases (FIXED, UPDATE, LATE, EXTRACT) read the same immutable snapshot. Events arriving after the drain are held for the next frame.}
+\label{fig:input-frame-timing}
+\end{figure}
+\FloatBarrier
