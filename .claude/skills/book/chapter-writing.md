@@ -10,8 +10,7 @@ metadata:
 
 # Chapter Writing Skill
 
-Write a chapter for "The Modern Game Engine: Architecture, Systems and Principles"
-by Nicolas Bettenburg, PhD.
+Write a chapter for "The Modern Game Engine: Architecture, Systems and Principles" by Nicolas Bettenburg, PhD.
 
 ## Before writing
 
@@ -25,12 +24,12 @@ by Nicolas Bettenburg, PhD.
 
 ## Book identity and argument
 
-*The Modern Game Engine* is a book about architectural judgment. It does not attempt
-to claim that existing game engine architecture principles have become obsolete. It
-asks a more synthetic design question: **if we were designing a modern engine from
-first principles today, which lessons from shipped engines would we keep, which
-historical constraints could we avoid, and how would modern tools change the resulting
-architecture?**
+_The Modern Game Engine_ is a book about modern game engine design and architecture.
+It does not attempt to claim that existing game engine architecture principles have
+become obsolete. It asks a more synthetic design question: **if we were designing a
+modern engine from first principles today, which lessons from shipped engines would
+we keep, which historical constraints could we avoid, and how would modern tools
+change the resulting architecture?**
 
 The industry has run decades of experiments across proprietary engines, id Tech,
 Unreal, Unity, Godot, and many focused in-house engines. Some ideas have become
@@ -39,71 +38,67 @@ where determinism matters, data arranged for the work that consumes it, asynchro
 work with budgets, and tools that make performance and correctness observable. Other
 choices were sensible responses to particular hardware, languages, APIs, or production
 histories, but are not principles a new design needs to inherit. What remains
-under-served is a single, coherent distillation of those lessons: one that starts
+under-served is a single, coherent distillation of all those lessons: one that starts
 from first principles, distinguishes the durable from the accidental, and shows how
 the pieces fit together in a modern game-engine design.
 
-The book begins with the patterns the industry has already validated, rather than
-with a blank slate. It explains why a game-facing World should be distinct from
-renderer-owned state; why data should be organized around the work that consumes it;
-why asset identity and residency should be explicit; why simulation, asynchronous
-services, and rendering each need bounded work; and why diagnostics belong in the
-architecture before a team needs them. It then asks what changes when those ideas
-are expressed with modern systems tools.
-
-**Position relative to Gregory.** Gregory's _Game Engine Architecture_ is the
-definitive reference on engine shape. It is essential reading, and this book does not
-attempt to replace it. Gregory surveys the domain; this book adjudicates from first
-principles. Engines overlap in some areas and diverge in others, and no existing
-reference systematically distinguishes which overlaps are best practices and which are
-historical accidents. Each chapter of this book traces the design pressures behind a
-domain, compares how mature engines resolved them, and identifies which resolutions
-are durable principles and which are artifacts of a particular era. Where Gregory
-provides the vocabulary and the map, this book provides the engineering practice and
-the judgment.
+Each chapter of this book traces the design pressures behind a domain, or design problem,
+compares how mature engines resolved them, and identifies which resolutions
+are durable principles and which are artifacts of a particular era. Where Gregory's Game
+Engine Architecture provides the vocabulary and the map, this book provides the engineering
+practice and the judgment.
 
 ## Smallworld's role
 
-Smallworld is the book's running concrete instance. It is a game engine built from
-scratch in Rust on `wgpu`, designed to inherit the industry's proven subsystem
-boundaries while starting clean on current hardware and tooling. It is not a toy
+Smallworld is the book's running example of a modern game engine. It is built from
+scratch in Rust on `wgpu`, designed to inherit the industry's proven patterns
+while starting clean on current hardware and tooling. It is not a toy
 renderer or a framework sketch; it is a hybrid engine where voxel volumes and
 triangle meshes share the same rendering and lighting model.
 
-**Argument direction: principle first, then realization.** Each chapter begins with
-the general problem and examines how mature engines have solved it, then shows how
-Smallworld resolves the same responsibility in its own stack. The argument always
-runs in that direction. Never lead with "Smallworld does X"; lead with why the
-problem exists and what the industry learned, then show how Smallworld realizes it.
+**Argument direction: principle first, then realization.** Each section begins with
+the general problem and examines how mature engines have solved it, as well as best
+practices. It then shows how Smallworld resolves the same responsibility in its own
+stack as an engineering illustration. The argument always runs in that direction.
+Never lead with "Smallworld does X"; lead with why the problem exists and what the
+industry learned, then show how Smallworld realizes it.
 
-**Stack choices are Smallworld's, not universal prescriptions.** Rust and `wgpu` are
-Smallworld's deliberate choices that produce unusually clean engineering answers to
-ownership, concurrency, and platform-abstraction problems. They are not presented as
-the only viable path. Acknowledge that C++ engines ship outstanding games, that other
-graphics abstractions are equally valid, and that the principles the reader learns are
-transferable regardless of stack.
+**Keep the general layer clean of Smallworld syntax.** The most common violation of
+the principle-first rule is not leading with Smallworld; it is framing a _general
+question_ in Rust or `wgpu` terms. For example, asking "why not use `Arc<RwLock<T>>`
+to share state?" makes a language-independent design question sound Rust-specific.
+The general form is "why not use read-write locks or atomics?" Similarly, explaining
+that "the extract step borrows `&World`" presents a general property (read-only
+access during extraction) through Smallworld's syntax. The fix is always the same:
+state the principle in language-neutral terms, then transition to Smallworld's
+realization with an explicit marker such as "In Smallworld, ..." or "Smallworld
+realizes this with ...". The marker tells the reader: everything before this is
+transferable; everything after this is one concrete answer.
 
-**Introduce Smallworld once.** Chapter 1 introduces Smallworld at the point where the
-argument calls for a concrete instance. Later chapters reference it without
-reintroduction. Do not re-explain what Smallworld is or what it is built on; the
-reader already knows.
+**Stack choices are Smallworld's, not universal prescriptions.** The implementation
+details described in `docs/architecture.md` are Smallworld's deliberate choices that
+produce unusually clean engineering answers to modern game engine design using specific
+technology picks like Rust or wgpu. They should not be presented as the only viable path.
+Acknowledge that C++ engines ship outstanding games, that other abstractions and implementations
+are equally valid, and that the principles the reader learns are transferable regardless of stack.
 
 ## Prose style
 
 - First-person plural ("we") and direct address.
 - Meaty, verbose paragraphs. Each section should have substantial discussion.
 - Balanced: explain what approaches exist, why the chosen one wins, common pitfalls.
-- Show how Rust and `wgpu` give Smallworld clean answers to friction in the engine shape.
+- Describe the problem, domain, solution, and implementation in general, language-neutral terms first so the learning stays transferable. After the general layer is complete, show how Smallworld gives clean answers to the friction described, using an explicit transition ("In Smallworld, ...", "Smallworld realizes this with ..."). Never use Rust types, `wgpu` API calls, or Smallworld struct names to frame a question or state a principle that is engine-independent.
+- **Warm the connective tissue.** Transitions between sections should not be mechanical ("With X established, we turn to Y"). Seed brief anecdotes or reader-relevant hooks that make the next topic's stakes visceral before the principle arrives. "If you have ever profiled a frame and found two subsystems contending on a lock neither should need..." or "If you have worked on a game of any scale, you have likely encountered this question in its painful form..." The reader should feel why the coming section matters, not just be told it is next. Between the technical blocks, the reader needs moments of "here is why this matters to you as someone building a game engine."
 - Back up claims with citations from web articles, scientific research (papers, journal articles, theses).
 - **NO emojis.**
-- **NO em-dashes** (no `---`, no `—`). Link clauses naturally with colons, commas, semicolons, or restructure the sentence.
+- **NO em-dashes** (no `---`, no `—`). Link clauses naturally with colons, commas, or restructuring the sentence (without modifying its meaning!).
 
 ### Ground arguments in real engines and shipped games
 
-Every architectural claim should be supported by concrete evidence from the industry:
+Every architectural claim should be supported or illustrated by concrete evidence from the industry:
 real engines, real games, real developers, and real technical decisions. This is not
 decoration; it is the book's epistemology. The argument is "the industry learned X"
-and the evidence is *who* learned it, *when*, and *what happened*.
+and the evidence is _who_ learned it, _when_, and _what happened_.
 
 - **Compare across engines.** When discussing a subsystem, show how UE5, Unity, and
   Godot each resolved it differently. Name the specific mechanism (Unreal's
@@ -114,7 +109,7 @@ and the evidence is *who* learned it, *when*, and *what happened*.
   multiplier, _DOOM_ illustrating tight game-engine coupling, _Quake_ creating the
   licensing model, _Crysis_ pushing hardware limits. The game is the evidence; the
   architectural lesson is the point.
-- **Name developers and their reasoning.** When a developer or team articulated *why*
+- **Name developers and their reasoning.** When a developer or team articulated _why_
   they made a particular choice (Styczeń on UE4's quality-of-life features, id
   Software on cycle-level optimization), cite their reasoning directly. First-hand
   technical rationale is stronger than general claims.
@@ -140,7 +135,7 @@ connective tissue that turns abstract principles into engineering judgment.
   scenarios, not just real shipped games.
 - **Counterfactual reasoning.** State the principle, then show what breaks
   without it. "Consider the alternative" or "what happens without explicit
-  feedback?" The counterfactual makes the cost of *not* following the principle
+  feedback?" The counterfactual makes the cost of _not_ following the principle
   tangible. Pair it with a code listing when possible (the library-model loop
   in Chapter 2 is the template).
 - **Trace a datum across boundaries.** Follow one piece of data (a mesh, a
@@ -162,6 +157,17 @@ connective tissue that turns abstract principles into engineering judgment.
   a concept is introduced, where it is developed, and where it pays off. This
   makes the book a coherent argument rather than independent essays.
 
+### Argument direction
+
+Every chapter follows the same arc: **principle first, then transferrable solution, then concrete realization in the Smallworld engine.**
+
+1. Start with the general problem every engine must solve, independent of any specific engine or language.
+2. Examine how mature engines (UE5, Unity, Godot, and others) have solved it, and what design pressures shaped their choices.
+3. Distinguish which of those choices are durable principles and which are artifacts of a particular era, language, or platform.
+4. Show how Smallworld resolves the same responsibility in its own stack, and what those specific choices buy at the friction points.
+
+Never lead with "Smallworld does X." Lead with why the problem exists, what the industry learned, and then show the concrete realization. The reader should finish each chapter understanding both the universal principle and one well-reasoned path through it.
+
 ### Code listings as argument
 
 Every code listing must advance the architectural argument. A listing is not
@@ -176,7 +182,7 @@ Make each argument once, in the right place. If a point was established in an
 earlier section of the same chapter, reference it rather than restating it. Our
 editing rounds found that restating the same argument in different words
 inflates word count without adding insight, and the reader notices. When a
-concept from a *different* chapter is needed, a brief forward or backward
+concept from a _different_ chapter is needed, a brief forward or backward
 reference is sufficient: "as Chapter 3 will establish" or "the firewall
 introduced in Chapter 2."
 
@@ -218,11 +224,6 @@ Content here.
 
 Use sparingly: tips for best practices, warnings for common mistakes or pitfalls.
 
-## Target length
-
-Roughly 8,000-10,000 words per chapter (30-40k characters). Enough for a substantial
-textbook chapter, not a survey article.
-
 ## Verification checklist
 
 After writing, verify:
@@ -235,7 +236,6 @@ After writing, verify:
 - [ ] No emojis.
 - [ ] Opening connects to the previous chapter.
 - [ ] Summary tees up the next chapter.
-- [ ] Argument flows principle-first, then Smallworld's realization.
-- [ ] Smallworld is not reintroduced; the reader already knows what it is.
-- [ ] Stack choices (Rust, `wgpu`) are framed as Smallworld's, not universal prescriptions.
+- [ ] Argument flows principle-first, then transferrable solution, then Smallworld's realization.
+- [ ] Stack choices (Rust, `wgpu`, ...) are framed as Smallworld's, not universal prescriptions.
 - [ ] Book compiles cleanly with `make pdf` from the `/book` folder

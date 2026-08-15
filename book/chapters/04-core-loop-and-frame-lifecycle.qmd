@@ -1,16 +1,16 @@
 # Core Loop and Frame Lifecycle
 
-Chapter 3 established three architectural pillars --- the Game--Render Firewall, data-oriented composition, and thread ownership --- and showed how those contracts produce an engine where the Game Thread and Render Thread operate on separate mutable state, communicating only through owned messages on bounded channels. But a contract is not a schedule. It tells you what each thread may touch; it does not tell you *when* work begins, how often physics advances, what happens when the GPU falls behind, or how the engine shuts down without hanging. Those are control and lifecycle questions, and they are the subject of this chapter.
+Chapter 3 introduced three runtime contracts (the Game-Render Firewall, data-oriented composition, and thread ownership) and showed how they produce an engine where the Game Thread and Render Thread operate on separate mutable state, communicating only through owned messages on bounded channels. But a contract is not a schedule. It tells you what each thread may touch; it does not tell you *when* work begins, how often physics advances, what happens when the GPU falls behind, or how the engine shuts down without hanging. Those are control and lifecycle questions, and they are the subject of this chapter.
 
-Every interactive system must convert a stream of platform events --- display refreshes, window resizes, key presses, device connections --- into coordinated simulation and presentation work. A naive engine processes that stream one item at a time: read input, update the world, draw the frame, present, repeat. The structure works, and for a small game it may be all you need. But the moment a project requires overlapped rendering, deterministic physics, adaptive quality, or a graceful response to GPU device loss, the naive loop fractures into a set of interleaved concerns that must be designed rather than discovered.
+If you have ever profiled a stuttering game and found that the physics simulation ran twelve ticks in a single frame after a garbage-collection pause, or watched a resize flash because the renderer was mid-frame when the window dimensions changed, you have encountered these questions in their painful form. Every interactive system must convert a stream of platform events (display refreshes, window resizes, key presses, device connections) into coordinated simulation and presentation work. A naive engine processes that stream one item at a time: read input, update the world, draw the frame, present, repeat. The structure works, and for a small game it may be all you need. But the moment a project requires overlapped rendering, deterministic physics, adaptive quality, or a graceful response to GPU device loss, the naive loop fractures into a set of interleaved concerns that must be designed rather than discovered.
 
-This chapter makes those concerns explicit. We begin with time itself --- the engine service that underpins every phase --- and then examine the two-frame overlapped pipeline that lets simulation and presentation proceed concurrently. We address pacing, backpressure, and dynamic resolution as control loops rather than ad-hoc switches. Finally, we treat lifecycle events --- resize, device loss, shutdown --- as first-class work with their own ordering, deadlines, and recovery paths. The result is an engine loop that is deterministic, profilable, and structurally responsive to the platform beneath it.
+This chapter makes those concerns explicit. We begin with time itself, the engine service that underpins every phase, and then examine the two-frame overlapped pipeline that lets simulation and presentation proceed concurrently. We address pacing, backpressure, and dynamic resolution as control loops rather than ad-hoc switches. Finally, we treat lifecycle events (resize, device loss, shutdown) as first-class work with their own ordering, deadlines, and recovery paths. The result is an engine loop that is deterministic, profilable, and structurally responsive to the platform beneath it.
 
 ## What You Will Learn in This Chapter {.unnumbered}
 
-- **Time as a Service:** Why an engine needs three separate notions of time --- real, scaled, and fixed --- and how a single `Time` struct provides each without ambiguity.
+- **Time as a Service:** Why an engine needs three separate notions of time (real, scaled, and fixed) and how a single struct provides each without ambiguity.
 - **The Fixed Timestep:** How accumulator-based stepping decouples physics cadence from rendering frame rate, what interpolation buys for visual smoothness, and why bounded catch-up prevents a death spiral.
-- **The Two-Frame Pipeline:** How Smallworld overlaps game and render work by one frame, what latency that adds, and how lockstep mode trades throughput for immediacy.
+- **The Two-Frame Pipeline:** How an engine can overlap game and render work by one frame, what latency that adds, and how lockstep mode trades throughput for immediacy.
 - **Game and Render Phases:** The six-phase game tick and six-phase render tick, why they are fixed-order rather than event-driven, and what each phase owns.
 - **Pacing and Backpressure:** How GPU queue-depth throttling, dynamic resolution scaling, and predictive tick pacing form three composable control loops.
 - **Lifecycle Events:** Why resize, device loss, and shutdown travel on a separate control channel, and how the engine applies them at frame boundaries without corrupting in-progress work.
@@ -18,6 +18,44 @@ This chapter makes those concerns explicit. We begin with time itself --- the en
 
 
 ## Time Is an Engine Service
+
+In a game engine, time is not a single number that increases monotonically between frames. It is a family of related but distinct measurements, each serving a different consumer. The physics simulation needs a fixed cadence. The camera, particles, and UI need smooth frame-rate-dependent motion. A replay system needs deterministic progression. A pause menu needs game time to stop while the application continues to render, accept input, and respond to window events. A slow-motion effect needs game time to advance at a fraction of real time, while audio might pitch-shift to match but the frame rate remains full speed.
+
+The naive approach, treating time as a single `delta_time` passed into every system, conflates all of these needs into one value. The result is code that works at 60 fps on the developer's machine and breaks at 144 fps, stutters at 30 fps, and produces non-deterministic physics at any frame rate. This conflation has caused visible bugs in shipped titles: *Dark Souls*' PC port infamously tied weapon degradation to frame rate, causing weapons to degrade twice as fast at 60 fps as at 30. *The Elder Scrolls V: Skyrim* capped its physics tick to the rendering frame rate, producing notorious havoc (objects launched across rooms, characters catapulted through geometry) whenever the frame rate exceeded the expected ceiling. These are not implementation errors that better testing would have caught; they are structural consequences of treating time as a single value.
+
+The better model treats time as an engine service: a struct maintained by the engine's loop, updated once per tick, and borrowed immutably by every system that needs it. This struct carries all the distinct time values a system might query, and each system picks the one appropriate to its work.
+
+### Why Not Just Use `delta_time`?
+
+The single-delta-time pattern is attractive because it is simple: the engine measures how long the last frame took and passes that duration to every system. Physics multiplies velocity by `dt`. Animation advances by `dt`. The camera moves by `speed * dt`. It works, until it does not.
+
+The failure modes are well-documented and worth enumerating, because each one motivates a specific design decision:
+
+1. **Frame-rate-dependent physics.** When the physics simulation uses a variable delta, the results change with the frame rate. A character running at 30 fps experiences different forces, different collision responses, and different jump heights than the same character at 144 fps. This is not a rounding error; it is a fundamental property of numerical integration. Euler integration with variable step sizes produces different trajectories for different step sizes, and the differences compound over time. Deterministic multiplayer, replay, and automated testing all require that the same inputs produce the same outputs regardless of rendering speed.
+
+2. **The spiral of death.** If a frame takes longer than expected, perhaps because the operating system scheduled another process or the GPU stalled on a complex draw, the next frame receives a large delta. Systems that do work proportional to `dt` may take even longer, producing an even larger delta, and so on. A single bad frame can cascade into seconds of unresponsive simulation. The fixed timestep's bounded catch-up policy (discussed below) prevents this by capping the number of fixed steps per frame.
+
+3. **Pause requires special-casing.** If every system reads the same `dt`, pausing means setting `dt` to zero. But profiling, input, UI animation, and audio fade-outs must not pause. Without separate clocks, each of those systems needs its own "but not when paused" conditional, and the pattern must be replicated for slow-motion, fast-forward, and debug stepping.
+
+4. **Sub-frame jitter.** At high frame rates, `dt` becomes very small, and floating-point precision in accumulated positions degrades. At low frame rates, `dt` becomes large, and collision tunneling or integration instability appear. A fixed timestep keeps `dt` in a controlled range where the integrator is well-behaved.
+
+Glenn Fiedler's widely cited article "Fix Your Timestep!" [@gaffer-fix-timestep] remains the clearest exposition of these failure modes and their solution. The pattern it describes (accumulate real time, consume it in fixed steps, interpolate the visual remainder) is the one every serious engine uses in some form.
+
+### Three Clocks, One Struct
+
+The durable solution, arrived at independently by every major engine, is to maintain three separate clocks and let each system declare which one it needs. Gregory discusses this decomposition in the context of real-time simulation clocks [@gregory2026game], and every shipping engine provides some version of it. Unity separates `Time.deltaTime` (scaled, variable), `Time.fixedDeltaTime` (constant physics step), and `Time.unscaledDeltaTime` (wall clock regardless of time scale or pause). Unreal provides `FApp::GetDeltaTime()`, `GetWorld()->GetDeltaSeconds()`, and `FPlatformTime` for analogous purposes. Godot exposes `delta` as the per-frame variable delta in `_process()` and a separate `_physics_process()` with its own fixed step. The names differ, but the separation is universal: if you do not distinguish these clocks at the data level, you end up distinguishing them in ad-hoc conditional logic scattered across every system.
+
+The three clocks serve distinct consumers, as shown in Figure \ref{fig:three-clocks}.
+
+\input{figures/three-clocks.tex}
+
+**Real time** is the wall clock. It advances at the rate the operating system reports, unaffected by time scale, pause state, or simulation speed. Real time is the right clock for profiling, frame-rate measurement, fade-out timers on UI elements, and anything that must remain responsive while the game world is paused. It is also the input to the fixed-timestep accumulator.
+
+**Scaled game time** is real time multiplied by a time-scale factor. When the factor is 1.0, game time matches real time. When it is 0.0, game time stops: the world is paused. When it is 0.5, the world runs at half speed. Cameras, particles, animation blending, and gameplay timers should use game time so that pause and slow-motion affect them uniformly. Setting the time scale to zero pauses all game-time consumers without any per-system "is paused" check.
+
+**Fixed simulation time** is an implicit third clock driven by the accumulator and a constant step size. It advances in discrete, equal steps regardless of the rendering frame rate. Physics, deterministic gameplay logic, and any system that requires reproducible results should run in the FIXED phase, consuming the fixed delta as their time step. The accumulator tracks how much game time has been supplied but not yet consumed by fixed steps, and a fractional remainder is exposed for visual interpolation.
+
+In Smallworld, these three clocks and their bookkeeping are encoded in a single `Time` struct, shown in @lst-time-struct.
 
 ```{#lst-time-struct .rust lst-cap="The Time struct: three clocks in one service"}
 struct Time {
@@ -33,50 +71,14 @@ struct Time {
 }
 ```
 
-In a game engine, time is not a single number that increases monotonically between frames. It is a family of related but distinct measurements, each serving a different consumer. The physics simulation needs a fixed cadence. The camera, particles, and UI need smooth frame-rate-dependent motion. A replay system needs deterministic progression. A pause menu needs game time to stop while the application continues to render, accept input, and respond to window events. A slow-motion effect needs game time to advance at a fraction of real time, while audio might pitch-shift to match but the frame rate remains full speed.
+The struct is maintained by the engine's loop, updated once per tick, and borrowed immutably by every system that needs it. Each system reads the field appropriate to its work: `real_delta` for profiling, `game_delta` for variable-rate updates, `fixed_dt` for physics, and `alpha` for interpolation. The separation is not a Smallworld invention; it is the standard modern answer to a problem that has been rediscovered in every engine generation.
 
-Treating time as a single `delta_time` passed into every system --- the pattern most tutorials teach --- conflates all of these needs into one value. The result is code that works at 60 fps on the developer's machine and breaks at 144 fps, stutters at 30 fps, and produces non-deterministic physics at any frame rate. Worse, it makes pause, slow-motion, and debug stepping into special cases that must be threaded through every system individually.
-
-The better model treats time as an engine service: a struct maintained by the engine's loop, updated once per tick, and borrowed immutably by every system that needs it. This struct carries all the distinct time values a system might query, and each system picks the one appropriate to its work.
-
-### Three Clocks, One Struct
-
-@lst-time-struct shows Smallworld's `Time` struct, which encodes three separate notions of time and the bookkeeping required to convert between them.
-
-The three clocks serve distinct consumers, as shown in Figure \ref{fig:three-clocks}.
-
-\input{figures/three-clocks.tex}
-
-**Real time** (`real_elapsed`, `real_delta`) is the wall clock. It advances at the rate the operating system reports, unaffected by time scale, pause state, or simulation speed. Real time is the right clock for profiling, frame-rate measurement, fade-out timers on UI elements, and anything that must remain responsive while the game world is paused. It is also the input to the fixed-timestep accumulator.
-
-**Scaled game time** (`game_elapsed`, `game_delta`) is real time multiplied by `time_scale`. When `time_scale` is 1.0, game time matches real time. When it is 0.0, game time stops: the world is paused. When it is 0.5, the world runs at half speed. Cameras, particles, animation blending, and gameplay timers should use game time so that pause and slow-motion affect them uniformly. Setting `time_scale` to zero pauses all game-time consumers without any per-system "is paused" check.
-
-**Fixed simulation time** is an implicit third clock driven by the accumulator and `fixed_dt`. It advances in discrete, constant steps regardless of the rendering frame rate. Physics, deterministic gameplay logic, and any system that requires reproducible results should run in the FIXED phase, consuming `fixed_dt` as their delta. The accumulator tracks how much game time has been supplied but not yet consumed by fixed steps, and the `alpha` field exposes the fractional remainder for visual interpolation.
-
-This separation is not a Smallworld invention. It is the standard modern answer to a problem that has been rediscovered in every engine generation: if you do not separate these clocks at the data level, you end up separating them in ad-hoc conditional logic scattered across every system. Gregory discusses the same decomposition in the context of real-time simulation clocks [@gregory2026game], and every major engine provides some version of it --- Unity's `Time.deltaTime` versus `Time.fixedDeltaTime` versus `Time.unscaledDeltaTime`, Unreal's `FApp::GetDeltaTime()` versus `GetWorld()->GetDeltaSeconds()` versus `FPlatformTime`. The lesson is durable: make the clocks distinct, name them, and let systems declare which one they need.
-
-### Why Not Just Use `delta_time`?
-
-The single-delta-time pattern is attractive because it is simple: the engine measures how long the last frame took and passes that duration to every system. Physics multiplies velocity by `dt`. Animation advances by `dt`. The camera moves by `speed * dt`. It works --- until it does not.
-
-The failure modes are well-documented and worth enumerating, because each one motivates a specific design decision:
-
-1. **Frame-rate-dependent physics.** When the physics simulation uses a variable delta, the results change with the frame rate. A character running at 30 fps experiences different forces, different collision responses, and different jump heights than the same character at 144 fps. This is not a rounding error; it is a fundamental property of numerical integration. Euler integration with variable step sizes produces different trajectories for different step sizes, and the differences compound over time. Deterministic multiplayer, replay, and automated testing all require that the same inputs produce the same outputs regardless of rendering speed.
-
-2. **The spiral of death.** If a frame takes longer than expected --- perhaps the operating system scheduled another process, or the GPU stalled on a complex draw --- the next frame receives a large delta. Systems that do work proportional to `dt` may take even longer, producing an even larger delta, and so on. A single bad frame can cascade into seconds of unresponsive simulation. The fixed timestep's bounded catch-up policy (discussed below) prevents this by capping the number of fixed steps per frame.
-
-3. **Pause requires special-casing.** If every system reads the same `dt`, pausing means setting `dt` to zero. But profiling, input, UI animation, and audio fade-outs must not pause. Without separate clocks, each of those systems needs its own "but not when paused" conditional, and the pattern must be replicated for slow-motion, fast-forward, and debug stepping.
-
-4. **Sub-frame jitter.** At high frame rates, `dt` becomes very small, and floating-point precision in accumulated positions degrades. At low frame rates, `dt` becomes large, and collision tunneling or integration instability appear. A fixed timestep keeps `dt` in a controlled range where the integrator is well-behaved.
-
-
-\input{figures/fixed-timestep-accumulator.tex}
-
-Glenn Fiedler's widely cited article "Fix Your Timestep!" [@gaffer-fix-timestep] remains the clearest exposition of these failure modes and their solution. The pattern it describes --- accumulate real time, consume it in fixed steps, interpolate the visual remainder --- is the one Smallworld implements, and it is the one every serious engine uses in some form.
 
 ### The Fixed Timestep and the Accumulator
 
-The fixed timestep decouples the physics simulation's update rate from the rendering frame rate. The mechanism is an accumulator that tracks how much game time has been supplied but not yet consumed by fixed-rate work. Each frame, the engine adds the current `game_delta` to the accumulator. It then runs the FIXED phase zero or more times, subtracting `fixed_dt` from the accumulator each time, until the accumulator holds less than one full step. The remainder stays in the accumulator for the next frame. @lst-accumulator gives the complete pattern, including bounded catch-up and the alpha computation.
+\input{figures/fixed-timestep-accumulator.tex}
+
+The fixed timestep decouples the physics simulation's update rate from the rendering frame rate. The mechanism is an accumulator that tracks how much game time has been supplied but not yet consumed by fixed-rate work. Each frame, the engine adds the current scaled game delta to the accumulator. It then runs the FIXED phase zero or more times, subtracting the fixed step from the accumulator each time, until the accumulator holds less than one full step. The remainder stays in the accumulator for the next frame. @lst-accumulator gives the complete pattern, including bounded catch-up and the alpha computation.
 
 ```{#lst-accumulator .rust lst-cap="Accumulator-based fixed stepping"}
 fn advance_fixed_timestep(time: &mut Time) {
@@ -104,26 +106,26 @@ fn advance_fixed_timestep(time: &mut Time) {
 }
 ```
 
-Figure \ref{fig:fixed-timestep-accumulator} shows the accumulator pattern across several frames with varying real-time deltas. Notice how the number of fixed steps per frame varies --- some frames run two steps, others run one, and a very fast frame might run none --- but each step always consumes exactly `fixed_dt`.
+Figure \ref{fig:fixed-timestep-accumulator} shows the accumulator pattern across several frames with varying real-time deltas. Notice how the number of fixed steps per frame varies: some frames run two steps, others run one, and a very fast frame might run none. Each step always consumes exactly the same fixed delta.
 
 
 Several design details deserve attention:
 
-**The choice of `fixed_dt`.** A common default is 1/60th of a second (approximately 16.67 ms), matching a 60 Hz display. Some engines use 1/120th for higher-frequency physics. The choice involves a trade-off: smaller steps improve simulation accuracy and reduce tunneling risk, but consume more CPU time per real-time second. Smallworld defaults to 1/60th and exposes the value as a configuration parameter.
+**The choice of step size.** A common default is 1/60th of a second (approximately 16.67 ms), matching a 60 Hz display. Some engines use 1/120th for higher-frequency physics. The choice involves a trade-off: smaller steps improve simulation accuracy and reduce tunneling risk, but consume more CPU time per real-time second. Overwatch's physics and gameplay simulation runs at a fixed 60 Hz tick [@ford-gdc2017], while many racing and fighting games use 120 Hz or higher for precision. Smallworld defaults to 1/60th and exposes the value as a configuration parameter.
 
-**Bounded catch-up.** The `max_steps` guard is essential. Without it, a single slow frame --- caused by a debugger breakpoint, an OS stall, or a GPU timeout --- dumps a large delta into the accumulator, which then requires dozens or hundreds of fixed steps to drain. Each step takes time, making the *next* frame even slower, creating a positive feedback loop that can freeze the application. The bound converts a potential runaway into a controlled time debt: the simulation falls behind real time, but it does not spiral. The excess is drained, and the engine resumes at normal pace.
+**Bounded catch-up.** The `max_steps` guard is essential. Without it, a single slow frame, whether caused by a debugger breakpoint, an OS stall, or a GPU timeout, dumps a large delta into the accumulator, which then requires dozens or hundreds of fixed steps to drain. Each step takes time, making the *next* frame even slower, creating a positive feedback loop that can freeze the application. The bound converts a potential runaway into a controlled time debt: the simulation falls behind real time, but it does not spiral. The excess is drained, and the engine resumes at normal pace.
 
-**Draining time debt.** When the accumulator exceeds the catch-up budget, Smallworld clamps it rather than carrying the debt indefinitely. This means the simulation "loses" time after a severe stall, but it resumes at normal speed rather than trying to catch up over subsequent frames. The alternative --- carrying the debt and gradually paying it back --- produces a period of accelerated simulation that looks wrong and can trigger gameplay bugs. The clamping approach is the pragmatic choice; the lost time is typically a fraction of a second during an anomalous event.
+**Draining time debt.** When the accumulator exceeds the catch-up budget, the engine clamps it rather than carrying the debt indefinitely. This means the simulation "loses" time after a severe stall, but it resumes at normal speed rather than trying to catch up over subsequent frames. The alternative, carrying the debt and gradually paying it back, produces a period of accelerated simulation that looks wrong and can trigger gameplay bugs. The clamping approach is the pragmatic choice; the lost time is typically a fraction of a second during an anomalous event.
 
-**Zero steps while paused.** When `time_scale` is zero, `game_delta` is zero, the accumulator does not grow, and the FIXED phase runs zero times. Pause is not a special case; it falls out of the math.
+**Zero steps while paused.** When the time scale is zero, the scaled game delta is zero, the accumulator does not grow, and the FIXED phase runs zero times. Pause is not a special case; it falls out of the math.
 
 ### Interpolation
 
-The fixed timestep introduces a visual problem. Because fixed steps do not align with rendering frames, the state after the last fixed step is generally not the state at the moment the frame will be displayed. The `alpha` value --- the fraction of a fixed step remaining in the accumulator --- tells us how far we are between the last completed fixed tick and the next one that has not yet happened.
+The fixed timestep introduces a visual problem. Because fixed steps do not align with rendering frames, the state after the last fixed step is generally not the state at the moment the frame will be displayed. The alpha value, which measures the fraction of a fixed step remaining in the accumulator, tells us how far we are between the last completed fixed tick and the next one that has not yet happened.
 
 Without interpolation, objects updated at fixed rate will appear to stutter, especially when the rendering frame rate is not an integer multiple of the fixed rate. At 144 fps with a 60 Hz fixed step, roughly 2.4 fixed steps occur per frame on average. Some frames display state from one step ago; others display state from two steps ago. The visual result is a rhythmic micro-jitter.
 
-The solution is to interpolate visual state between the previous and current fixed-tick positions using `alpha`. @lst-interpolation demonstrates the lerp and slerp blending that the EXTRACT phase applies.
+The solution is to interpolate visual state between the previous and current fixed-tick positions using alpha. @lst-interpolation demonstrates the lerp and slerp blending that the extraction phase applies.
 
 ```{#lst-interpolation .rust lst-cap="Interpolating visual transforms between fixed ticks"}
 fn interpolated_transform(prev: &Transform, curr: &Transform, alpha: f64) -> Transform {
@@ -135,13 +137,13 @@ fn interpolated_transform(prev: &Transform, curr: &Transform, alpha: f64) -> Tra
 }
 ```
 
-This interpolation happens in the EXTRACT phase (discussed in section 4.2), where the engine builds the render-facing `FramePacket`. The extract step reads both the current and previous fixed-tick transforms, blends them using `alpha`, and writes the result into the packet. The Render Thread never sees the jitter; it receives smooth transforms at whatever frequency it renders.
+This interpolation happens in the EXTRACT phase (discussed in the next section), where the engine builds the render-facing frame packet. The extract step reads both the current and previous fixed-tick transforms, blends them using alpha, and writes the result into the packet. The Render Thread never sees the jitter; it receives smooth transforms at whatever frequency it renders.
 
 Two subtleties:
 
 1. **The previous state must be stored.** Each entity that participates in fixed-rate updates needs a "previous" transform alongside its current one. The FIXED phase rotates current into previous before applying the new step. This is a small per-entity cost, but it is necessary for correctness and is the standard approach in every engine that implements interpolation.
 
-2. **Interpolation is always one step behind.** The interpolated position at `alpha = 0.5` is halfway between the last completed step and the current one, not halfway toward a predicted future step. This means objects are rendered slightly in the past relative to their true simulation state. In practice, the lag is at most one `fixed_dt` (16.67 ms at 60 Hz), which is imperceptible in normal gameplay and much smaller than the one-frame pipeline latency discussed in section 4.2.
+2. **Interpolation is always one step behind.** The interpolated position at alpha = 0.5 is halfway between the last completed step and the current one, not halfway toward a predicted future step. This means objects are rendered slightly in the past relative to their true simulation state. In practice, the lag is at most one fixed step (16.67 ms at 60 Hz), which is imperceptible in normal gameplay and much smaller than the one-frame pipeline latency discussed in the next section.
 
 ::: {.callout-tip appearance="simple" title="Extrapolation vs. Interpolation"}
 Some engines extrapolate forward from the current state rather than interpolating between previous and current. Extrapolation avoids the one-tick visual lag but introduces prediction errors: an object that reverses direction will overshoot visually before the next fixed tick corrects it. Interpolation is the safer default. It trades a small, constant, imperceptible lag for guaranteed visual smoothness without prediction artifacts. Smallworld uses interpolation.
@@ -149,34 +151,34 @@ Some engines extrapolate forward from the current state rather than interpolatin
 
 ### Time Policies
 
-With the three clocks and the accumulator in place, several engine behaviors fall out as policy decisions on the `Time` struct rather than scattered conditionals:
+With the three clocks and the accumulator in place, several engine behaviors fall out as policy decisions on the time struct rather than scattered conditionals:
 
-**Pause.** Set `time_scale` to 0.0. Game time stops. Fixed steps stop. Real time continues. The render loop keeps running, so menus animate, the cursor responds, and resize events are processed. Resume by restoring the previous `time_scale`.
+**Pause.** Set the time scale to 0.0. Game time stops. Fixed steps stop. Real time continues. The render loop keeps running, so menus animate, the cursor responds, and resize events are processed. Resume by restoring the previous time scale.
 
-**Slow motion.** Set `time_scale` to 0.25 (or any fraction). Game time advances at a quarter of real time. The accumulator fills slowly, so fewer fixed steps run per frame, and the world appears to move in slow motion. The rendering frame rate is unaffected.
+**Slow motion.** Set the time scale to 0.25 (or any fraction). Game time advances at a quarter of real time. The accumulator fills slowly, so fewer fixed steps run per frame, and the world appears to move in slow motion. The rendering frame rate is unaffected.
 
-**Debug stepping.** Hold `time_scale` at zero; advance the accumulator by exactly `fixed_dt` on a key press. Each press runs exactly one fixed step. This is invaluable for debugging physics issues: the developer can step through the simulation one tick at a time and inspect the world after each step.
+**Debug stepping.** Hold the time scale at zero; advance the accumulator by exactly one fixed step on a key press. Each press runs exactly one fixed step. This is invaluable for debugging physics issues: the developer can step through the simulation one tick at a time and inspect the world after each step.
 
-**Frame rate independence.** Because UPDATE-phase systems use `game_delta` and FIXED-phase systems use `fixed_dt`, the simulation is independent of the rendering frame rate by construction. A game running at 30 fps and the same game running at 240 fps produce identical fixed-step results. The only difference is how many fixed steps run per frame and how smooth the interpolated visuals appear.
+**Frame rate independence.** Because variable-rate systems use the scaled game delta and fixed-rate systems use the constant fixed step, the simulation is independent of the rendering frame rate by construction. A game running at 30 fps and the same game running at 240 fps produce identical fixed-step results. The only difference is how many fixed steps run per frame and how smooth the interpolated visuals appear.
 
 
 ## The Overlapped Frame Pipeline
 
-Chapter 3 introduced the Game--Render Firewall and showed that the Game Thread and Render Thread own separate mutable state, communicating through owned messages on a bounded channel. That architecture enables a critical optimization: the two threads can work on different frames simultaneously. While the Render Thread draws frame *N*, the Game Thread is already computing frame *N+1*. This is the **two-frame overlapped pipeline**, and it is Smallworld's default execution model.
+If you have worked on a rendering-heavy game, you have likely felt the throughput ceiling that a lockstep loop imposes: the CPU idles while the GPU draws, and the GPU idles while the CPU simulates. The hardware is fast, but half of it is always waiting. Chapter 3 introduced the Game-Render Firewall and showed that the Game Thread and Render Thread own separate mutable state, communicating through owned messages on a bounded channel. That architecture enables a critical optimization: the two threads can work on different frames simultaneously. While the Render Thread draws frame *N*, the Game Thread is already computing frame *N+1*. This is the **two-frame overlapped pipeline**, and it is the default execution model for any engine that needs to saturate modern hardware.
 
 ### The Pipeline Concept
 
-The idea is straightforward. A single-threaded engine --- or a multi-threaded engine running in lockstep --- must wait for rendering to finish before starting the next simulation step. The total frame time is the sum of game work and render work. If each takes 8 ms, a frame takes 16 ms, and the engine runs at 62.5 fps.
+The idea is straightforward. A single-threaded engine, or a multi-threaded engine running in lockstep, must wait for rendering to finish before starting the next simulation step. The total frame time is the sum of game work and render work. If each takes 8 ms, a frame takes 16 ms, and the engine runs at 62.5 fps.
 
-An overlapped pipeline lets both threads run concurrently. The game tick for frame *N+1* begins as soon as the extract step for frame *N* completes and the `FramePacket` has been sent. The Game Thread does not wait for the Render Thread to finish drawing frame *N*. As long as neither thread's work exceeds the frame budget, the total frame time is determined by the slower of the two, not their sum. If each takes 8 ms, the engine runs at 125 fps --- nearly double the throughput of lockstep execution.
+An overlapped pipeline lets both threads run concurrently. The game tick for frame *N+1* begins as soon as the extract step for frame *N* completes and the frame packet has been sent. The Game Thread does not wait for the Render Thread to finish drawing frame *N*. As long as neither thread's work exceeds the frame budget, the total frame time is determined by the slower of the two, not their sum. If each takes 8 ms, the engine runs at 125 fps, nearly double the throughput of lockstep execution.
 
-The trade-off is one frame of input latency. When the player presses a button during frame *N*, the game processes it in frame *N*'s INPUT phase, but the visual result does not appear until frame *N*'s packet reaches the Render Thread and is drawn, by which time the Game Thread has moved on to frame *N+1*. At 60 fps, this adds approximately 16.67 ms to the input-to-photon path. For most games, this is an acceptable cost for the throughput benefit. For latency-critical applications --- competitive multiplayer, VR --- the engine offers lockstep mode as an alternative.
+The trade-off is one frame of input latency. When the player presses a button during frame *N*, the game processes it in frame *N*'s INPUT phase, but the visual result does not appear until frame *N*'s packet reaches the Render Thread and is drawn, by which time the Game Thread has moved on to frame *N+1*. At 60 fps, this adds approximately 16.67 ms to the input-to-photon path. For most games, this is an acceptable cost for the throughput benefit. For latency-critical applications (competitive multiplayer, VR), the engine can offer lockstep mode as an alternative.
 
-This is a deliberate simplification of Unreal Engine 5's three-frame pipeline [@epic-parallel-rendering]. UE5 separates the Game Thread, the Render Thread (which builds command lists), and the RHI Thread (which submits to the graphics API). Smallworld drops the separate RHI thread because `wgpu` already abstracts the graphics API and handles device-level submission internally. The result is a cleaner two-stage pipeline with the same fundamental overlap property.
+The pattern is well-established in the industry. Unreal Engine 5 takes it further with a three-frame pipeline that separates the Game Thread, the Render Thread (which builds command lists), and the RHI Thread (which submits to the graphics API) [@epic-parallel-rendering]. Naughty Dog's engine, as described by Christian Gyrling at GDC 2015, uses a fiber-based architecture that allows even finer-grained overlap across frames [@gyrling-gdc2015]. Smallworld uses a simpler two-stage variant: the Render Thread handles both command-list building and API submission, because `wgpu` already abstracts the graphics API and handles device-level submission internally. The result is a cleaner two-stage pipeline with the same fundamental overlap property that Unreal's three-stage design provides.
 
 ### Game Thread Phases
 
-The Game Thread executes a fixed sequence of six phases per tick. The order is invariant --- phases never reorder, skip, or interleave. This is a **template-method** loop: the engine owns the structure, and the game provides behavior at defined hook points (`App::fixed_update`, `App::update`). It is emphatically *not* an observer-callback model where listeners register for `frameStarted` or `frameEnded` events in arbitrary order. Unordered listener lists are a bug farm; the structured substitute is a system registered in the right phase.
+The Game Thread executes a fixed sequence of six phases per tick. The order is invariant: phases never reorder, skip, or interleave. This is a **template-method** loop where the engine owns the structure and the game provides behavior at defined hook points. It is emphatically *not* an observer-callback model where listeners register for "frame started" or "frame ended" events in arbitrary order. Unordered listener lists are a bug farm; the structured substitute is a system registered in the right phase.
 
 Figure \ref{fig:overlapped-pipeline} shows the six game-thread phases and six render-thread phases, with the extract/receive boundary as the synchronization point.
 
@@ -184,41 +186,41 @@ Figure \ref{fig:overlapped-pipeline} shows the six game-thread phases and six re
 
 The six game-thread phases are:
 
-**INPUT.** The main thread's event pump (in Smallworld's case, driven by `winit`) has been accumulating window and device events since the previous tick. The INPUT phase drains those events into an `Input` snapshot --- a struct that captures the current state of every key, button, axis, pointer, and touch point. From this point forward, game systems read input as a polled snapshot, not as pushed events. This quarantine is deliberate: the OS callback pump runs at the platform's cadence and may deliver events between phases or across thread boundaries. The INPUT phase normalizes that irregular stream into a single, consistent view that every subsequent phase can read without race conditions.
+**INPUT.** The main thread's event pump has been accumulating window and device events since the previous tick. The INPUT phase drains those events into a polled snapshot: a struct that captures the current state of every key, button, axis, pointer, and touch point. From this point forward, game systems read input as a polled snapshot, not as pushed events. This quarantine is deliberate: the OS callback pump runs at the platform's cadence and may deliver events between phases or across thread boundaries. The INPUT phase normalizes that irregular stream into a single, consistent view that every subsequent phase can read without race conditions. Chapter 5 explores this quarantine in depth, tracing input from platform event to game-level action.
 
-**FIXED.** The fixed-timestep accumulator (described in section 4.1) determines how many times the FIXED phase runs --- zero, one, or several. Each iteration calls `App::fixed_update()` with a constant `fixed_dt`. Physics integration, deterministic gameplay logic, and any system that requires reproducible results belong here. When the game is paused (`time_scale = 0.0`), this phase runs zero times. When the game resumes after a stall, the bounded catch-up policy limits iterations to prevent a death spiral.
+**FIXED.** The fixed-timestep accumulator (described in section 4.1) determines how many times the FIXED phase runs: zero, one, or several. Each iteration advances physics by the constant fixed delta. Physics integration, deterministic gameplay logic, and any system that requires reproducible results belong here. When the game is paused (time scale of zero), this phase runs zero times. When the game resumes after a stall, the bounded catch-up policy limits iterations to prevent a death spiral.
 
-**UPDATE.** The variable-rate update runs exactly once per tick. `App::update()` is the primary hook for game systems that do not require fixed-rate execution: camera control, animation blending, AI decision-making, particle emission, UI state, and any gameplay logic that can tolerate frame-rate variation. Systems in this phase use `game_delta` as their time step.
+**UPDATE.** The variable-rate update runs exactly once per tick. This is the primary hook for game systems that do not require fixed-rate execution: camera control, animation blending, AI decision-making, particle emission, UI state, and any gameplay logic that can tolerate frame-rate variation. Systems in this phase use the scaled game delta as their time step.
 
 **LATE.** Engine systems that must run after all game mutations are complete. Hierarchy propagation (recomputing world transforms from local transforms after parents and children have both updated), bounding-volume recomputation, and streaming demand calculation belong here. The LATE phase exists because these operations depend on the *final* state of the frame, not an intermediate state that might be modified by a later UPDATE system. By separating LATE from UPDATE, the engine guarantees that these derived quantities are consistent before extraction begins.
 
-**EXTRACT.** The firewall crossing. The engine diffs the current `World` state against a `ChangeTracker` that records which components have been modified since the last extraction. The diff produces a `FramePacket` --- views, lights, per-entity deltas, resource operations, and any other render-relevant data. Fixed-tick transforms are interpolated at the accumulator's `alpha` before being written into the packet. The packet is an owned Rust value; once it is sent through the bounded channel, the Game Thread no longer has access to it. This is the synchronization point: the channel send may block briefly if the Render Thread has not yet consumed the previous packet (backpressure), but it never requires a lock on shared mutable state.
+**EXTRACT.** The firewall crossing. The engine diffs the current world state against a change tracker that records which components have been modified since the last extraction. The diff produces a frame packet containing views, lights, per-entity deltas, resource operations, and any other render-relevant data. Fixed-tick transforms are interpolated at the accumulator's alpha before being written into the packet. The packet is then sent through the bounded channel, and the Game Thread no longer has access to it. This is the synchronization point: the channel send may block briefly if the Render Thread has not yet consumed the previous packet (backpressure), but it never requires a lock on shared mutable state. In Smallworld, the packet is an owned Rust value, making this transfer a compile-time-enforced ownership handoff rather than a convention.
 
 **CLEAR.** The change tracker is reset. All "modified" flags are cleared, so the next frame's extract will capture only new changes. The Game Thread is now free to begin the next tick.
 
 ::: {.callout-warning appearance="simple" title="Phase Ordering Is a Safety Invariant"}
-The fixed phase order is not a stylistic preference. If UPDATE ran before FIXED, game systems would see stale physics state. If EXTRACT ran before LATE, the packet would contain transforms that have not been propagated through the hierarchy. If CLEAR ran before EXTRACT, no changes would be captured. The ordering is a correctness contract, and the engine enforces it by owning the loop --- game code cannot reorder phases.
+The fixed phase order is not a stylistic preference. If UPDATE ran before FIXED, game systems would see stale physics state. If EXTRACT ran before LATE, the packet would contain transforms that have not been propagated through the hierarchy. If CLEAR ran before EXTRACT, no changes would be captured. The ordering is a correctness contract, and the engine enforces it by owning the loop. Game code cannot reorder phases.
 :::
 
 ### Render Thread Phases
 
-The Render Thread is a dedicated thread that runs its own six-phase loop, driven by the arrival of `FramePacket`s from the Game Thread. Its phases mirror the game tick in structure but serve a different purpose: converting a description of what should appear on screen into GPU commands and a presented image.
+The Render Thread is a dedicated thread that runs its own six-phase loop, driven by the arrival of frame packets from the Game Thread. Its phases mirror the game tick in structure but serve a different purpose: converting a description of what should appear on screen into GPU commands and a presented image.
 
-**RECEIVE.** The Render Thread begins each iteration by draining the **control channel** --- an out-of-band channel that carries lifecycle events such as resize, scale-factor changes, minimize/restore, device loss, and quit. These events are applied at this frame boundary, before any rendering work begins, ensuring that surface reconfiguration and resource reallocation happen cleanly between frames rather than mid-render. After processing control events, the thread blocks on the **packet channel**, waiting for the next `FramePacket`. This block is the natural synchronization point: the Render Thread sleeps when it has finished its work faster than the Game Thread, and wakes when new work arrives.
+**RECEIVE.** The Render Thread begins each iteration by draining the **control channel**, an out-of-band channel that carries lifecycle events such as resize, scale-factor changes, minimize/restore, device loss, and quit. These events are applied at this frame boundary, before any rendering work begins, ensuring that surface reconfiguration and resource reallocation happen cleanly between frames rather than mid-render. After processing control events, the thread blocks on the **packet channel**, waiting for the next frame packet. This block is the natural synchronization point: the Render Thread sleeps when it has finished its work faster than the Game Thread, and wakes when new work arrives.
 
-**PREPARE.** The `FramePacket` contains delta operations --- new entities, removed entities, modified transforms, material changes, resource upload requests. The PREPARE phase applies these deltas to the **retained `RenderScene`**, the Render Thread's private persistent representation of the visible world. New GPU resources are allocated, staging buffers are copied to device-local memory, and the scene graph is updated. Because the `RenderScene` is exclusively owned by the Render Thread, none of this work requires synchronization with the Game Thread.
+**PREPARE.** The frame packet contains delta operations: new entities, removed entities, modified transforms, material changes, resource upload requests. The PREPARE phase applies these deltas to the **retained render scene**, the Render Thread's private persistent representation of the visible world. New GPU resources are allocated, staging buffers are copied to device-local memory, and the scene is updated. Because the render scene is exclusively owned by the Render Thread, none of this work requires synchronization with the Game Thread. The retained-scene pattern is common across engines: Unreal's `FScene` and Godot's `RenderingServer` [@godot-rendering-server] both maintain renderer-side representations that are separate from the game-side world.
 
-**CULL.** Visibility determination. The render system derives shadow cascade views from the scene's lights, then performs frustum culling and (where applicable) occlusion culling against each view. The result is a set of sorted, batched draw lists --- one per view --- that the recording phase will consume. For large worlds, the cull phase is often the most parallelizable step: each view's culling can proceed independently on the render worker pool.
+**CULL.** Visibility determination. The render system derives shadow cascade views from the scene's lights, then performs frustum culling and (where applicable) occlusion culling against each view. The result is a set of sorted, batched draw lists, one per view, that the recording phase will consume. For large worlds, the cull phase is often the most parallelizable step: each view's culling can proceed independently on the render worker pool. Chapter 14 treats visibility in depth, covering hierarchical culling, occlusion queries, and GPU-driven approaches.
 
-**RECORD.** The render graph executes. Each pass in the graph --- shadow maps, the geometry pass, lighting, post-processing --- records GPU commands into command buffers. The render graph provides the ordering constraints and resource barriers; the passes provide the draw calls. This phase produces a `Vec<wgpu::CommandBuffer>` ready for submission.
+**RECORD.** The render graph executes. Each pass in the graph (shadow maps, the geometry pass, lighting, post-processing) records GPU commands into command buffers. The render graph provides the ordering constraints and resource barriers; the passes provide the draw calls. In Smallworld, this phase produces a `Vec<wgpu::CommandBuffer>` ready for submission. Chapter 13 covers the render graph's design and extensibility model.
 
-**SUBMIT.** Before submitting, the Render Thread checks the GPU queue depth against `max_gpu_frames_in_flight`. If the GPU has not yet completed the frame submitted two iterations ago, the thread waits on a completion signal (a fence or mapped buffer callback) to prevent the driver from accumulating unbounded latency. Once the queue has capacity, `queue.submit()` sends the command buffers to the GPU. This throttle is the first of the three pacing control loops discussed in section 4.3.
+**SUBMIT.** Before submitting, the Render Thread checks the GPU queue depth against a configured maximum for in-flight frames. If the GPU has not yet completed the frame submitted two iterations ago, the thread waits on a completion signal (a fence or mapped buffer callback) to prevent the driver from accumulating unbounded latency. Once the queue has capacity, the command buffers are submitted to the GPU. This throttle is the first of the three pacing control loops discussed in the next section.
 
-**PRESENT.** The swapchain image is presented to the display. After presentation, the Render Thread assembles a `FrameFeedback` struct --- containing CPU-side cull statistics, and whatever GPU timing data has landed from the readback ring --- and sends it back to the Game Thread through a feedback channel. The loop then returns to RECEIVE.
+**PRESENT.** The swapchain image is presented to the display. After presentation, the Render Thread assembles a feedback struct containing CPU-side cull statistics and whatever GPU timing data has landed from the readback ring, then sends it back to the Game Thread through a feedback channel. The loop then returns to RECEIVE.
 
 ### Why Fixed Phases, Not Events
 
-A reasonable architect might propose a more flexible model: let systems register for "frame begin" and "frame end" events, or use a dependency graph to determine execution order dynamically. Several engines have tried this. The result is typically harder to debug, harder to profile, and prone to ordering bugs that surface only under specific system combinations.
+A reasonable architect might propose a more flexible model: let systems register for "frame begin" and "frame end" events, or use a dependency graph to determine execution order dynamically. Several engines have tried this. Ogre3D's `FrameListener` model allowed arbitrary callbacks for frame events, and developers regularly encountered ordering bugs when two listeners each assumed the other had already run. The result is typically harder to debug, harder to profile, and prone to ordering bugs that surface only under specific system combinations.
 
 Fixed phases provide three properties that event-driven alternatives struggle to match:
 
@@ -226,15 +228,15 @@ Fixed phases provide three properties that event-driven alternatives struggle to
 
 2. **Profilability.** Each phase maps directly to an instrumentation span. A profiler can show exactly how long INPUT, FIXED, UPDATE, LATE, EXTRACT, and CLEAR took, and each span contains only the work that belongs to that phase. In an event-driven model, the same logical work may be spread across multiple event handlers with interleaved unrelated work, making it difficult to attribute time to causes.
 
-3. **Reasoning about invariants.** The EXTRACT phase can assume that all game mutations are complete because it runs after UPDATE and LATE. The LATE phase can assume that all gameplay decisions have been made because it runs after UPDATE. These invariants are trivially true in a fixed-order loop. In an event-driven model, ensuring them requires explicit dependency declarations and topological sorting --- and the resulting order is still a fixed sequence, just one that is computed at runtime rather than declared at design time.
+3. **Reasoning about invariants.** The EXTRACT phase can assume that all game mutations are complete because it runs after UPDATE and LATE. The LATE phase can assume that all gameplay decisions have been made because it runs after UPDATE. These invariants are trivially true in a fixed-order loop. In an event-driven model, ensuring them requires explicit dependency declarations and topological sorting, and the resulting order is still a fixed sequence, just one that is computed at runtime rather than declared at design time.
 
-Within each phase, individual systems can still declare dependencies on each other and be topologically sorted. The phases provide the coarse structure; per-system ordering within a phase provides the fine-grained control. This is the approach Unity's ECS takes with its system groups, and it is the approach Smallworld follows.
+The cost of fixed phases is inflexibility: adding a new execution slot requires an engine change, not just a callback registration. In practice, this cost is modest. Within each phase, individual systems can still declare dependencies on each other and be topologically sorted. The phases provide the coarse structure; per-system ordering within a phase provides the fine-grained control. This is the approach Unity's DOTS takes with its system groups [@unity-entities], and it is the approach Smallworld follows.
 
 ### Lockstep Mode
 
 The overlapped pipeline is the default because it offers the best throughput in the common case. But some applications need minimum latency more than maximum throughput. VR headsets have strict motion-to-photon budgets where an extra frame of latency can cause discomfort. Competitive multiplayer games may prioritize input responsiveness over frame rate.
 
-For these cases, Smallworld supports **lockstep mode**: the Game Thread waits for the Render Thread to finish the current frame before beginning the next tick. The pipeline collapses from two frames to one. CPU-side feedback arrives from the immediately preceding frame rather than frame *N-2*. The cost is throughput: the total frame time is now the sum of game and render work, not the maximum. The choice between overlapped and lockstep is a single enum in the engine configuration (@lst-pipeline-mode).
+For these cases, Smallworld supports **lockstep mode**: the Game Thread waits for the Render Thread to finish the current frame before beginning the next tick. The pipeline collapses from two frames to one. CPU-side feedback arrives from the immediately preceding frame rather than from two frames ago. The cost is throughput: the total frame time is now the sum of game and render work, not the maximum. The choice between overlapped and lockstep is a single configuration value, as shown in @lst-pipeline-mode.
 
 ```{#lst-pipeline-mode .rust lst-cap="Selecting pipeline mode"}
 EngineConfig {
@@ -243,20 +245,20 @@ EngineConfig {
 }
 ```
 
-In practice, the pacing control loops described in section 4.3 --- particularly the GPU queue-depth throttle --- make overlapped mode latency-competitive for most applications. Lockstep mode remains the blunt instrument for genuinely latency-critical work, analogous to UE5's `r.OneFrameThreadLag 0` setting.
+In practice, the pacing control loops described in the next section, particularly the GPU queue-depth throttle, make overlapped mode latency-competitive for most applications. Lockstep mode remains the blunt instrument for genuinely latency-critical work, analogous to UE5's `r.OneFrameThreadLag 0` setting.
 
 
 ## Pacing, Backpressure, and Presentation
 
-The overlapped pipeline gives the engine two concurrent threads of execution. But concurrency is not sufficient for smooth presentation. The display refreshes at a fixed rate (60, 120, 144 Hz). The GPU executes commands at its own pace, which varies with scene complexity. The engine produces work at a rate determined by its simulation cost. These three clocks --- display, GPU, and engine --- are independent, and their interactions produce the frame-pacing artifacts that players perceive as stutter, tearing, or input lag.
+If you have ever shipped a game that ran beautifully at 60 fps in testing and then stuttered on a player's 144 Hz monitor, you have encountered a pacing problem. The overlapped pipeline gives the engine two concurrent threads of execution. But concurrency is not sufficient for smooth presentation. The display refreshes at a fixed rate (60, 120, 144 Hz). The GPU executes commands at its own pace, which varies with scene complexity. The engine produces work at a rate determined by its simulation cost. These three clocks (display, GPU, and engine) are independent, and their interactions produce the frame-pacing artifacts that players perceive as stutter, tearing, or input lag.
 
-Good pacing is not about making everything run as fast as possible. It is about ensuring that each new frame reaches the display at the moment the display expects it, that the GPU never accumulates a backlog of unseen frames, and that the engine adapts its quality targets to stay within budget rather than oscillating between overshoot and recovery. Pacing is a control problem, and Smallworld addresses it with three composable control loops.
+Good pacing is not about making everything run as fast as possible. It is about ensuring that each new frame reaches the display at the moment the display expects it, that the GPU never accumulates a backlog of unseen frames, and that the engine adapts its quality targets to stay within budget rather than oscillating between overshoot and recovery. Pacing is a control problem, and it is addressed with three composable control loops.
 
 ### GPU Queue-Depth Throttle
 
-The most fundamental pacing mechanism is the simplest. Modern graphics drivers can buffer multiple frames of submitted work in their internal queues. This is efficient for throughput --- the GPU is never idle between frames --- but it adds latency. If the driver buffers three frames, the image currently being displayed may reflect input that was processed three frames ago, and no amount of application-level optimization can recover that latency.
+The most fundamental pacing mechanism is the simplest. Modern graphics drivers can buffer multiple frames of submitted work in their internal queues. This is efficient for throughput (the GPU is never idle between frames) but it adds latency. Consider what happens without any throttle: the engine submits frames as fast as possible, the driver queues three or four of them, and the image currently on screen reflects input from three or four frames ago. The player turns their mouse, and the camera responds 50 to 70 ms later. No amount of application-level optimization can recover that latency, because the delay is in the driver's buffer, not in the engine's code.
 
-Smallworld's Render Thread enforces a maximum number of GPU frames in flight. Before submitting frame *N+1*, it waits on the GPU-completion signal for frame *N-1* (when `max_gpu_frames_in_flight` is 1, the default). This bounds worst-case input latency to a deterministic, configurable value rather than leaving it driver-dependent. @lst-queue-throttle illustrates how the SUBMIT phase waits on the oldest in-flight frame before allowing a new submission.
+The fix is to enforce a maximum number of GPU frames in flight. Before submitting frame *N+1*, the Render Thread waits on the GPU-completion signal for frame *N-1* (when the maximum is 1, the default). This bounds worst-case input latency to a deterministic, configurable value rather than leaving it driver-dependent. @lst-queue-throttle illustrates how the SUBMIT phase waits on the oldest in-flight frame before allowing a new submission.
 
 ```{#lst-queue-throttle .rust lst-cap="GPU queue-depth throttle in the SUBMIT phase"}
 fn submit_with_throttle(
@@ -274,23 +276,23 @@ fn submit_with_throttle(
 }
 ```
 
-This is the analog of Direct3D's `MaximumFrameLatency` or Vulkan's in-flight frame fences. It is a correctness floor with no downside: you never want the driver silently buffering more frames than the engine intends. The `max_gpu_frames_in_flight` default of 1 means the GPU is at most one frame ahead of what the application has submitted, keeping latency predictable.
+This is the analog of Direct3D's `MaximumFrameLatency` or Vulkan's in-flight frame fences, both of which solve the same problem at the API level. Every engine that cares about latency implements some version of this throttle. The default of 1 means the GPU is at most one frame ahead of what the application has submitted, keeping latency predictable. The cost of bounding the queue is that the GPU may momentarily idle between frames if submission is late, but in an engine with DRS (discussed next) keeping the GPU inside budget, that idle window rarely opens.
 
 ### Dynamic Resolution as a Control Loop
 
 The queue-depth throttle prevents latency accumulation, but it does not prevent the GPU from missing its deadline. If a frame's render work exceeds the target frame time, the throttle will block the Render Thread until the GPU catches up, which stalls the pipeline and drops the frame rate. To keep the GPU inside budget proactively, the engine needs a mechanism that reduces render work before overruns occur.
 
-Dynamic Resolution Scaling (DRS) is that mechanism. The idea is simple: render at a lower internal resolution when the GPU is under pressure, and scale back up when headroom is available. The scaling factor is applied to the render targets' dimensions, so the GPU does proportionally less pixel work. The final image is upscaled to display resolution, either with a bilinear filter or a temporal upscaling algorithm (TAAU) that reconstructs detail from motion-accumulated history.
+Dynamic Resolution Scaling (DRS) is that mechanism, and it has become standard practice across the industry. The PlayStation 4 Pro era brought DRS into the mainstream, with titles like *Horizon Zero Dawn* and *Destiny 2* dynamically adjusting their internal resolution to maintain stable frame rates. Xbox's Game Development Kit provides a built-in DRS API. Unreal Engine 5 exposes DRS through its `r.DynamicRes` console variables, and Unity's Scriptable Render Pipeline supports it natively. The idea is simple: render at a lower internal resolution when the GPU is under pressure, and scale back up when headroom is available. The scaling factor is applied to the render targets' dimensions, so the GPU does proportionally less pixel work. The final image is upscaled to display resolution, either with a bilinear filter or a temporal upscaling algorithm (such as AMD FSR or NVIDIA DLSS) that reconstructs detail from motion-accumulated history.
 
-The important insight is that DRS should be a **control loop**, not a threshold switch. A naive implementation might drop resolution when GPU time exceeds 16 ms and restore it when GPU time falls below 14 ms. This produces visible oscillation: the resolution bounces back and forth every few frames as the system overshoots and corrects. The control loop must be asymmetric and damped.
+The important insight is that DRS should be a **control loop**, not a threshold switch. A naive implementation might drop resolution when GPU time exceeds 16 ms and restore it when GPU time falls below 14 ms. This produces visible oscillation: the resolution bounces back and forth every few frames as the system overshoots and corrects. The player sees the image sharpen and soften rhythmically, which is worse than a consistently lower resolution. The control loop must be asymmetric and damped.
 
 Smallworld's DRS controller uses three properties:
 
-1. **Asymmetric response.** Resolution drops immediately when the GPU overruns the target. Recovery is gradual --- the scale factor increases by a small step per frame when headroom is available. This ensures the system reacts quickly to spikes but does not oscillate.
+1. **Asymmetric response.** Resolution drops immediately when the GPU overruns the target. Recovery is gradual: the scale factor increases by a small step per frame when headroom is available. This ensures the system reacts quickly to spikes but does not oscillate.
 
-2. **Hysteresis band.** The controller does not adjust when GPU time is within a band around the target (for example, 14--16 ms for a 16.67 ms target). This dead zone prevents small fluctuations from triggering unnecessary resolution changes.
+2. **Hysteresis band.** The controller does not adjust when GPU time is within a band around the target (for example, 14 to 16 ms for a 16.67 ms target). This dead zone prevents small fluctuations from triggering unnecessary resolution changes.
 
-3. **Step-limited changes.** The resolution scale changes by at most a fixed increment per frame. This keeps the temporal upscaler's history valid --- large jumps in resolution invalidate accumulated history and produce a visible pop.
+3. **Step-limited changes.** The resolution scale changes by at most a fixed increment per frame. This keeps the temporal upscaler's history valid, because large jumps in resolution invalidate accumulated history and produce a visible pop.
 
 @lst-pacing-config collects these controls into a single configuration struct, including vsync, target frame time, queue depth, DRS parameters, and the latency mode selector.
 
@@ -311,23 +313,23 @@ enum LatencyMode {
 }
 ```
 
-The strategic effect is important: when DRS keeps the GPU inside budget, the queue-depth throttle rarely engages, and pacing remains smooth and proactive rather than reactive. DRS is the first line of defense; the throttle is the backstop.
+The strategic effect is important: when DRS keeps the GPU inside budget, the queue-depth throttle rarely engages, and pacing remains smooth and proactive rather than reactive. DRS is the first line of defense; the throttle is the backstop. The cost is image quality, and it is not zero: at low scale factors, fine detail softens noticeably, and temporal upscalers introduce their own artifacts (ghosting, shimmer on thin geometry). The minimum scale floor prevents the image from degrading past a useful threshold.
 
 ### Vsync and Present Modes
 
-Vertical synchronization determines when a rendered frame reaches the display. Without vsync, the engine presents frames as soon as they are ready, which can cause tearing --- the display shows the top half of one frame and the bottom half of another when a new frame arrives mid-scanline. With vsync, presentation is synchronized to the display's vertical blanking interval, eliminating tearing at the cost of waiting for the next vblank if a frame is ready early.
+Vertical synchronization determines when a rendered frame reaches the display. Without vsync, the engine presents frames as soon as they are ready, which can cause tearing, where the display shows the top half of one frame and the bottom half of another when a new frame arrives mid-scanline. With vsync, presentation is synchronized to the display's vertical blanking interval, eliminating tearing at the cost of waiting for the next vblank if a frame is ready early.
 
-In `wgpu`, vsync is controlled through **present modes** on the surface configuration:
+In graphics APIs, vsync is controlled through **present modes** on the surface configuration. The terminology varies across APIs, but the concepts are universal:
 
-- **`Fifo`** (vsync on): Frames are queued and presented at the next vblank. If the engine produces frames faster than the display consumes them, the thread blocks at present, which provides natural backpressure through the entire pipeline. This is universally supported and is the default.
+- **FIFO** (vsync on): Frames are queued and presented at the next vblank. If the engine produces frames faster than the display consumes them, the thread blocks at present, which provides natural backpressure through the entire pipeline. This is universally supported and is the default. In Vulkan and `wgpu`, this is `PresentMode::Fifo`; in Direct3D, it corresponds to a swapchain with a non-zero sync interval.
 
-- **`Mailbox`** (vsync off, preferred): The most recent frame replaces any previous frame waiting for presentation. The engine runs as fast as possible without tearing, and only the latest frame is ever displayed. This minimizes latency but requires GPU and CPU resources beyond what the display can show.
+- **Mailbox** (vsync off, preferred): The most recent frame replaces any previous frame waiting for presentation. The engine runs as fast as possible without tearing, and only the latest frame is ever displayed. This minimizes latency but requires GPU and CPU resources beyond what the display can show. Variable refresh rate technologies (AMD FreeSync, NVIDIA G-Sync) complement this mode by synchronizing the display to the GPU's output cadence rather than the reverse, eliminating tearing without the backpressure of FIFO.
 
-- **`Immediate`** (vsync off, fallback): Frames are presented immediately, with no synchronization. Tearing is possible. This mode is used only when Mailbox is not supported by the platform.
+- **Immediate** (vsync off, fallback): Frames are presented immediately, with no synchronization. Tearing is possible. This mode is used only when Mailbox is not supported by the platform.
 
-Smallworld maps `PacingConfig.vsync` to these present modes: `true` selects `Fifo`; `false` selects `Mailbox` if available, falling back to `Immediate`. Runtime toggling follows the same path as resize: the Game Thread updates the pacing configuration, the Render Thread reconfigures the surface at the next frame boundary.
+Smallworld maps its vsync configuration to these present modes: enabled selects FIFO; disabled selects Mailbox if available, falling back to Immediate. Runtime toggling follows the same path as resize: the Game Thread updates the pacing configuration, the Render Thread reconfigures the surface at the next frame boundary.
 
-Vsync paces the *entire* pipeline through designed backpressure. When `Fifo` presentation blocks the Render Thread, the bounded packet channel fills, and the Game Thread eventually blocks on send. The simulation does not need to know about vsync; the fixed-timestep accumulator absorbs any render cadence. A frame-rate cap for vsync-off mode is a software limiter --- a sleep-to-target at tick start against `target_frame_time_ms` --- that prevents the engine from burning CPU and GPU cycles producing frames the display will never show.
+Vsync paces the *entire* pipeline through designed backpressure. When FIFO presentation blocks the Render Thread, the bounded packet channel fills, and the Game Thread eventually blocks on send. The simulation does not need to know about vsync; the fixed-timestep accumulator absorbs any render cadence. A frame-rate cap for the vsync-off case is a software limiter, a sleep-to-target at tick start against the configured target frame time, that prevents the engine from burning CPU and GPU cycles producing frames the display will never show.
 
 Figure \ref{fig:pacing-control-loops} shows how the three control loops interact: DRS adjusts quality to keep the GPU inside budget, the queue-depth throttle caps driver-side latency, and vsync or the software limiter governs the overall cadence.
 
@@ -335,22 +337,22 @@ Figure \ref{fig:pacing-control-loops} shows how the three control loops interact
 
 ### Predictive Tick Pacing
 
-The first two control loops are straightforward and shipped in v1. The third is more subtle and is planned for v2, gated behind `LatencyMode::LowLatency`.
+The first two control loops are straightforward. The third is more subtle and is planned for a future iteration, gated behind the `LowLatency` mode.
 
 The idea, inspired by NVIDIA Reflex [@nvidia-reflex], is to delay the game tick's start so that input sampling happens as late as possible before the frame's render deadline. Instead of beginning the game tick immediately after the previous frame's extract, the engine inserts a computed sleep:
 
-1. Predict the GPU time for the upcoming frame (using recent `GpuTimingFeedback`).
+1. Predict the GPU time for the upcoming frame (using recent timing feedback).
 2. Predict the game tick duration (using recent real-time measurements).
 3. Compute the latest safe start time that allows the game tick and render submission to complete before the next vsync.
 4. Sleep until that time, then sample input and begin the tick.
 
 This pushes input sampling closer to the display deadline, reducing input-to-photon latency by the amount of time the game tick would otherwise have been idle waiting for the Render Thread. The effect is particularly significant when game tick work is substantially shorter than render work, as the game tick can be shifted later without affecting throughput.
 
-The technique is tuning-sensitive: an optimistic margin misses vsync and drops a frame. Smallworld gates it behind a flag and exposes the safety margins to games so they can calibrate against their actual workloads. It is not enabled by default; the queue-depth throttle and DRS are the v1 pacing story.
+The technique is tuning-sensitive: an optimistic margin misses vsync and drops a frame. Smallworld gates it behind a flag and exposes the safety margins to games so they can calibrate against their actual workloads. It is not enabled by default; the queue-depth throttle and DRS are the baseline pacing story.
 
 ### Render-to-Game Feedback
 
-The pipeline is not unidirectional. After each frame is submitted and presented, the Render Thread sends a `FrameFeedback` back to the Game Thread through a dedicated feedback channel. @lst-frame-feedback defines the struct, which carries a frame index, optional GPU timing, occlusion statistics, and generic readback results.
+The pipeline is not unidirectional. After each frame is submitted and presented, the Render Thread sends a feedback struct back to the Game Thread through a dedicated feedback channel. @lst-frame-feedback defines the struct, which carries a frame index, optional GPU timing, occlusion statistics, and generic readback results.
 
 ```{#lst-frame-feedback .rust lst-cap="Render-to-game feedback"}
 struct FrameFeedback {
@@ -372,24 +374,26 @@ The feedback has two important properties that game code must respect:
 
 **It describes the past, not the present.** In the overlapped pipeline, the Game Thread typically reads feedback from frame *N-2* while processing frame *N*. The feedback is never synchronous with the current tick. It is useful for adaptive quality decisions (drop LOD levels if the GPU is consistently overloaded), streaming prioritization (deprioritize chunks that were culled), and profiling, but it is never ground truth for the current frame's state.
 
-**GPU-derived data is older than CPU-derived data.** The `FrameFeedback` contains both CPU-side data (cull statistics, which describe the frame the feedback was sent after) and GPU-derived data (timestamps, readback results). At the time feedback is assembled, the GPU has not yet finished executing the frame that was just submitted. GPU timing data comes from a **readback ring** --- two or three buffered query sets, polled via `map_async` without blocking. Each GPU-derived datum is stamped with the frame it actually measures, which is typically two or more frames behind the feedback's `frame_index`. The Render Thread never blocks on the GPU to assemble feedback.
+**GPU-derived data is older than CPU-derived data.** The feedback contains both CPU-side data (cull statistics, which describe the frame the feedback was sent after) and GPU-derived data (timestamps, readback results). At the time feedback is assembled, the GPU has not yet finished executing the frame that was just submitted. GPU timing data comes from a **readback ring**: two or three buffered query sets, polled asynchronously without blocking. Each GPU-derived datum is stamped with the frame it actually measures, which is typically two or more frames behind the feedback's frame index. The Render Thread never blocks on the GPU to assemble feedback.
 
 ::: {.callout-tip appearance="simple" title="Advisory, Not Authoritative"}
-Feedback is always advisory. A game system that reads `gpu_frame_time()` and decides to reduce particle counts is making a heuristic decision based on stale data. This is fine --- the alternative is a synchronous GPU readback that would stall the pipeline --- but game code should treat feedback as a trend signal, not a per-frame command. Decisions based on feedback should be damped (use a running average, not the latest sample) and bounded (never oscillate between quality settings frame-to-frame).
+Feedback is always advisory. A game system that reads GPU frame time and decides to reduce particle counts is making a heuristic decision based on stale data. This is fine: the alternative is a synchronous GPU readback that would stall the pipeline. But game code should treat feedback as a trend signal, not a per-frame command. Decisions based on feedback should be damped (use a running average, not the latest sample) and bounded (never oscillate between quality settings frame-to-frame).
 :::
 
 
 ## Lifecycle Events Are First-Class Work
 
-So far, this chapter has focused on the steady state: the game ticks, the renderer draws, feedback flows back, pacing keeps everything smooth. But a real engine does not run in steady state forever. Windows get resized. The application is minimized and restored. The GPU driver crashes. The player quits. Each of these events interrupts the steady-state pipeline, and each must be handled without corrupting in-progress work, hanging threads, or losing unsaved state.
+So far, this chapter has focused on the steady state: the game ticks, the renderer draws, feedback flows back, pacing keeps everything smooth. But no engine runs in steady state forever. Windows get resized. The application is minimized and restored. The GPU driver crashes. The player quits. If you have ever shipped an application that hangs on exit because a thread is blocked on a channel that will never produce, or watched a window flash white during resize because the renderer was mid-frame when the dimensions changed, you know these events deserve the same engineering attention as the simulation loop itself.
 
-The temptation is to treat these events as variants of ordinary gameplay events --- push a `Resized` event onto the event bus, let some system handle it whenever it runs. This is a mistake. Lifecycle events differ from gameplay events in three critical ways:
+The temptation is to treat these events as variants of ordinary gameplay events: push a `Resized` event onto the event bus, let some system handle it whenever it runs. This is a mistake. Lifecycle events differ from gameplay events in three critical ways:
 
 1. **They must be delivered regardless of pipeline state.** A paused game still resizes. A stalled pipeline still quits. If resize is just another event on the game bus, a paused game that does not pump the bus will not resize, and the render surface will be the wrong size when it unpauses.
 
-2. **They require coordinated multi-thread responses.** A resize event must update the Game Thread's `WindowState` (so the game knows the new dimensions), reconfigure the Render Thread's surface (so it acquires the right-sized swapchain images), and reallocate display-resolution render targets. These changes must happen in a coordinated order, at a frame boundary, not whenever an arbitrary system processes an event.
+2. **They require coordinated multi-thread responses.** A resize event must update the Game Thread's window state (so the game knows the new dimensions), reconfigure the Render Thread's surface (so it acquires correctly sized swapchain images), and reallocate display-resolution render targets. These changes must happen in a coordinated order, at a frame boundary, not whenever an arbitrary system processes an event.
 
 3. **They have ordering and deadline constraints that gameplay events do not.** Shutdown must stop simulation before closing channels, close channels before releasing GPU resources, and release GPU resources before destroying the device. A missed ordering causes hangs, crashes, or lost data. Gameplay events rarely have such consequences.
+
+Unreal Engine handles this separation through its `FCoreDelegates` system and a carefully ordered engine shutdown path that is distinct from gameplay event routing. Unity's `Application.Quit()` triggers a specific sequence of lifecycle callbacks (`OnApplicationQuit`, `OnDestroy`) that are separate from its `MonoBehaviour` event bus. Godot routes lifecycle notifications through a separate `NOTIFICATION_WM_*` path rather than its signal system. The pattern is universal: lifecycle events need their own transport and their own ordering guarantees.
 
 For these reasons, Smallworld separates lifecycle events from the data-plane event bus entirely. They travel on a dedicated **control channel**.
 
@@ -397,68 +401,70 @@ For these reasons, Smallworld separates lifecycle events from the data-plane eve
 
 The control channel is an out-of-band channel from the main thread to the Render Thread. It carries a small set of typed events:
 
-- `Resized(width, height)` --- the window's physical size has changed.
-- `ScaleFactorChanged(factor)` --- the display's DPI scale has changed (common when moving a window between monitors).
-- `Minimized` --- the window has been minimized; rendering can be suspended.
-- `Restored` --- the window has been restored from minimized state.
-- `DeviceLost` --- the GPU device has been lost (driver crash, hardware removal, TDR).
-- `Quit` --- the application is shutting down.
+- `Resized(width, height)`: the window's physical size has changed.
+- `ScaleFactorChanged(factor)`: the display's DPI scale has changed (common when moving a window between monitors).
+- `Minimized`: the window has been minimized; rendering can be suspended.
+- `Restored`: the window has been restored from minimized state.
+- `DeviceLost`: the GPU device has been lost (driver crash, hardware removal, TDR).
+- `Quit`: the application is shutting down.
 
 The separation of transport and application is important. The control channel is out-of-band: events can be sent and received regardless of whether the packet channel is flowing. But application is frame-synchronized: the Render Thread drains the control channel at the top of RECEIVE, before processing any packet data, and applies changes only between frames. This ensures that surface reconfiguration, target reallocation, and shutdown sequencing happen at clean boundaries, never mid-render.
 
-Figure \ref{fig:control-data-channels} shows the relationship between the data channel (carrying `FramePacket`s) and the control channel (carrying lifecycle events), and how the Render Thread processes both at the frame boundary.
+Figure \ref{fig:control-data-channels} shows the relationship between the data channel (carrying frame packets) and the control channel (carrying lifecycle events), and how the Render Thread processes both at the frame boundary.
 
 \input{figures/control-data-channels.tex}
 
-The `FramePacket` (data channel) never carries control information, and the control channel never carries rendering data. This separation means that a paused game that has stopped sending packets can still resize or quit cleanly, and a rendering pipeline that is mid-frame never receives a surprise reconfiguration.
+The frame packet (data channel) never carries control information, and the control channel never carries rendering data. This separation means that a paused game that has stopped sending packets can still resize or quit cleanly, and a rendering pipeline that is mid-frame never receives a surprise reconfiguration.
 
 ### Resize Handling
 
-Resize is the most frequent lifecycle event and the one most engines get subtly wrong. The typical failure mode is a frame or two of rendering at the wrong resolution --- a visible flash as the surface catches up to the window size. The root cause is usually that resize is processed asynchronously, and the surface is reconfigured while the renderer is mid-frame.
+Resize is the most frequent lifecycle event and the one most engines get subtly wrong. The typical failure mode is a frame or two of rendering at the wrong resolution, a visible flash as the surface catches up to the window size. The root cause is usually that resize is processed asynchronously, and the surface is reconfigured while the renderer is mid-frame.
 
 Smallworld's resize path avoids this:
 
-1. The main thread receives the window-resize event from the platform (via `winit`).
-2. It updates `WindowState` --- a game-visible struct containing the window's physical size, logical size, and scale factor.
+1. The main thread receives the window-resize event from the platform.
+2. It updates the game-visible window state struct, which contains the window's physical size, logical size, and scale factor.
 3. It sends `Resized` on the control channel.
-4. At the next frame boundary (top of RECEIVE), the Render Thread processes the event: reconfigures the surface with the new dimensions, reallocates display-resolution render targets, and resets temporal upscaling history (which is display-resolution and invalid after resize).
-5. The next packet to arrive may have been built against the old size (it was extracted before the game thread saw the new `WindowState`). This is handled by stamping each packet with the display size it was built against. A packet built pre-resize presents with the old size for one transient frame --- an acceptable artifact that resolves in a single frame.
+4. At the next frame boundary (top of RECEIVE), the Render Thread processes the event: reconfigures the surface with the new dimensions, reallocates display-resolution render targets, and resets temporal upscaling history (which is display-resolution-dependent and invalid after resize).
+5. The next packet to arrive may have been built against the old size (it was extracted before the Game Thread saw the new window state). This is handled by stamping each packet with the display size it was built against. A packet built pre-resize presents with the old size for one transient frame, an acceptable artifact that resolves in a single frame.
 
-If the surface reports `SurfaceError::Outdated` or `SurfaceError::Lost` at swapchain acquisition, the Render Thread reconfigures and retries once. If the retry also fails, it skips presentation for that frame. There is no crash path through resize.
+If the surface reports an outdated or lost error at swapchain acquisition, the Render Thread reconfigures and retries once. If the retry also fails, it skips presentation for that frame. There is no crash path through resize.
 
 ### Device Loss and the "GPU Is a Cache" Invariant
 
-GPU device loss is rare but not hypothetical. Driver updates, TDR (Timeout Detection and Recovery) on Windows, external GPU disconnection, and driver bugs can all cause the device to become invalid. When this happens, every GPU resource --- buffers, textures, pipelines, bind groups --- is gone. An engine that stores authoritative state only on the GPU is in an unrecoverable position.
+GPU device loss is rare but not hypothetical. Driver updates, TDR (Timeout Detection and Recovery) on Windows, external GPU disconnection, and driver bugs can all cause the device to become invalid. When this happens, every GPU resource (buffers, textures, pipelines, bind groups) is gone. An engine that stores authoritative state only on the GPU is in an unrecoverable position.
+
+Consider the alternative: a voxel engine that streams brick data from disk into GPU staging buffers, then discards the CPU copy to save memory. When the device is lost, those bricks are gone, and the only recovery path is to re-stream every brick from disk, which could take seconds or minutes. If the engine had kept the CPU-side data authoritative, recovery would be automatic: the GPU resources are simply rebuilt from what the CPU already has.
 
 Smallworld establishes an architectural invariant that makes recovery permanently possible:
 
 ::: {.callout-warning appearance="simple" title="GPU Memory Is Always a Cache"}
-No authoritative state lives only on the GPU. The retained `RenderScene` is CPU-side. Voxel bricks refill from region files and procedural generators. Assets reload through the normal asset path. Clipmaps, froxel data, temporal history, and acceleration structures (TLAS) are transient and rebuild from simulation state. GPU memory is a cache of CPU-authoritative data, and a cache can always be rebuilt.
+No authoritative state lives only on the GPU. The retained render scene is CPU-side. Voxel bricks refill from region files and procedural generators. Assets reload through the normal asset path. Clipmaps, froxel data, temporal history, and acceleration structures (TLAS) are transient and rebuild from simulation state. GPU memory is a cache of CPU-authoritative data, and a cache can always be rebuilt.
 :::
 
-This invariant is already true by construction in Smallworld's architecture --- it falls out of the Game--Render Firewall, which ensures the Render Thread's GPU resources are derived from the `RenderScene`, which is derived from `FramePacket`s, which are derived from the game-side `World`. Nothing in that chain requires GPU memory to be the source of truth.
+This invariant is already true by construction in Smallworld's architecture. It falls out of the Game-Render Firewall, which ensures the Render Thread's GPU resources are derived from the render scene, which is derived from frame packets, which are derived from the game-side world. Nothing in that chain requires GPU memory to be the source of truth.
 
-The v1 response to device loss is fatal with grace: the engine receives `DeviceLost` on the control channel, drains what can be drained, fires the game's save hook (so progress is not lost), emits diagnostics, and exits through the teardown protocol. This is honest engineering: device loss is rare, and the test burden for full recovery is substantial.
+The initial response to device loss is fatal with grace: the engine receives `DeviceLost` on the control channel, drains what can be drained, fires the game's save hook (so progress is not lost), emits diagnostics, and exits through the teardown protocol. This is honest engineering: device loss is rare, and the test burden for full recovery is substantial.
 
 The planned hardening path is a recovery walk: pause the pipeline, recreate the device, recreate resource pools, re-request content through the existing asset and streaming paths (the same paths used for normal loading), let transient data rebuild over subsequent frames, and resume. This is additive work, not an architectural change, because the "GPU is a cache" invariant ensures that every piece of GPU state can be reconstructed from CPU-side sources.
 
 ### Graceful Teardown
 
-Shutdown is the lifecycle event that engines most often get wrong. The failure mode is usually a hang: a thread blocks on a channel that will never produce, a GPU fence that will never signal, or a destructor that waits for a resource held by a thread that has already exited. The cause is almost always implicit ordering --- `Drop` destructors running in an order determined by struct layout rather than by the dependencies between subsystems.
+Shutdown is the lifecycle event that engines most often get wrong. The failure mode is usually a hang: a thread blocks on a channel that will never produce, a GPU fence that will never signal, or a destructor that waits for a resource held by a thread that has already exited. The cause is almost always implicit ordering, where destructors run in an order determined by struct layout rather than by the dependencies between subsystems. This problem is not unique to game engines; it is the same class of bug that plagues any concurrent system with shared infrastructure. The difference is that a game engine's teardown path is rarely tested thoroughly, because it only runs once per session and is the least exciting feature to QA.
 
 Smallworld replaces implicit drop ordering with an explicit five-stage teardown protocol, shown in Figure \ref{fig:teardown-protocol}. Each stage has a purpose, a prerequisite, and a deadline (approximately 2 seconds) after which it is logged and forced. The process never hangs on exit.
 
 \input{figures/teardown-protocol.tex}
 
-**Stage 1: Stop simulation.** The main loop exits. The engine calls `App::shutdown()` and any behavior-level shutdown callbacks. Critically, this happens **while all services are still alive** --- the `World`, `AssetServer`, streaming coordinator, and IO pool are all operational. This allows save operations to flush through normal paths: the save system writes to the `AssetServer`, which writes to disk through the IO pool, using the same infrastructure it uses during normal operation. If shutdown callbacks ran after service teardown, saves would fail.
+**Stage 1: Stop simulation.** The main loop exits. The engine calls the application's shutdown callback and any behavior-level shutdown hooks. Critically, this happens **while all services are still alive**: the world, asset server, streaming coordinator, and IO pool are all operational. This allows save operations to flush through normal paths: the save system writes to the asset server, which writes to disk through the IO pool, using the same infrastructure it uses during normal operation. If shutdown callbacks ran after service teardown, saves would fail.
 
 **Stage 2: Quiesce producers.** The streaming coordinator stops accepting new demand, cancels its pending queue using generation stamps (so in-flight tasks can detect that their work is no longer needed), flushes any pending region-file writes, and shuts down. After this stage, no new work enters the pipeline.
 
-**Stage 3: Drain the pipeline.** The packet and control channels are closed. The Render Thread finishes any in-flight frame and exits its loop. `device.poll(Maintain::Wait)` ensures all submitted GPU work completes. Staging-pool fences and readback-ring fences are waited on and completed. GPU resource pools release their contents. After this stage, no GPU work is in flight and no channel is open.
+**Stage 3: Drain the pipeline.** The packet and control channels are closed. The Render Thread finishes any in-flight frame and exits its loop. The device is polled to completion to ensure all submitted GPU work completes. Staging-pool fences and readback-ring fences are waited on and completed. GPU resource pools release their contents. After this stage, no GPU work is in flight and no channel is open.
 
 **Stage 4: Stop services.** The audio thread drains its command queue, stops output, and exits. Worker pools (both game and render) join their threads. After this stage, no background threads are running.
 
-**Stage 5: Destroy.** GPU resources are dropped, the device is dropped, the window is dropped, and the process exits. `Engine::run()` has a return type of `!` (never returns), reflecting that the process lifecycle is the engine's lifecycle.
+**Stage 5: Destroy.** GPU resources are dropped, the device is dropped, the window is dropped, and the process exits.
 
 The ordering that bites most often in practice is Stage 1 before Stage 2: shutdown callbacks that save must run while the IO machinery is alive, not during destruction. This is a specific instance of a general principle: never tear down infrastructure before its consumers have finished their final work. @lst-teardown translates the five stages into Rust, showing the explicit ordering of shutdown, channel closure, thread joins, and GPU idle.
 
@@ -496,26 +502,26 @@ Channel closure is the universal backstop. When a channel's sender is dropped, t
 
 A subtlety worth calling out: pausing the game and pausing the application are different operations, and they must not be conflated.
 
-**Pausing the game** means setting `time_scale` to zero. Game time stops. Fixed steps stop. The world does not advance. But the application continues to run: the render loop draws the paused world (perhaps with a menu overlay), the input system processes events (the player must be able to unpause), window events are handled (the player might resize or alt-tab), and the control channel remains active. This is the common case: the player opens a pause menu.
+**Pausing the game** means setting the time scale to zero. Game time stops. Fixed steps stop. The world does not advance. But the application continues to run: the render loop draws the paused world (perhaps with a menu overlay), the input system processes events (the player must be able to unpause), window events are handled (the player might resize or alt-tab), and the control channel remains active. This is the common case: the player opens a pause menu.
 
-**Freezing the application** means the entire process is suspended --- typically by the OS when the window is minimized or the application moves to the background. On mobile platforms, this is mandatory. On desktop, minimization may cause the render loop to idle (there is no visible surface to present to). The engine must handle this gracefully: the accumulator should not build up a massive time debt while minimized, or the game will attempt to run hundreds of fixed steps on restore. Smallworld caps the accumulator on restore, discarding accumulated time as it does after any large stall.
+**Freezing the application** means the entire process is suspended, typically by the OS when the window is minimized or the application moves to the background. On mobile platforms, this is mandatory; console certification requirements enforce specific suspend/resume behavior. On desktop, minimization may cause the render loop to idle (there is no visible surface to present to). The engine must handle this gracefully: the accumulator should not build up a massive time debt while minimized, or the game will attempt to run hundreds of fixed steps on restore. Smallworld caps the accumulator on restore, discarding accumulated time as it does after any large stall.
 
-The key insight is that pause is a game-layer concept (time scale), while minimize and restore are platform-layer concepts (lifecycle events on the control channel). They interact --- a minimized game should not burn CPU on simulation --- but they are governed by different mechanisms and should not be collapsed into a single "paused" boolean.
+The key insight is that pause is a game-layer concept (time scale), while minimize and restore are platform-layer concepts (lifecycle events on the control channel). They interact (a minimized game should not burn CPU on simulation) but they are governed by different mechanisms and should not be collapsed into a single "paused" boolean.
 
 
 ## Chapter Summary {.unnumbered}
 
 This chapter has made the engine's control and lifecycle contracts concrete:
 
-1. **Time is a service, not a number.** The `Time` struct provides three separate clocks --- real time (wall clock), scaled game time (affected by pause and slow-motion), and fixed simulation time (constant-step accumulator). Systems declare which clock they consume, and policies like pause and slow-motion fall out as values on the struct rather than per-system conditionals. The fixed timestep, with bounded catch-up and interpolation, decouples simulation correctness from rendering frame rate.
+1. **Time is a service, not a number.** The three-clock model provides real time (wall clock), scaled game time (affected by pause and slow-motion), and fixed simulation time (constant-step accumulator). Systems declare which clock they consume, and policies like pause and slow-motion fall out as values on the time struct rather than per-system conditionals. The fixed timestep, with bounded catch-up and interpolation, decouples simulation correctness from rendering frame rate.
 
 2. **The overlapped pipeline doubles throughput.** The Game Thread and Render Thread operate on different frames simultaneously, synchronized only by a bounded channel at the extract/receive boundary. Each thread runs a fixed sequence of six phases per tick, and the phase ordering is a correctness invariant, not a stylistic choice. Lockstep mode is available for latency-critical applications.
 
-3. **Pacing is a control problem.** Three composable loops --- GPU queue-depth throttle, dynamic resolution scaling, and predictive tick pacing --- keep the pipeline smooth. DRS is the first line of defense (keep the GPU inside budget proactively); the queue-depth throttle is the backstop (bound worst-case latency deterministically); predictive pacing is a v2 refinement for minimum input-to-photon latency. Vsync maps to `wgpu` present modes and paces the entire pipeline through designed backpressure.
+3. **Pacing is a control problem.** Three composable loops (GPU queue-depth throttle, dynamic resolution scaling, and predictive tick pacing) keep the pipeline smooth. DRS is the first line of defense, keeping the GPU inside budget proactively. The queue-depth throttle is the backstop, bounding worst-case latency deterministically. Predictive pacing is a future refinement for minimum input-to-photon latency. Vsync and software limiters govern the overall cadence through designed backpressure.
 
-4. **Lifecycle events are not gameplay events.** Resize, device loss, minimize, and shutdown travel on an out-of-band control channel, applied at frame boundaries by the Render Thread. The "GPU is a cache" invariant ensures that device loss is recoverable in principle. The five-stage teardown protocol --- stop simulation (while services live), quiesce producers, drain the pipeline, stop services, destroy --- prevents hangs, data loss, and ordering-dependent crashes.
+4. **Lifecycle events are not gameplay events.** Resize, device loss, minimize, and shutdown travel on an out-of-band control channel, applied at frame boundaries by the Render Thread. The "GPU is a cache" invariant ensures that device loss is recoverable in principle. The five-stage teardown protocol (stop simulation while services live, quiesce producers, drain the pipeline, stop services, destroy) prevents hangs, data loss, and ordering-dependent crashes.
 
-Together with Chapter 3's firewall, composition model, and thread ownership, these contracts define a complete engine runtime: who owns what, when work happens, how threads pace against each other and the display, and how the engine responds when the platform changes beneath it. The next chapter turns to the beginning of the pipeline: **input and platform interaction** --- how raw device signals become a stable, frame-synchronized game vocabulary without letting platform APIs leak through the engine.
+Together with Chapter 3's firewall, composition model, and thread ownership, these contracts define a complete engine runtime: who owns what, when work happens, how threads pace against each other and the display, and how the engine responds when the platform changes beneath it. The next chapter turns to the beginning of the pipeline: **input and platform interaction**, exploring how raw device signals become a stable, frame-synchronized game vocabulary without letting platform APIs leak through the engine.
 
 ## Review Questions {.unnumbered}
 
@@ -533,4 +539,4 @@ Together with Chapter 3's firewall, composition model, and thread ownership, the
 
 7. In the five-stage teardown protocol, why must Stage 1 (stop simulation) occur before Stage 2 (quiesce producers)? What would go wrong if the order were reversed?
 
-8. A game developer sets `time_scale` to zero to implement a pause menu. The player resizes the window while paused. Trace the path of the resize event through the engine and explain why it works even though the game world is not advancing.
+8. A game developer sets the time scale to zero to implement a pause menu. The player resizes the window while paused. Trace the path of the resize event through the engine and explain why it works even though the game world is not advancing.

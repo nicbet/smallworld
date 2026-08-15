@@ -2,27 +2,6 @@ To meet best textbook practices, each chapter should bridge theory with concrete
 
 Some of the best value for a chapter is: what approaches exist, why the chosen one is superior, common pitfalls, tips and tricks etc. Each chapter should also contain quite a bit of background writing and overall be meaty and verbose.
 
-### Argument direction
-
-Every chapter follows the same arc: **principle first, then concrete realization.**
-
-1. Start with the general problem every engine must solve, independent of any specific engine or language.
-2. Examine how mature engines (UE5, Unity, Godot, and others) have solved it, and what design pressures shaped their choices.
-3. Distinguish which of those choices are durable principles and which are artifacts of a particular era, language, or platform.
-4. Show how Smallworld resolves the same responsibility in its own stack (Rust, `wgpu`), and what those specific choices buy at the friction points.
-
-Never lead with "Smallworld does X." Lead with why the problem exists, what the industry learned, and then show the concrete realization. The reader should finish each chapter understanding both the universal principle and one well-reasoned path through it.
-
-### Heading discipline
-
-A heading earns its place when it divides its parent into two or more peer
-ideas. Do not create a lone section, subsection, or sub-subsection merely to
-give a paragraph a label: merge that material into its parent instead. When a
-single distinction deserves emphasis but not a table-of-contents entry, use a
-short bold lead-in in the prose or a clearly labelled bullet. This keeps the
-book's navigation proportional to the argument rather than to every local
-point.
-
 Here is a standard textbook blueprint template. Each Section can be further broken down into sub-sections `[Chapter Number].[Section Number].1`, `[Chapter Number].[Section Number].2` etc. where required to keep length manageable.
 
 ---
@@ -55,3 +34,6 @@ Addresses how the architecture scales, how it handles serialization/saving, and 
 
 **Chapter Summary**
 A concise wrap-up that reiterates the core architectural decisions made in the chapter and tees up the next chapter.
+
+**Review Questions**
+A list of questions that challenges the reader's understanding of the chapter and triggers them to think about how to transfer the knowledge presented in the chapter to their own problem domains
