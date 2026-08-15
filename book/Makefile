@@ -27,7 +27,7 @@ SOURCES  := index.qmd introduction.qmd _quarto.yml preamble.tex dropcap.lua supp
 DOT_SRCS := $(wildcard figures/*.dot)
 DOT_PDFS := $(DOT_SRCS:.dot=.pdf)
 
-.PHONY: all pdf preview watch clean check check-watch figures
+.PHONY: all pdf draft preview watch clean check check-watch figures
 
 all: pdf
 
@@ -40,6 +40,44 @@ figures/%.pdf: figures/%.dot
 # ── Build ──────────────────────────────────────────────────────────────
 pdf: check figures $(SOURCES)
 	$(QUARTO) render --to pdf $(RENDER_FLAGS)
+
+# ── Draft (single-chapter, fast) ───────────────────────────────────────
+# Render one chapter as a standalone PDF for rapid iteration using a
+# Quarto profile that overrides the book's chapter list to just the
+# target chapter.  See: github.com/quarto-dev/quarto-cli/discussions/7762
+#   make draft CH=04          — renders chapter 04
+#   make draft CH=04 OPEN=1   — renders and opens in Preview
+DRAFT_DIR := $(OUTDIR)/draft
+DRAFT_PROFILE := _quarto-draft.yml
+
+draft: figures
+ifndef CH
+	$(error Usage: make draft CH=04)
+endif
+	$(eval CHAPTER := $(firstword $(wildcard chapters/$(CH)-*.qmd)))
+	@test -n "$(CHAPTER)" || { echo "Error: no chapter matching chapters/$(CH)-*.qmd"; exit 1; }
+	@mkdir -p $(DRAFT_DIR)
+	@printf '%s\n' \
+		'# Auto-generated draft profile — do not edit' \
+		'project:' \
+		'  output-dir: $(DRAFT_DIR)' \
+		'book:' \
+		'  title: "Draft"' \
+		'  chapters:' \
+		'    - $(CHAPTER)' \
+		'format:' \
+		'  pdf:' \
+		'    toc: false' \
+		'    classoption:' \
+		'      - oneside' \
+		> $(DRAFT_PROFILE)
+	@echo "Rendering $(CHAPTER) ..."
+	@$(QUARTO) render --profile draft --to pdf 2>&1
+	@rm -f $(DRAFT_PROFILE)
+	@echo "=> $(DRAFT_DIR)/"
+ifdef OPEN
+	@open "$(DRAFT_DIR)/Draft.pdf"
+endif
 
 # ── Preview (live-reload) ──────────────────────────────────────────────
 preview: check

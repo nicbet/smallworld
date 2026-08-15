@@ -1,0 +1,43 @@
+# Standalone single-chapter render for fast iteration.
+# Usage: make draft CH=04
+#
+# Reuses the book's fonts, code styling, preamble, and bibliography
+# but skips every other chapter, the TOC, title page, and part structure.
+# Cross-chapter references (@sec-, @fig- from other chapters) will show
+# as "??" — that is expected and harmless during editing.
+
+format:
+  pdf:
+    documentclass: scrreprt
+    classoption:
+      - oneside
+    papersize: letter
+    fontsize: 11pt
+    linestretch: 1.2
+    geometry:
+      - top=1in
+      - bottom=1in
+      - left=1.25in
+      - right=1.25in
+    colorlinks: true
+    linkcolor: NavyBlue
+    urlcolor: NavyBlue
+    citecolor: NavyBlue
+    toc: false
+    number-sections: true
+    number-depth: 3
+    highlight-style: github
+    code-block-bg: "#f8f8f8"
+    code-block-border-left: "#4a86c8"
+    mainfont: "Palatino"
+    sansfont: "Helvetica"
+    monofont: "JetBrains Mono"
+    monofontoptions:
+      - Scale=0.75
+    include-in-header: preamble.tex
+
+filters:
+  - dropcap.lua
+
+bibliography: references.bib
+csl: modern-game-engine.csl

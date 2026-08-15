@@ -19,43 +19,44 @@ book:
     - introduction.qmd
     - part: "Foundations"
       chapters:
-        - chapters/01-engine-renaissance.qmd
-        - chapters/02-engine-architecture-at-a-glance.qmd
-        - chapters/03-engine-runtime-contracts.qmd
-        - chapters/04-core-loop-and-frame-lifecycle.qmd
-        - chapters/05-input-and-platform-interaction.qmd
-        - chapters/06-memory-handles-and-instrumentation.qmd
-        - chapters/07-resource-pipeline-and-virtual-filesystem.qmd
+       - chapters/01-engine-renaissance.qmd
+       - chapters/02-engine-architecture-at-a-glance.qmd
+       - chapters/03-engine-runtime-contracts.qmd
+       - chapters/04-core-loop-and-frame-lifecycle.qmd
+       - chapters/05-input-and-platform-interaction.qmd
+       - chapters/06-memory-handles-and-instrumentation.qmd
+       - chapters/07-resource-pipeline-and-virtual-filesystem.qmd
     - part: "Gameplay"
       chapters:
-        - chapters/08-entity-component-system.qmd
-        - chapters/09-game-logic-scripting-and-events.qmd
-        - chapters/10-managing-massive-scale.qmd
-        - chapters/11-world-streaming-and-data-residency.qmd
+       - chapters/08-entity-component-system.qmd
+       - chapters/09-game-logic-scripting-and-events.qmd
+       - chapters/10-managing-massive-scale.qmd
+       - chapters/11-world-streaming-and-data-residency.qmd
     - part: "Rendering"
       chapters:
-        - chapters/12-render-domain-architecture.qmd
-        - chapters/13-render-graph-and-pipeline-extensibility.qmd
-        - chapters/14-visibility-and-geometry.qmd
-        - chapters/15-shading-lighting-and-global-illumination.qmd
-        - chapters/16-environment-and-post-processing.qmd
+       - chapters/12-render-domain-architecture.qmd
+       - chapters/13-render-graph-and-pipeline-extensibility.qmd
+       - chapters/14-visibility-and-geometry.qmd
+       - chapters/15-shading-lighting-and-global-illumination.qmd
+       - chapters/16-environment-and-post-processing.qmd
     - part: "Simulation, Audio, and Networking"
       chapters:
-        - chapters/17-physics-and-collision.qmd
-        - chapters/18-navigation-and-spatial-decision-support.qmd
-        - chapters/19-animation-systems.qmd
-        - chapters/20-audio-architecture.qmd
-        - chapters/21-networking-and-multiplayer.qmd
+       - chapters/17-physics-and-collision.qmd
+       - chapters/18-navigation-and-spatial-decision-support.qmd
+       - chapters/19-animation-systems.qmd
+       - chapters/20-audio-architecture.qmd
+       - chapters/21-networking-and-multiplayer.qmd
     - part: "Tools and User Interface"
       chapters:
-        - chapters/22-user-interface-and-tooling.qmd
+       - chapters/22-user-interface-and-tooling.qmd
   appendices:
-    - appendices/a-mathematics-for-game-engines.qmd
-    - appendices/b-glossary.qmd
-    - appendices/c-bibliography.qmd
+   - appendices/a-mathematics-for-game-engines.qmd
+   - appendices/b-glossary.qmd
+   - appendices/c-bibliography.qmd
 
 format:
   pdf:
+    keep-tex: true
     documentclass: scrreprt
     classoption:
       - twoside
