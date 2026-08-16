@@ -44,10 +44,19 @@
 \usepackage{enumitem}
 \setlist{itemsep=0.5em, topsep=0em, parsep=0em}
 
-% Quarto renders numbered source blocks as `codelisting` floats. Let them
-% float to the page bottom or a dedicated float page, and strongly prefer
-% placement over leaving a large hole in the surrounding prose.
-\AtBeginDocument{\floatplacement{codelisting}{!pb}}
+% Float placement: allow LaTeX to place floats at top, bottom, or inline (here)
+% on text pages, and on float-only pages. The `!` overrides strict checks.
+% Relaxed thresholds prevent large whitespace gaps around floats.
+\AtBeginDocument{\floatplacement{codelisting}{!htbp}}
+\AtBeginDocument{\floatplacement{figure}{!htbp}}
+
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
 
 % \floattop — place the next codelisting at the top of a page instead of the
 % default bottom.  Uses an AfterEndEnvironment hook to reset the placement
@@ -55,7 +64,7 @@
 \usepackage{etoolbox}
 \newcommand{\floattop}{%
   \floatplacement{codelisting}{!t}%
-  \AfterEndEnvironment{codelisting}{\floatplacement{codelisting}{!pb}}%
+  \AfterEndEnvironment{codelisting}{\floatplacement{codelisting}{!htbp}}%
 }
 
 % Quarto callouts: float to top/bottom like figures instead of sitting inline.
@@ -109,7 +118,19 @@
   font={small,it},
   labelfont={small,bf},
   labelsep=period,
-  skip=0.65em
+  skip=0.65em,
+  belowskip=1.5em
+}
+\captionsetup[codelisting]{
+  format=plain,
+  justification=raggedright,
+  singlelinecheck=false,
+  indention=0pt,
+  font={small,it},
+  labelfont={small,bf},
+  labelsep=period,
+  skip=0.65em,
+  belowskip=1.5em
 }
 
 % Architecture diagrams are drawn natively so they remain sharp and correctly

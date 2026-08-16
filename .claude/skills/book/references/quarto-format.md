@@ -60,6 +60,16 @@ stands on its own: describe what the listing *contains* rather than saying
 encodes three clocks and an accumulator." Bad: "The struct is shown in
 @lst-time-struct:" (implies spatial adjacency that floating breaks).
 
+**Describe figures and listings in narrative.** When referencing a figure or
+listing, follow it with prose that walks the reader through what they are
+looking at. Do not assume the visual is self-explanatory. Name the key
+elements, explain what each part represents, and connect the visual back to
+the surrounding argument. Good: "Figure \ref{fig:action-stack} illustrates a
+typical context stack during a pause menu. At the bottom sits the `gameplay`
+map... Above it, the `ui` map has been pushed with `passthrough: false`,
+blocking all gameplay actions." Bad: "Figure \ref{fig:action-stack} shows the
+context stack." (names it without describing it).
+
 ## Bibliography
 
 - Cite with `[@key]`.

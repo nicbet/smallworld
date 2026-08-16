@@ -420,7 +420,7 @@
 \makeatother
 \subtitle{Architecture, Systems and Principles}
 \author{Nicolas Bettenburg, PhD}
-\date{2026-08-15}
+\date{2026-08-16}
 \begin{document}
 \maketitle
 
@@ -5987,28 +5987,47 @@ INPUT phase drains platform events into a polled snapshot. In this
 chapter, we follow that signal from the operating system to the game
 system that consumes it.
 
-The problem is deceptively familiar. Every engine reads keyboards and
-controllers. Tutorials cover it in a page. But a shipped game must let
-the player rebind keys, swap between keyboard and gamepad mid-session,
-open a menu without accidentally firing a weapon, record input for
-replay, and present a consistent experience on platforms with different
-conventions, all without exposing the windowing library's types to
-gameplay code.
+Have you ever played a console port of a video game on PC and felt the
+mouse move like it was swimming through syrup? \emph{Elden Ring}'s PC
+launch in 2022 is the textbook example: the game was a masterpiece of
+open-world design sitting on top of a deeply uncomfortable
+keyboard-and-mouse experience. Mouse movement felt sluggish and
+disconnected because the input layer was filtering it through a system
+tuned for analog sticks, applying smoothing and acceleration curves that
+made sense on a gamepad but felt wrong with a mouse. On-screen prompts
+displayed Xbox button icons regardless of whether the player was using a
+controller. Key rebinding was limited. The community response was
+immediate: mods to fix mouse input appeared within days, and
+FromSoftware spent months patching improvements. It's not that Elden
+Ring's input system didn't work - it simply had not been designed for
+the platform it shipped on. \emph{Elden Ring} was far from alone.
+\emph{Dark Souls}' original PC port had similar issues a decade earlier.
+\emph{No Man's Sky} launched with restricted rebinding. \emph{Cyberpunk
+2077} exposed input latency on PC that console players never noticed.
+These are not obscure edge cases - they are the predictable consequences
+of an input system that was built for one device and one context, then
+asked to serve many.
 
-The naive approach, where game systems read raw key codes from a global
+Every engine reads keyboard, mouse and controller inputs and tutorials
+cover it in a page. An modern game engine lets the player rebind keys,
+swap between keyboard and gamepad mid-session, open a menu without
+accidentally firing a weapon, record input for replay, and present a
+consistent experience on platforms with different conventions, all
+without exposing the windowing library's types to gameplay code. The
+naive approach, where game systems read raw key codes from a global
 singleton, fails on every one of those requirements. The robust approach
 separates platform signals from engine input, engine input from game
 intent, and game intent from the fixed-timestep simulation that
 ultimately consumes it. Each layer has a distinct purpose, and the
 boundaries between them are load-bearing.
 
-This chapter makes those boundaries precise. We begin with the platform
-events that arrive at the engine's edge (window focus, display changes,
-device connections, raw key and axis data) and show how the INPUT phase
-quarantines them into a single consistent snapshot. We then build from
-that snapshot upward through device polling, action mapping, context
-stacks, and the fixed-tick intent pattern. Along the way we address
-mouse capture, controller dead zones, replay, and cross-platform
+In this chapter, we make those boundaries precise. We begin with the
+platform events that arrive at the engine's edge (window focus, display
+changes, device connections, raw key and axis data) and show how the
+INPUT phase quarantines them into a single consistent snapshot. We then
+build from that snapshot upward through device polling, action mapping,
+context stacks, and the fixed-tick intent pattern. Along the way we
+address mouse capture, controller dead zones, replay, and cross-platform
 rebinding. By the end, the game sees a stable, frame-synchronized
 vocabulary of named actions and continuous axes, and the platform
 library that produced the signals is invisible.
@@ -6062,15 +6081,15 @@ Chapter}\label{what-you-will-learn-in-this-chapter-4}
 \section{Platform Events Are Engine
 Input}\label{platform-events-are-engine-input}
 
-A game engine sits between the operating system and the game. The OS
-delivers a continuous, irregular stream of platform events: window
-resize notifications, keyboard interrupts, mouse movements, controller
-connections, display-scale changes, focus transitions, and more. These
-events arrive at the OS's own cadence: some are batched, some are
-immediate, some are synthesized by the window manager, and their
-ordering guarantees vary by platform. The engine's first responsibility
-is to receive this stream and convert it into something the game can
-consume reliably.
+A game engine sits between the operating system and the game, and the
+operating system delivers a continuous, irregular stream of platform
+events: window resize notifications, keyboard interrupts, mouse
+movements, controller connections, display-scale changes, focus
+transitions, and more. These events arrive at the operating system's own
+cadence: some are batched, some are immediate, some are synthesized by
+the window manager, and their ordering guarantees vary by platform. The
+engine's first responsibility is to receive this stream and convert it
+into something the game can consume reliably.
 
 The distinction between platform events and game input is fundamental. A
 platform event is a notification from the OS: ``the user pressed the key
@@ -6087,13 +6106,23 @@ model, timing, or type system.
 Chapter 4 described the INPUT phase as the first step of the game tick:
 the main thread drains accumulated window and device events into an
 \texttt{Input} snapshot, and every subsequent phase reads that snapshot
-as an immutable, consistent view. The metaphor is deliberate: the INPUT
-phase is a quarantine. Raw platform events are irregular, asynchronous,
-and tied to OS-specific types. Once they cross the INPUT boundary, they
-become a deterministic, typed, engine-owned snapshot. No platform type
-leaks past this point.
+as an immutable, consistent view. Raw platform events are irregular,
+asynchronous, and tied to OS-specific types. Once they cross the INPUT
+boundary, they become a deterministic, typed, engine-owned snapshot. No
+platform type leaks past this point.
 
-The quarantine serves three purposes:
+\emph{All platform input is absorbed at a single point in the frame,
+converted into engine-owned types, and frozen into an immutable snapshot
+before any game system runs}. This is the \textbf{quarantine principle}.
+No game code ever reads a raw OS event. No platform type crosses the
+boundary. Every system in the tick sees the same input, because they all
+read from the same frozen snapshot. Figure \ref{fig:input-quarantine}
+illustrates the quarantine principle as the boundary between the OS
+event pump and the engine's polled snapshot. The INPUT phase sits at
+this boundary, normalizing the irregular stream into a single consistent
+view.
+
+The quarantine principle serves three purposes:
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
@@ -6120,29 +6149,116 @@ The quarantine serves three purposes:
   or upgrades its windowing library, game code is unaffected.
 \end{enumerate}
 
-The quarantine is not a Smallworld invention. It is the standard modern
-answer to a problem that every engine faces. Unreal Engine's
-\texttt{FSlateApplication} processes platform messages in a dedicated
-input-processing pass and populates \texttt{FInputState} before any
-gameplay tick begins. Unity's \texttt{InputSystem} captures device state
-at frame start. Godot's \texttt{Input} singleton processes OS events and
-exposes polled state through methods like
-\texttt{is\_action\_pressed()}. The implementation details differ, but
-the principle is universal: absorb the OS's callback-driven model at the
-boundary; expose a polled-snapshot model to the game.
-
 \input{figures/input-quarantine.tex}
 
-Figure \ref{fig:input-quarantine} shows the boundary between the OS
-event pump and the engine's polled snapshot. The INPUT phase sits at
-this boundary, normalizing the irregular stream into a single consistent
-view.
+The quarantine principle is the standard modern answer to a problem that
+every engine faces. Unreal Engine's \texttt{FSlateApplication} processes
+platform messages in a dedicated input-processing pass and populates
+\texttt{FInputState} before any gameplay tick begins. Unity's
+\texttt{InputSystem} captures device state at frame start. Godot's
+\texttt{Input} singleton processes OS events and exposes polled state
+through methods like \texttt{is\_action\_pressed()}. The implementation
+details differ, but the principle is universal: absorb the OS's
+callback-driven model at the boundary and expose a polled-snapshot model
+to the game.
 
-\subsection{winit as the Platform
-Adapter}\label{winit-as-the-platform-adapter}
+In Smallworld, the quarantine is a single function that runs at the top
+of every tick. Listing~\ref{lst-quarantine} shows the drain-and-freeze
+step: previous state is rotated, the platform event buffer is drained
+into engine types, and edges are computed by diffing the two frames.
 
-Smallworld uses \texttt{winit} as its platform adapter. \texttt{winit}
-is a Rust crate that provides cross-platform window creation, event
+\floattop
+
+\begin{codelisting}
+
+\caption{\label{lst-quarantine}The quarantine: drain platform events and
+freeze the snapshot}
+
+\centering{
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{fn}\NormalTok{ quarantine(input}\OperatorTok{:} \OperatorTok{\&}\KeywordTok{mut}\NormalTok{ Input}\OperatorTok{,}\NormalTok{ adapter}\OperatorTok{:} \OperatorTok{\&}\KeywordTok{mut}\NormalTok{ PlatformAdapter) }\OperatorTok{\{}
+\NormalTok{    input}\OperatorTok{.}\NormalTok{keyboard}\OperatorTok{.}\NormalTok{previous }\OperatorTok{=}\NormalTok{ input}\OperatorTok{.}\NormalTok{keyboard}\OperatorTok{.}\NormalTok{current}\OperatorTok{;}
+\NormalTok{    input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{prev\_buttons }\OperatorTok{=}\NormalTok{ input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{buttons}\OperatorTok{;}
+\NormalTok{    input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{delta }\OperatorTok{=} \PreprocessorTok{Vec2::}\NormalTok{ZERO}\OperatorTok{;}
+\NormalTok{    input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{scroll }\OperatorTok{=} \DecValTok{0.0}\OperatorTok{;}
+
+    \ControlFlowTok{for}\NormalTok{ event }\KeywordTok{in}\NormalTok{ adapter}\OperatorTok{.}\NormalTok{drain() }\OperatorTok{\{}
+        \ControlFlowTok{match}\NormalTok{ event }\OperatorTok{\{}
+            \PreprocessorTok{PlatformEvent::}\NormalTok{Key }\OperatorTok{\{}\NormalTok{ code}\OperatorTok{,}\NormalTok{ pressed }\OperatorTok{\}} \OperatorTok{=\textgreater{}} \OperatorTok{\{}
+\NormalTok{                input}\OperatorTok{.}\NormalTok{keyboard}\OperatorTok{.}\NormalTok{current}\OperatorTok{.}\NormalTok{set(code}\OperatorTok{,}\NormalTok{ pressed)}\OperatorTok{;}
+            \OperatorTok{\}}
+            \PreprocessorTok{PlatformEvent::}\NormalTok{MouseMotion(d) }\OperatorTok{=\textgreater{}} \OperatorTok{\{}
+\NormalTok{                input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{delta }\OperatorTok{+=}\NormalTok{ d}\OperatorTok{;}       \CommentTok{// accumulate, never replace}
+            \OperatorTok{\}}
+            \PreprocessorTok{PlatformEvent::}\NormalTok{MouseButton }\OperatorTok{\{}\NormalTok{ btn}\OperatorTok{,}\NormalTok{ pressed }\OperatorTok{\}} \OperatorTok{=\textgreater{}} \OperatorTok{\{}
+\NormalTok{                input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{buttons}\OperatorTok{.}\NormalTok{set(btn}\OperatorTok{,}\NormalTok{ pressed)}\OperatorTok{;}
+            \OperatorTok{\}}
+            \PreprocessorTok{PlatformEvent::}\NormalTok{Scroll(s) }\OperatorTok{=\textgreater{}} \OperatorTok{\{}
+\NormalTok{                input}\OperatorTok{.}\NormalTok{mouse}\OperatorTok{.}\NormalTok{scroll }\OperatorTok{+=}\NormalTok{ s}\OperatorTok{;}
+            \OperatorTok{\}}
+            \PreprocessorTok{PlatformEvent::}\NormalTok{ControllerAxis }\OperatorTok{\{}\NormalTok{ id}\OperatorTok{,}\NormalTok{ axis}\OperatorTok{,}\NormalTok{ value }\OperatorTok{\}} \OperatorTok{=\textgreater{}} \OperatorTok{\{}
+                \ControlFlowTok{if} \KeywordTok{let} \ConstantTok{Some}\NormalTok{(c) }\OperatorTok{=} \OperatorTok{\&}\KeywordTok{mut}\NormalTok{ input}\OperatorTok{.}\NormalTok{controllers[id] }\OperatorTok{\{}
+\NormalTok{                    c}\OperatorTok{.}\NormalTok{set\_axis(axis}\OperatorTok{,}\NormalTok{ value)}\OperatorTok{;}
+                \OperatorTok{\}}
+            \OperatorTok{\}}
+            \CommentTok{// ... window events update WindowState, not Input}
+        \OperatorTok{\}}
+    \OperatorTok{\}}
+
+\NormalTok{    input}\OperatorTok{.}\NormalTok{keyboard}\OperatorTok{.}\NormalTok{compute\_edges()}\OperatorTok{;}           \CommentTok{// pressed = current \& !previous}
+\OperatorTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+}
+
+\end{codelisting}%
+
+Note what happens inside the loop: mouse deltas are accumulated
+(summed), not replaced. Keyboard state is written into a current-frame
+bitfield while the previous frame's bitfield is preserved for edge
+computation. Controller axes are written directly (they are state, not
+deltas). Platform types (\texttt{PlatformEvent}) exist only inside this
+function; by the time it returns, the \texttt{Input} struct contains
+only engine-owned values.
+
+\subsection{The Platform Adapter}\label{the-platform-adapter}
+
+Every game engine needs a component that bridges the gap between the
+operating system's native event model and the engine's internal types.
+This component, the platform adapter, receives raw events from the OS
+windowing system, translates them into engine-owned representations, and
+populates the input snapshot. Its scope is deliberately narrow: it
+handles only what is genuinely platform-specific at the input boundary.
+
+The depth of this adapter varies significantly across engines, and the
+variation reflects the era and target platforms of each engine's design.
+Unreal Engine maintains a deep platform-abstraction layer
+(\texttt{FGenericPlatformMisc}, \texttt{FGenericApplication},
+platform-specific subclasses for Windows, macOS, Linux, and each
+console) because it must support platforms with fundamentally different
+input models. Unity's native player loop similarly encapsulates platform
+differences behind its \texttt{UnityEngine.Input} facade, with native
+plugins and platform-specific backends. Godot's \texttt{DisplayServer}
+class wraps window management and input for each platform behind a
+common interface.
+
+These deep abstractions are not relics. They remain essential for any
+engine that ships on consoles, because console platforms expose
+proprietary input APIs under NDA that no open-source library can wrap.
+An engine targeting PlayStation, Xbox, or Switch must provide a
+platform-specific adapter backend for each, and that backend must
+conform to the platform holder's SDK and certification requirements. The
+deep abstraction layer exists precisely so that the engine above it does
+not need to know which backend is active.
+
+For an engine that targets desktop platforms (Windows, macOS, Linux),
+mature cross-platform libraries can absorb much of the platform-specific
+work that a deep abstraction would otherwise need to handle. For
+instance, Smallworld uses \texttt{winit} as its desktop platform adapter
+- a Rust crate that provides cross-platform window creation, event
 delivery, and display management. It abstracts the platform's native
 windowing API (Win32 on Windows, Cocoa on macOS, X11/Wayland on Linux)
 behind a single event loop and a set of Rust types. The engine receives
@@ -6157,44 +6273,26 @@ polled snapshot. \texttt{winit} identifies keys by platform-dependent
 scan codes and logical key values; the engine needs a stable
 \texttt{KeyCode} enum. \texttt{winit} reports mouse position in window
 coordinates; the engine may need to track deltas, accumulate scroll, or
-enforce cursor capture. \texttt{winit} knows nothing about controllers;
-the engine pairs it with \texttt{gilrs} or a similar library for gamepad
-input.
+enforce cursor capture. And \texttt{winit} knows nothing about
+controllers; the engine pairs it with \texttt{gilrs} or a similar
+library for gamepad input. A console port would replace \texttt{winit}
+and \texttt{gilrs} entirely with platform-specific backends, but the
+\texttt{Input} struct and everything above it would remain unchanged,
+because the quarantine principle ensures that no platform type leaks
+past the adapter boundary.
 
 The platform adapter is therefore a thin shell: it drains the
 \texttt{winit} event loop and any controller library, translates their
 types into engine-internal representations, and populates the
 \texttt{Input} struct. The shell is small (a few hundred lines) and it
 is the only code in the engine that imports platform-specific types.
-Everything above it speaks the engine's vocabulary.
+Everything above it speaks the engine's vocabulary. The engine's
+stability comes from the types it defines, not from the adapter beneath
+them. A console port rewrites the adapter against that platform's SDK;
+the \texttt{Input} struct, the action system, the context stack, and
+every game system that reads input remains unchanged.
 
-\begin{tcolorbox}[enhanced jigsaw, arc=.35mm, bottomrule=.15mm, breakable, colback=white, colframe=quarto-callout-tip-color-frame, left=2mm, leftrule=.75mm, opacityback=0, rightrule=.15mm, toprule=.15mm]
-\begin{minipage}[t]{5.5mm}
-\textcolor{quarto-callout-tip-color}{\faLightbulb}
-\end{minipage}%
-\begin{minipage}[t]{\textwidth - 5.5mm}
-
-\vspace{-3mm}\textbf{Why Not Abstract the Platform Deeply?}\vspace{3mm}
-
-Some engines build a deep platform-abstraction layer with interfaces for
-windowing, input, file IO, threading, and timers, then provide
-implementations for each target platform. This was essential when
-engines supported platforms with fundamentally different capabilities:
-consoles with no filesystem, handhelds with no GPU, proprietary
-windowing systems. In 2026, \texttt{wgpu} already abstracts the graphics
-API, \texttt{winit} already abstracts the window system, and Rust's
-standard library already abstracts threads, timers, and file IO. A deep
-platform layer on top of these is redundant abstraction. Smallworld's
-platform adapter is deliberately thin: it converts \texttt{winit} events
-into engine types and nothing more. The engine's stability comes from
-the types it defines, not from an additional abstraction layer over
-libraries that are already abstractions.
-
-\end{minipage}%
-\end{tcolorbox}
-
-\subsection{WindowState: The Game-Visible Platform
-Description}\label{windowstate-the-game-visible-platform-description}
+\subsection{Window and Display State}\label{window-and-display-state}
 
 Not all platform events become input. Some describe the state of the
 platform itself: the window's size, its DPI scale factor, whether it has
@@ -6203,10 +6301,21 @@ systems (a UI layout engine needs the window dimensions, a sensitivity
 slider needs the scale factor, a pause-on-focus-loss feature needs the
 focus flag), but they are not input in the device-signal sense.
 
-Smallworld captures this information in a dedicated struct.
-Listing~\ref{lst-window-state} defines \texttt{WindowState}, which
-carries the physical dimensions, scale factor, focus flag, and display
-mode.
+Every engine that separates input from platform state makes this
+distinction explicit. Unity exposes window and display information
+through \texttt{Screen.width}, \texttt{Screen.height},
+\texttt{Screen.dpi}, and \texttt{Application.isFocused}, all separate
+from the \texttt{Input} or \texttt{InputSystem} classes. Unreal provides
+\texttt{FViewportClient} and \texttt{FGenericWindow} for window state,
+while input flows through \texttt{UPlayerInput} and the Enhanced Input
+system. Godot splits the concerns between \texttt{DisplayServer} (window
+dimensions, screen info) and \texttt{Input} (device state). The
+separation is not accidental: window state changes infrequently and has
+lifecycle consequences (a resize triggers surface reconfiguration on the
+GPU), while input state changes every frame and drives gameplay logic.
+Collapsing them into a single structure would obscure this difference
+and tempt game code to poll window dimensions at the same frequency as
+key state, which is wasteful and conceptually wrong.
 
 \begin{codelisting}
 
@@ -6231,6 +6340,9 @@ description}
 
 \end{codelisting}%
 
+Smallworld captures platform state in a dedicated \texttt{WindowState}
+struct as shown in Listing~\ref{lst-window-state}, which carries the
+physical dimensions, scale factor, focus flag, and display mode.
 \texttt{WindowState} is updated by the INPUT phase alongside the
 \texttt{Input} snapshot. Game code receives it as part of the
 \texttt{GameContext}, an immutable borrow that provides the current
@@ -6238,14 +6350,6 @@ platform description without exposing any \texttt{winit} types. Changes
 to window state (resize, scale-factor change, focus transitions) also
 generate lifecycle events on the control channel (as described in
 Chapter 4), but the game-facing view is always through this struct.
-
-The separation between \texttt{WindowState} and \texttt{Input} is
-deliberate. Window state changes infrequently and has lifecycle
-consequences (resize triggers surface reconfiguration on the Render
-Thread). Input changes every frame and has no lifecycle consequences.
-Collapsing them into a single struct would obscure this difference and
-tempt game code to poll window dimensions at the same frequency as key
-state, which is wasteful and conceptually wrong.
 
 \section{From Device Signals to Game
 Intent}\label{from-device-signals-to-game-intent}
@@ -6261,9 +6365,31 @@ device-level detail. The action layer is the standard game-facing API.
 
 \subsection{The Raw Polling API}\label{the-raw-polling-api}
 
-The \texttt{Input} struct is the engine's per-frame snapshot of all
-connected devices. Listing~\ref{lst-input-struct} defines the struct and
-its query methods for keyboard state, mouse state, and controller state.
+Beneath any action-mapping or intent layer, every engine provides a raw
+device-polling API: a way to ask, for any key, button, or axis, ``what
+is its state right now?'' This layer exists because not every consumer
+of input needs the abstraction of named actions. Debug tools, editor
+viewports, profiling overlays, and the occasional system that genuinely
+needs device-level detail all query raw device state directly. The layer
+is also the foundation on which higher abstractions are built: the
+action mapping system ultimately resolves its queries by reading raw
+state from the snapshot.
+
+The shape of this API is consistent across engines. Unity's
+\texttt{Keyboard.current{[}Key.W{]}.isPressed} and
+\texttt{Mouse.current.delta.ReadValue()} query device state directly
+from the current frame's snapshot. Godot's
+\texttt{Input.is\_key\_pressed()} and \texttt{Input.get\_axis()} do the
+same through a singleton. Unreal's
+\texttt{APlayerController::IsInputKeyDown()} reads raw key state beneath
+the Enhanced Input layer. In each case, the API is polled (the game asks
+questions; it does not register callbacks) and frame-coherent (every
+query within a tick returns values from the same snapshot).
+
+Smallworld's raw polling API follows this consensus. The \texttt{Input}
+struct is the engine's per-frame snapshot of all connected devices.
+Listing~\ref{lst-input-struct} defines the struct and its query methods
+for keyboard state, mouse state, and controller state.
 
 \begin{codelisting}
 
@@ -6308,7 +6434,17 @@ time, and no query can trigger a side effect or modify the snapshot.
 
 The most important subtlety in the polling API is the distinction
 between \texttt{held}, \texttt{pressed}, and \texttt{released}. These
-three queries answer different temporal questions:
+three queries answer different temporal questions, and confusing them is
+one of the most common input bugs in game development. A jump system
+that reads ``is the spacebar down?'' instead of ``was the spacebar
+pressed this frame?'' will apply the jump impulse on every frame the key
+is held, launching the character into orbit. A weapon system that reads
+``pressed'' when it should read ``held'' will fire exactly once and then
+stop, even if the player is holding the trigger. These bugs are easy to
+write and surprisingly hard to diagnose, because the system \emph{works}
+in the common case (a quick tap) and fails only when timing matters.
+
+The three queries answer distinct temporal questions:
 
 \begin{itemize}
 \item
@@ -6350,17 +6486,33 @@ following steps:
 \end{enumerate}
 
 This is a standard technique, implemented identically in every engine
-that supports edge queries. The cost is one additional bit per key per
+that supports edge queries. Unity's legacy \texttt{Input.GetButtonDown}
+and \texttt{Input.GetButtonUp} perform exactly this comparison, as do
+Godot's \texttt{is\_action\_just\_pressed()} and
+\texttt{is\_action\_just\_released()}. Unreal's Enhanced Input system
+tracks transitions through its \texttt{ETriggerEvent} enum,
+distinguishing \texttt{Started}, \texttt{Ongoing}, and
+\texttt{Completed} phases. The cost is one additional bit per key per
 frame: negligible. The benefit is that game systems never need to track
 previous state themselves, which eliminates a class of bugs where two
 systems independently track the same key and disagree about its edge
 timing.
 
+Edge detection is also the bridge to the two more complex problems
+discussed later in this chapter: action mapping (which must propagate
+edges through the binding table so that \texttt{action\_pressed("jump")}
+fires exactly once, not once per bound key) and the fixed-tick edge
+problem (where edges interact with the accumulator in ways that require
+the intent pattern to resolve correctly).
+
 \subsection{Analog Inputs}\label{analog-inputs}
 
 Not all input is digital. Mouse movement, scroll wheels, controller
 sticks, and triggers produce continuous values that cannot be reduced to
-pressed/released edges.
+pressed/released edges. Analog input is where the gap between ``works in
+a tutorial'' and ``works in a shipped game'' is widest, because the
+physical characteristics of analog devices introduce noise, drift, and
+precision issues that digital keys simply do not have.
 
 \textbf{Mouse delta} is the change in mouse position since the last
 frame. The INPUT phase accumulates all mouse-motion events received
@@ -6370,6 +6522,19 @@ motion events during a single frame, the game sees one delta that is the
 sum of all three. Individual events are not exposed because they would
 reintroduce event-ordering concerns inside the snapshot model.
 
+The accumulation model is particularly important for high-polling-rate
+mice. Competitive FPS players routinely use mice that report at 1000 Hz
+or higher, delivering dozens of motion events during a single 16 ms
+frame. If the engine reads only the latest event, it discards the
+majority of the player's actual movement. If it exposes individual
+events, it forces game systems to iterate over a variable-length queue,
+breaking the polled-snapshot model. Accumulation is the only approach
+that preserves both the full range of player motion and the simplicity
+of a single per-frame value. This is why every engine that takes mouse
+input seriously (and certainly every engine used for competitive
+shooters) accumulates mouse deltas rather than sampling the latest
+position.
+
 \textbf{Scroll delta} works the same way: all scroll events since the
 last frame are accumulated into a single \texttt{f32}.
 
@@ -6378,10 +6543,22 @@ at the time the snapshot is taken. Unlike delta and scroll, position is
 a state query rather than an accumulation: it reflects the last reported
 position, not a sum.
 
-\textbf{Controller sticks} report a \texttt{Vec2} in the range
-\texttt{{[}-1.0,\ 1.0{]}} per axis. \textbf{Triggers} report an
-\texttt{f32} in the range \texttt{{[}0.0,\ 1.0{]}}. These values are
-sampled directly from the controller's current state.
+\textbf{Controller sticks and triggers} present a different set of
+challenges. Sticks report a \texttt{Vec2} in the range
+\texttt{{[}-1.0,\ 1.0{]}} per axis. Triggers report an \texttt{f32} in
+the range \texttt{{[}0.0,\ 1.0{]}}. These values are sampled directly
+from the controller's current state. But physical sticks are imperfect
+mechanisms: they drift, they have manufacturing tolerances, and they
+wear over time. The Nintendo Switch Joy-Con drift issue, which became so
+widespread that it prompted a class-action lawsuit and a free repair
+program, is the most visible example of a problem that every controller
+exhibits to some degree. A brand-new Xbox controller may report
+\texttt{(0.02,\ -0.01)} when the stick is centered. An older DualSense
+may drift further. Without compensation, the game would register
+constant low-magnitude movement even when the player is not touching the
+stick. Dead zones (discussed in the action mapping section below)
+address this at the binding level, but the raw polling API reports the
+unfiltered value, leaving the choice of threshold to the consumer.
 Listing~\ref{lst-controller-state} defines the per-controller struct.
 
 \begin{codelisting}
@@ -6409,6 +6586,17 @@ gamepad state}
 
 \subsection{Multiple Controllers}\label{multiple-controllers}
 
+Local multiplayer has been part of gaming since two players shared an
+arcade cabinet in \emph{Pong} (1972), and the conventions around
+controller assignment have been remarkably stable. From the Super
+Nintendo's four controller ports through the Xbox 360's wireless
+controller pairing to the Nintendo Switch's Joy-Con handshake, the
+standard is four simultaneous controllers with fixed slot assignment:
+player one is controller zero, player two is controller one, and so on.
+Some platforms support more (the Nintendo 64 had four ports; the Wii
+supported eight Wii Remotes), but four is the common denominator that
+every major platform provides.
+
 The \texttt{Input} struct supports up to four controllers through a
 fixed-size array of
 \texttt{Option\textless{}ControllerState\textgreater{}}. A connected
@@ -6427,18 +6615,19 @@ fixed-size approach is a deliberate choice over a dynamically sized
   multiplayer game can assign players to slots without managing a
   mapping from dynamic indices to player identities.
 \item
-  \textbf{\texttt{Send} and \texttt{\textquotesingle{}static} by
-  construction.} The array is a plain value type with no references or
-  heap indirection. It satisfies the
-  \texttt{Send\ +\ \textquotesingle{}static} bounds that the engine
-  requires for data that crosses thread boundaries.
+  \textbf{Plain value semantics.} The array is a plain value type with
+  no references or heap indirection. It can be copied, sent across
+  threads, and serialized without lifetime concerns.
 \end{itemize}
 
-Four slots accommodate the common case (local multiplayer up to four
-players). Games that need more controllers (a party game with eight
-players, for example) would extend the array or use a different backing
-store, but four is the pragmatic default that matches the conventions of
-every major platform.
+Four slots accommodate the standard case. Games that need more
+controllers (a party game with eight players, for example) would extend
+the array or use a different backing store, but four is the pragmatic
+default that matches the conventions of every major platform. The
+fixed-size choice also means that the \texttt{Input} struct's memory
+layout is constant and predictable, which matters for the serialization
+story discussed in the replay section below: a fixed layout serializes
+to a fixed-size record, simplifying the recording format.
 
 \subsection{The Action Mapping Layer}\label{the-action-mapping-layer}
 
@@ -6584,12 +6773,9 @@ The symmetry is intentional: \texttt{action\_held} behaves like
 \texttt{key\_held}, \texttt{action\_pressed} behaves like
 \texttt{key\_pressed}, and \texttt{action\_released} behaves like
 \texttt{key\_released}, but resolved through the binding table. A system
-that was written against \texttt{key\_pressed("jump")} can be migrated
-to \texttt{action\_pressed("jump")} with no other changes, and it gains
-rebindability, device agnosticism, and context-stack awareness for free.
-
-\subsubsection{Composite Bindings and Dead
-Zones}\label{composite-bindings-and-dead-zones}
+that was written against \texttt{key\_held(KeyCode::W)} to move forward
+can be migrated to \texttt{axis2("move")}, and it gains rebindability,
+device agnosticism, and context-stack awareness for free.
 
 Two binding types deserve special attention because they bridge the gap
 between digital and analog input:
@@ -6637,10 +6823,28 @@ scales poorly: each new activity adds a flag that every existing system
 must check, and it encodes priority implicitly. If the console and the
 menu are both open, which one receives input? The answer depends on the
 order of the flag checks, which is scattered across unrelated systems.
+Anyone who has played a game where opening the inventory did not prevent
+the character from moving, or where pressing Escape closed a dialog
+\emph{and} opened the pause menu simultaneously, has experienced the
+consequences of ad-hoc input routing.
 
-Smallworld replaces boolean flags with a \textbf{context stack}. Active
-action maps are pushed onto a stack; the topmost map receives input
-first. Each map carries a \texttt{passthrough} flag that controls
+Every major engine has arrived at some form of structured input routing
+to solve this problem, though the mechanisms differ. Unreal Engine 5's
+Enhanced Input system uses \texttt{InputMappingContext} objects with
+explicit integer priorities: higher-priority contexts consume input
+first, and a ``consumes input'' flag determines whether lower-priority
+contexts see the event at all. Unity's Input System allows action maps
+to be enabled and disabled independently, and the game manages which
+maps are active at any given moment. Godot propagates input events
+through the scene tree, with each node given the opportunity to
+``handle'' an event and stop propagation via
+\texttt{\_unhandled\_input()}. Each approach encodes the same
+fundamental idea: input routing is a structured priority problem, not a
+collection of per-system boolean checks.
+
+Smallworld's version of this structure is a \textbf{context stack}.
+Active action maps are pushed onto a stack; the topmost map receives
+input first. Each map carries a \texttt{passthrough} flag that controls
 whether maps below it on the stack also receive input:
 
 \begin{itemize}
@@ -6703,12 +6907,40 @@ UI is capturing input.
 
 \subsection{Rebinding and Persistence}\label{rebinding-and-persistence}
 
-Action maps are \textbf{assets}. They are loaded through the asset
-pipeline, identified by name (e.g., \texttt{"gameplay"}, \texttt{"ui"},
-\texttt{"vehicle"}), and their bindings can be modified at runtime. This
-is the foundation of player-facing rebinding: the settings screen reads
-the current action map, displays the bindings, and lets the player
-modify them.
+The history of key rebinding in games traces a path from afterthought to
+first-class feature. In the early 1990s, most games shipped with fixed
+key layouts. Quake (1996) was among the first to offer deep rebinding
+through its console (\texttt{bind\ W\ +forward}), but the system was
+bolted onto a set of text commands and required the player to understand
+the engine's action vocabulary. For years afterward, rebinding remained
+inconsistent: some games offered full remapping, others allowed only
+partial changes, and many console ports shipped on PC with no rebinding
+at all. The industry treated rebinding as a convenience feature for
+power users, not as a design requirement.
+
+That changed as the player base diversified and accessibility became a
+business and legal concern. The 21st Century Communications and Video
+Accessibility Act (CVAA) in the United States, which began enforcement
+for games in 2019, requires that games with communication features
+provide accessible input options, including remapping. Microsoft's Xbox
+Accessibility Guidelines (XAGs), which influence certification for Xbox
+and Game Pass titles, explicitly recommend full input remapping. Sony's
+accessibility requirements for PlayStation certification include similar
+provisions. The Game Awards introduced a Best Accessibility category in
+2020, and studios like Naughty Dog (\emph{The Last of Us Part II})
+demonstrated that comprehensive accessibility, including remapping,
+one-handed play modes, and custom control schemes, could ship in AAA
+titles without compromising the core experience. Rebinding is no longer
+a convenience; it is a certification prerequisite on major platforms and
+a legal requirement in some jurisdictions.
+
+The architectural consequence is that rebinding must be a data
+operation, not a code change. Action maps are \textbf{assets}. They are
+loaded through the asset pipeline, identified by name (e.g.,
+\texttt{"gameplay"}, \texttt{"ui"}, \texttt{"vehicle"}), and their
+bindings can be modified at runtime. This is the foundation of
+player-facing rebinding: the settings screen reads the current action
+map, displays the bindings, and lets the player modify them.
 
 User modifications are persisted to \texttt{user://}, the virtual
 filesystem path for per-user settings, discussed in Chapter 7. When the
@@ -6716,34 +6948,20 @@ game starts, the engine loads the default action map from the game's
 asset package and then overlays any user overrides from
 \texttt{user://}. If the player has rebound ``jump'' from Space to
 Enter, the overlay replaces that binding; all other bindings remain at
-their defaults.
+their defaults. The overlay model has a useful property for version
+upgrades: when a game update adds a new action, the default map contains
+the new binding, and the user override (which does not mention the new
+action) does not conflict. Both coexist without a migration step.
 
 This design makes the settings screen an ordinary consumer of the action
 system, not a special case. It reads \texttt{ActionMap} assets, modifies
 \texttt{Binding} entries, and writes the result to \texttt{user://}.
 There is no separate ``rebinding API'' or ``input configuration
 format.'' The same types that define actions at development time are the
-types that the player edits at runtime.
-
-\begin{tcolorbox}[enhanced jigsaw, arc=.35mm, bottomrule=.15mm, breakable, colback=white, colframe=quarto-callout-tip-color-frame, left=2mm, leftrule=.75mm, opacityback=0, rightrule=.15mm, toprule=.15mm]
-\begin{minipage}[t]{5.5mm}
-\textcolor{quarto-callout-tip-color}{\faLightbulb}
-\end{minipage}%
-\begin{minipage}[t]{\textwidth - 5.5mm}
-
-\vspace{-3mm}\textbf{Reset to Defaults}\vspace{3mm}
-
-Because user overrides are stored separately from the default action
-maps, ``reset to defaults'' is trivial: delete the user override file,
-reload the default map from the game's asset package, and rebuild the
-input state. The default map is never modified; it is always available
-as the canonical fallback. This separation also simplifies version
-upgrades: when a game update adds a new action, the default map contains
-the new binding, and the user override (which does not mention the new
-action) does not conflict.
-
-\end{minipage}%
-\end{tcolorbox}
+types that the player edits at runtime. ``Reset to defaults'' is a file
+deletion: remove the user override, reload the default map from the
+game's asset package, and rebuild the input state. The default map is
+never modified; it is always available as the canonical fallback.
 
 \section{Sampling, Buffering, and Frame
 Timing}\label{sampling-buffering-and-frame-timing}
@@ -6753,61 +6971,28 @@ lifecycle establishes \emph{when} the game sees it. Understanding the
 timing is essential for correct input handling, especially in an engine
 with a fixed timestep.
 
-\subsection{The Polled Snapshot Model}\label{the-polled-snapshot-model}
+\subsection{The Polled Snapshot and Frame
+Timing}\label{the-polled-snapshot-and-frame-timing}
 
-Smallworld uses a polled snapshot, not a pushed-event model. This choice
-was introduced in Chapter 4 and is worth revisiting in the context of
-input specifically.
+Section 5.1 established that the quarantine converts pushed OS events
+into a polled snapshot. The distinction is worth revisiting briefly in
+the context of frame timing, because the interaction between the
+snapshot and the phase lifecycle has consequences that the quarantine
+discussion alone does not cover.
 
-In a \textbf{pushed-event model}, the engine delivers input events to
-systems as they arrive: ``key W pressed,'' ``mouse moved to (320,
-240),'' ``controller button 0 released.'' Each event has a timestamp,
-and systems process events in order. This model is natural for UI
-toolkits, text editors, and applications where the response to each
-event is immediate and independent.
-
-In a \textbf{polled-snapshot model}, the engine freezes all input into a
-single struct at frame start, and systems query that struct during their
-phase. There are no individual events, no timestamps, no ordering within
-a frame. A system asks ``is W held?'' and gets a boolean. The snapshot
-is a photograph of device state at one point in time.
-
-The polled model wins for game code for three reasons:
-
-\begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\item
-  \textbf{Simplicity.} A system that reads \texttt{action\_held("fire")}
-  is a pure function of the current snapshot. It does not need to
-  iterate over an event queue, handle out-of-order events, or
-  deduplicate events that the OS delivered twice (a real problem on some
-  platforms with auto-repeat). The code is shorter, easier to test, and
-  less likely to contain event-handling bugs.
-\item
-  \textbf{Frame coherence.} Every system in the same tick reads the same
-  snapshot. There is no question of whether system A processed the ``key
-  down'' event before system B; both see the same state. This eliminates
-  an entire category of ordering bugs.
-\item
-  \textbf{Replay compatibility.} A snapshot is a compact, self-contained
-  description of input for one frame. Recording input for replay means
-  saving one snapshot per frame. Replaying means loading snapshots and
-  feeding them to the game in sequence. The pushed-event model requires
-  recording events with sub-frame timestamps and replaying them in the
-  correct order relative to the frame boundary: more complex, more
-  fragile, and harder to synchronize with the fixed timestep.
-\end{enumerate}
-
-The pushed model is not wrong; it is appropriate for different
-workloads. Text entry, for example, must process individual characters
-in order, and a snapshot that reports only ``key A is held'' loses
-information about the sequence and timing of keystrokes. Smallworld
-handles text entry as a separate path (discussed in section 5.4), not
-through the action system. The polled snapshot is the right model for
-gameplay input; it is not the right model for all input.
-
-\subsection{When Events Arrive, When They Are Sampled, When They Are
-Consumed}\label{when-events-arrive-when-they-are-sampled-when-they-are-consumed}
+The polled model's core advantage is that every query within a tick
+returns a value from the same point in time. A system that reads
+\texttt{action\_held("fire")} does not need to iterate over an event
+queue, handle out-of-order events, or deduplicate events that the OS
+delivered twice (a real problem on some platforms with auto-repeat). A
+snapshot is also a compact, self-contained record: recording input for
+replay means saving one snapshot per frame, while a pushed-event model
+would require recording events with sub-frame timestamps and replaying
+them in the correct order relative to the frame boundary. The pushed
+model is not wrong; it is appropriate for text entry, where character
+ordering matters and a snapshot that reports only ``key A is held''
+loses information. Smallworld handles text entry as a separate path
+(discussed in section 5.4), not through the action system.
 
 Figure \ref{fig:input-frame-timing} shows the relationship between event
 arrival, snapshot creation, and system consumption across the frame
@@ -6815,45 +7000,18 @@ lifecycle.
 
 \input{figures/input-frame-timing.tex}
 
-The timeline is as follows:
-
-\begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\item
-  \textbf{Between frames.} The OS delivers events to \texttt{winit}'s
-  event buffer at any time. Key presses, mouse movements, controller
-  state changes, window focus events: all accumulate in the buffer while
-  the engine is busy with the previous tick's UPDATE, LATE, EXTRACT, and
-  CLEAR phases.
-\item
-  \textbf{INPUT phase.} The engine drains the buffer, translates events
-  into engine types, and populates the \texttt{Input} snapshot. Edge
-  detection is computed by comparing the new state against the previous
-  frame's state. The snapshot is frozen; no further events are processed
-  until the next tick's INPUT phase.
-\item
-  \textbf{FIXED phase.} Fixed-update systems may read the \texttt{Input}
-  snapshot, but they must be careful about edges, a point discussed in
-  detail below.
-\item
-  \textbf{UPDATE phase.} Variable-rate update systems read the snapshot.
-  This is the primary phase for input-driven gameplay logic: camera
-  control, character actions, UI interaction, and any system that
-  responds to player intent.
-\item
-  \textbf{LATE phase.} Engine systems (hierarchy propagation, bounds
-  recomputation) run after all game mutations. They do not typically
-  read input, but they benefit from the consistency guarantee: the input
-  they inherit through the \texttt{World} is the same input that UPDATE
-  systems consumed.
-\end{enumerate}
-
 The critical observation is that the INPUT phase runs exactly once per
 tick, and the snapshot it produces is shared by all subsequent phases.
-There is no second input poll between FIXED and UPDATE, or between
-UPDATE and LATE. This is a consequence of the fixed-phase model
-described in Chapter 4: phases execute in a strict, invariant order, and
-each phase sees the world as its predecessor left it.
+Between frames, the OS delivers events to \texttt{winit}'s event buffer
+at any time; the INPUT phase drains that buffer and freezes the
+snapshot. The FIXED phase may read the snapshot (with caveats about
+edges, discussed below). The UPDATE phase is the primary consumer for
+input-driven gameplay logic. The LATE phase benefits from the
+consistency guarantee but does not typically read input directly. There
+is no second input poll between FIXED and UPDATE, or between UPDATE and
+LATE. This is a consequence of the fixed-phase model described in
+Chapter 4: phases execute in a strict, invariant order, and each phase
+sees the world as its predecessor left it.
 
 \subsection{The Fixed-Tick Edge
 Problem}\label{the-fixed-tick-edge-problem}
@@ -7004,12 +7162,29 @@ Focus loss automatically releases the cursor capture (the OS may enforce
 this regardless), and the INPUT phase detects the change and reports
 zero deltas until capture is re-established.
 
+Cursor capture interacts with the context stack in a natural way. When
+gameplay is active and the player is controlling a camera, the cursor is
+captured and mouse deltas drive look rotation. When the player opens a
+menu (pushing a UI context onto the stack), the game releases the cursor
+so the player can interact with UI elements. When the menu is dismissed
+(popping the UI context), the cursor is recaptured. The context stack
+already manages which action map is active; cursor capture state follows
+the same transitions, ensuring that the mouse behaves correctly for each
+activity without ad-hoc management.
+
 The accumulation model ensures that no motion is lost, regardless of how
 many events the OS delivers per frame. This is particularly important
 for high-polling-rate mice (1000 Hz and above), which can deliver dozens
-of motion events per 16 ms frame. Without accumulation, the engine would
-either lose events (if it reads only the latest) or force systems to
-iterate over an event queue (which breaks the polled-snapshot model).
+of motion events per 16 ms frame. Competitive FPS players are especially
+sensitive to mouse input fidelity: the difference between a mouse that
+reports at 125 Hz and one that reports at 1000 Hz is perceptible in fast
+flick-shots, and any engine that drops motion events between polls will
+feel less responsive than one that accumulates them. Without
+accumulation, the engine would either lose events (if it reads only the
+latest) or force systems to iterate over an event queue (which breaks
+the polled-snapshot model). Accumulation is the approach that preserves
+both the full range of player motion and the simplicity of the polled
+snapshot.
 
 \subsection{Input for Replay and
 Determinism}\label{input-for-replay-and-determinism}
@@ -7020,6 +7195,23 @@ every device's state at that moment. Recording input for replay means
 serializing one snapshot per frame into a compact binary format.
 Replaying means deserializing snapshots in sequence and substituting
 them for live input during the INPUT phase.
+
+This technique has a long and successful history in the game industry.
+Real-time strategy games pioneered input-only replay out of necessity:
+\emph{StarCraft} (1998) recorded only player commands (not world state),
+because the game state was too large to snapshot at useful frequency.
+The replay file was tiny (often under 100 KB for a 30-minute match), and
+deterministic simulation reproduced the entire game from that record.
+Fighting games adopted the same principle for a different reason:
+rollback netcode, as implemented in GGPO (now integrated into virtually
+every modern fighting game), records each player's input per frame and
+replays the simulation to reconcile prediction errors. When the server
+receives a corrected input, it rolls back to the last confirmed state
+and re-simulates forward using the corrected input stream. This only
+works if the simulation is deterministic given the same inputs. Racing
+games use input recording for ghost replay: \emph{Gran Turismo} and
+\emph{Forza} record the player's input (steering, throttle, brake) per
+tick and replay it to produce the ghost car in time trials.
 
 The connection to Chapter 4's deterministic fixed timestep is direct.
 The fixed timestep guarantees that the same sequence of
@@ -7061,10 +7253,14 @@ Replay has uses beyond entertainment. Automated testing can record a
 sequence of inputs, run them against a build, and verify that the output
 matches expectations. This catches regressions that unit tests miss:
 bugs that emerge only from specific sequences of player actions over
-time. Network prediction and rollback also rely on input recording: the
-server records each client's input and replays the authoritative
-simulation. These are advanced features, but they all begin with the
-same foundation: a compact, per-frame input record and a deterministic
+time. Bungie has described using recorded input sessions to
+regression-test \emph{Halo}'s gameplay systems across builds: a recorded
+playthrough that completes successfully on one build but fails on
+another isolates the breaking change to the commits between them.
+Network prediction and rollback also rely on input recording: the server
+records each client's input and replays the authoritative simulation.
+These are advanced features, but they all begin with the same
+foundation: a compact, per-frame input record and a deterministic
 timestep.
 
 \section{Cross-Platform Policy}\label{cross-platform-policy}
@@ -7110,15 +7306,40 @@ player-facing features:
   appropriate prompt icon. This is a presentation concern, not a logic
   concern; the action value is the same regardless of the prompt.
 \item
-  \textbf{Platform conventions.} On PlayStation, the confirm button is
-  traditionally Cross in Western territories and Circle in Japan. On
-  Xbox, the A button is always confirm. On Switch, the button labeled
-  ``A'' is in the position of Xbox's ``B.'' These conventions are
+  \textbf{Platform conventions.} Different platforms have different
+  button conventions for the same semantic action. These conventions are
   handled by the binding table: the platform's default action map uses
   the conventional button for ``confirm,'' and the player can rebind if
   desired. Game code never reads a specific button; it reads
   \texttt{action\_pressed("confirm")}.
 \end{itemize}
+
+\begin{tcolorbox}[enhanced jigsaw, arc=.35mm, bottomrule=.15mm, breakable, colback=white, colframe=quarto-callout-tip-color-frame, left=2mm, leftrule=.75mm, opacityback=0, rightrule=.15mm, toprule=.15mm]
+\begin{minipage}[t]{5.5mm}
+\textcolor{quarto-callout-tip-color}{\faLightbulb}
+\end{minipage}%
+\begin{minipage}[t]{\textwidth - 5.5mm}
+
+\vspace{-3mm}\textbf{The Confirm Button Problem}\vspace{3mm}
+
+The history of the confirm button illustrates why action mapping exists.
+On PlayStation, the confirm button was traditionally Cross in Western
+territories and Circle in Japan, a split that persisted for over 25
+years. Japanese players who imported Western games (or vice versa) found
+that confirm and cancel were swapped, because the game had hard-coded
+the button rather than mapping a semantic action. Sony finally
+standardized on Cross globally with the PlayStation 5 in 2020, but the
+transition was controversial and some Japanese players still prefer
+Circle. Meanwhile, Nintendo's Switch places its ``A'' button where
+Xbox's ``B'' sits, and vice versa. A game that reads
+\texttt{controller\_button(0)} will get a different physical button on
+every platform. A game that reads \texttt{action\_pressed("confirm")}
+and ships with per-platform default bindings handles all of these
+conventions correctly, and a player who disagrees with the platform
+default can rebind.
+
+\end{minipage}%
+\end{tcolorbox}
 
 \subsection{Accessibility and
 Remapping}\label{accessibility-and-remapping}
@@ -7126,8 +7347,21 @@ Remapping}\label{accessibility-and-remapping}
 Player-accessible remapping is not a luxury feature. It is a fundamental
 quality-of-life capability that serves players with motor disabilities,
 non-standard hardware, personal preferences, and platform-specific
-conventions. The action system provides remapping as a structural
-consequence of its design, not as an afterthought:
+conventions. A player who uses a one-handed controller, a player who
+cannot reach certain keys due to a physical condition, a player who
+prefers inverted Y-axis for historical reasons, and a player who simply
+wants ESDF instead of WASD all benefit from the same system. \emph{The
+Last of Us Part II} (2020) set a new industry benchmark by shipping over
+60 accessibility options, including full remapping, button-hold toggles,
+and custom control presets. \emph{Celeste} (2018) demonstrated that
+accessibility features (an assist mode that let players customize game
+speed and invincibility) could ship in a challenging game without
+diminishing its identity. These examples shifted the industry
+conversation from ``should we support accessibility?'' to ``how deeply
+can we support it?''
+
+The action system provides remapping as a structural consequence of its
+design, not as an afterthought:
 
 \begin{itemize}
 \tightlist
@@ -7152,7 +7386,10 @@ engine code. The engine provides the \texttt{ActionMap} asset type, the
 binding vocabulary, and the \texttt{user://} persistence path. The game
 provides the UI. This separation ensures that the rebinding interface
 can match the game's visual style and interaction model rather than
-being a generic engine dialog.
+being a generic engine dialog. It also means the engine does not impose
+a specific accessibility model: the game can build toggle modes,
+sensitivity curves, one-handed presets, and any other accommodation on
+top of the same binding primitives that power standard remapping.
 
 \subsection{IME and Text Composition}\label{ime-and-text-composition}
 
@@ -7197,12 +7434,31 @@ kind, not just in degree. Attempting to unify them under a single model
 through the text path) produces a system that handles neither well. The
 clean separation keeps each path simple and correct.
 
-\subsection{Smallworld's Platform
-Boundary}\label{smallworlds-platform-boundary}
+\subsection{The Platform Boundary}\label{the-platform-boundary}
 
 The platform boundary is the narrow surface through which OS-specific
-types enter the engine and are translated into engine-owned types. In
-Smallworld, this boundary has four properties:
+types enter the engine and are translated into engine-owned types. Every
+engine draws this line somewhere, and the placement determines how much
+game code must change when the engine ships on a new platform. Draw the
+line too deep inside the engine, and platform details leak into gameplay
+systems that should never have seen them. Draw it too wide (abstracting
+windowing, file IO, threading, timers, and input behind a single
+platform interface), and you build an abstraction layer that duplicates
+work already done by the libraries beneath it. The sweet spot is a thin
+adapter that translates exactly the types that are genuinely
+platform-specific, and nothing more.
+
+Unreal draws this line at its \texttt{FGenericPlatformMisc} and
+\texttt{FGenericApplication} classes, which provide platform-specific
+subclasses for each target. The depth is justified: Unreal ships on
+platforms with proprietary input APIs that demand custom backends. Unity
+draws the line at its native player loop, where platform-specific C++
+code feeds events into the managed C\# runtime. Godot draws it at
+\texttt{DisplayServer} and the OS-specific input handlers. In each case,
+the boundary's purpose is the same: game code above the line never sees
+a platform type.
+
+In Smallworld, this boundary has four properties:
 
 \textbf{Thin, not deep.} The platform adapter is a small module (a few
 hundred lines) that drains \texttt{winit}'s event loop and a controller
@@ -7214,15 +7470,16 @@ Rust's standard library (threads, files, timers), and the asset system
 (virtual filesystem). The adapter handles only what is genuinely
 platform-specific at the input boundary.
 
-\textbf{\texttt{Send\ +\ \textquotesingle{}static} on all output types.}
-The \texttt{Input} struct, \texttt{WindowState}, and all types they
-contain are \texttt{Send\ +\ \textquotesingle{}static}. They contain no
-references into \texttt{winit}'s event loop, no borrowed window handles,
-and no platform-specific pointer types. This is a Rust-specific
-advantage: the type system guarantees that the engine's input types can
-be sent across threads, stored in arenas, serialized, and recorded
-without lifetime concerns. In C++, achieving the same guarantee requires
-discipline and convention; in Rust, it is a compiler-enforced invariant.
+\textbf{Thread-safe value types on all outputs.} The \texttt{Input}
+struct, \texttt{WindowState}, and all types they contain are plain value
+types with no references, no borrowed window handles, and no
+platform-specific pointer types. They can be sent across threads, stored
+in arenas, serialized, and recorded without lifetime concerns. In Rust,
+this property is enforced by the
+\texttt{Send\ +\ \textquotesingle{}static} bounds that the compiler
+checks at every thread crossing. In C++, achieving the same guarantee
+requires discipline and convention; Rust makes it a compile-time
+invariant.
 
 \textbf{Stable across platform adapter changes.} Game code depends on
 \texttt{Input}, \texttt{WindowState}, \texttt{KeyCode},
@@ -7307,17 +7564,16 @@ asset operations; \texttt{input}, \texttt{time}, and \texttt{window} are
 immutable borrows because they describe the external environment, which
 the game observes but does not control.
 
-The \texttt{push\_map} and \texttt{pop\_map} methods on \texttt{Input}
-are the exception: they modify the context stack. These are exposed as
-\texttt{\&mut\ self} methods on \texttt{Input}, and the engine provides
-them through a separate path (a method on \texttt{GameContext} that
-takes \texttt{\&mut\ self}) so that the immutable borrow of
-\texttt{Input} for reading and the mutable operation of pushing a map do
-not conflict. The distinction is important in Rust, where the borrow
-checker enforces that you cannot hold an immutable reference and a
-mutable reference to the same struct simultaneously. The engine's API is
-designed so that stack operations and state queries are never needed in
-the same expression.
+The \texttt{push\_map} and \texttt{pop\_map} methods are the exception:
+they modify the context stack. Because reading input and modifying the
+stack are logically distinct operations (one observes, the other
+mutates), the engine routes them through separate paths on
+\texttt{GameContext}. Stack operations go through a dedicated method on
+\texttt{GameContext} rather than through the immutable \texttt{input}
+borrow, ensuring that reading and writing never conflict. This
+separation reflects a general API design principle: when a subsystem has
+both read-only queries and mutating commands, exposing them through
+separate access paths prevents callers from accidentally mixing the two.
 
 \section*{Chapter Summary}\label{chapter-summary-4}
 \addcontentsline{toc}{section}{Chapter Summary}

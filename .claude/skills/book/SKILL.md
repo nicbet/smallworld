@@ -52,7 +52,11 @@ Each section follows a top-down structure that moves from context to detail:
    a conceptual level before any implementation detail.
 3. **Increasing detail.** Deepen through subsections: concrete data structures,
    code listings, edge cases, optimizations. Figures and listings earn their
-   place here, where they aid understanding, not as decoration.
+   place here, where they aid understanding, not as decoration. When
+   referencing a figure or listing, always follow with narrative that walks
+   the reader through what they are looking at: name the key elements,
+   explain what each part represents, and connect the visual back to the
+   argument. Never drop a figure reference without description.
 4. **Synthesis.** Close the section by connecting back to the broader architecture
    or contrasting with the alternatives that were ruled out.
 

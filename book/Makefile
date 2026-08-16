@@ -21,7 +21,7 @@ PDF     := $(OUTDIR)/The-Modern-Game-Engine.pdf
 
 # Chapter sources and the files that affect PDF output.
 CHAPTERS := $(sort $(wildcard chapters/*.qmd))
-SOURCES  := index.qmd introduction.qmd _quarto.yml preamble.tex dropcap.lua support/title-page.pdf $(CHAPTERS)
+SOURCES  := index.qmd introduction.qmd _quarto-book.yml preamble.tex dropcap.lua support/title-page.pdf $(CHAPTERS)
 
 # Graphviz diagrams: .dot → .pdf (vector output, no rasterisation).
 DOT_SRCS := $(wildcard figures/*.dot)
@@ -39,7 +39,7 @@ figures/%.pdf: figures/%.dot
 
 # ── Build ──────────────────────────────────────────────────────────────
 pdf: check figures $(SOURCES)
-	$(QUARTO) render --to pdf $(RENDER_FLAGS)
+	$(QUARTO) render --profile book --to pdf $(RENDER_FLAGS)
 
 # ── Draft (single-chapter, fast) ───────────────────────────────────────
 # Render one chapter as a standalone PDF for rapid iteration using a
@@ -60,23 +60,23 @@ endif
 	@printf '%s\n' \
 		'# Auto-generated draft profile — do not edit' \
 		'project:' \
+		'  type: default' \
 		'  output-dir: $(DRAFT_DIR)' \
-		'book:' \
-		'  title: "Draft"' \
-		'  chapters:' \
-		'    - $(CHAPTER)' \
 		'format:' \
 		'  pdf:' \
 		'    toc: false' \
 		'    classoption:' \
 		'      - oneside' \
+		'    include-in-header:' \
+		'      - preamble-draft.tex' \
 		> $(DRAFT_PROFILE)
 	@echo "Rendering $(CHAPTER) ..."
-	@$(QUARTO) render --profile draft --to pdf 2>&1
+	@TEXINPUTS="$(CURDIR):" $(QUARTO) render $(CHAPTER) --profile draft --to pdf 2>&1
 	@rm -f $(DRAFT_PROFILE)
-	@echo "=> $(DRAFT_DIR)/"
+	$(eval DRAFT_PDF := $(notdir $(CHAPTER:.qmd=.pdf)))
+	@echo "=> $(DRAFT_DIR)/$(DRAFT_PDF)"
 ifdef OPEN
-	@open "$(DRAFT_DIR)/Draft.pdf"
+	@open "$(DRAFT_DIR)/$(DRAFT_PDF)"
 endif
 
 # ── Preview (live-reload) ──────────────────────────────────────────────

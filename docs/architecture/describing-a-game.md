@@ -529,7 +529,7 @@ Accumulated per-frame on the main thread. Provides held/pressed/released semanti
 struct Input {
     keyboard:    KeyboardState,
     mouse:       MouseState,
-    controllers: [Option<ControllerState>; 4],
+    controllers: Vec<ControllerState>,
 }
 
 impl Input {
@@ -543,12 +543,24 @@ impl Input {
     fn controller(&self, index: usize) -> Option<&ControllerState>;
 }
 
+struct ControllerId {
+    vendor:  u16,
+    product: u16,
+    serial:  Option<String>,         // not all HID devices report a serial
+}
+
 struct ControllerState {
-    left_stick:  Vec2,
-    right_stick: Vec2,
+    id:            ControllerId,
+    left_stick:    Vec2,
+    right_stick:   Vec2,
     left_trigger:  f32,
     right_trigger: f32,
-    buttons: ControllerButtons,
+    buttons:       ControllerButtons,
+}
+
+enum DeviceFilter {
+    Any,                             // match any connected controller
+    Specific(ControllerId),          // match a specific physical device
 }
 ```
 
@@ -564,25 +576,26 @@ struct ActionMap {                   // asset: "gameplay", "ui", "vehicle", …
 
 struct ActionDef {
     name: InternedString,            // "jump", "move", "fire"
-    kind: ActionKind,                // Button | Axis1 | Axis2
+    kind: ActionKind,                // Button | Axis1d | Axis2d | Axis3d
     bindings: Vec<Binding>,          // rebindable; user edits serialize to user://
 }
 
 enum Binding {
     Key(KeyCode),
     MouseButton(MouseButton),
-    MouseMotion,                                       // Axis2
-    ControllerButton(u8),
-    ControllerAxis { axis: u8, dead_zone: f32 },
-    Composite2D { up: KeyCode, down: KeyCode, left: KeyCode, right: KeyCode },  // WASD
+    MouseMotion,                                       // Axis2d
+    ControllerButton { device: DeviceFilter, button: u8 },
+    ControllerAxis  { device: DeviceFilter, axis: u8, dead_zone: f32 },
+    Composite { axes: Vec<(KeyCode, KeyCode)> },           // (positive, negative) per axis
 }
 
 impl Input {
     fn action_held(&self, name: &str) -> bool;
     fn action_pressed(&self, name: &str) -> bool;      // frame edge — see fixed-tick rule
     fn action_released(&self, name: &str) -> bool;
-    fn axis1(&self, name: &str) -> f32;
-    fn axis2(&self, name: &str) -> Vec2;
+    fn axis1d(&self, name: &str) -> f32;
+    fn axis2d(&self, name: &str) -> Vec2;
+    fn axis3d(&self, name: &str) -> Vec3;
     fn push_map(&mut self, map: AssetHandle<ActionMap>);
     fn pop_map(&mut self);
 }
