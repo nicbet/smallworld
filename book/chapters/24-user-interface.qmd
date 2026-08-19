@@ -1,0 +1,38 @@
+# User Interface
+
+> **Draft chapter map.** Cover UI as an engine subsystem that serves both developer tools and player-facing game screens, with layout, rendering, input integration, and the connection to accessibility.
+
+## UI Is a Client of the Engine
+
+- UI needs stable access to input, time, assets, and game-visible state without owning engine internals.
+- The same UI framework serves two audiences: developer tools (property inspectors, debug panels, editor viewports) and player-facing game UI (HUD, menus, inventory, dialogue).
+- The distinction is in content and styling, not in architecture. Both use the same layout engine, the same input path, and the same rendering contract.
+
+### Layout and Composition
+
+- Widget trees, layout algorithms (flexbox-style or constraint-based), and the data flow from game state to visual presentation.
+- UI state lives in the game's World or in dedicated UI state structs, not inside the renderer.
+- The UI framework reads game state and produces a widget tree. The renderer draws it. The separation mirrors the Game-Render Firewall.
+
+### Input and Focus
+
+- Connection to Chapter 5's context stack: UI captures input by pushing a blocking action map.
+- Text entry routes through the IME path (Chapter 5's separate text-event pipeline).
+- Focus management, tab order, and keyboard navigation as structural features, not afterthoughts.
+
+### Composition into the Presented Image
+
+- UI's render-facing contract: the UI layer produces draw commands that the renderer composites after (or during) post-processing.
+- Resolution independence: UI renders at native resolution even when the 3D scene uses dynamic resolution scaling.
+- Menus and loading screens as ordinary lifecycle participants, not special cases.
+
+## Delivery Is Part of the Toolchain
+
+- Treat packaging, platform validation, crash reporting, and update policy as engine-facing concerns.
+- Reproducible build inputs and release checks connect to the reliability practices from Chapter 6.
+- A release is an evidence-backed artifact, not merely a compiled executable.
+
+### Shipping Across Platforms
+
+- A stable engine-facing contract must still be verified against real windowing, driver, input, and deployment environments.
+- Platform-specific UI conventions (safe areas on consoles, notch avoidance on mobile, DPI scaling on desktop) are handled through the same WindowState that Chapter 5 introduced.

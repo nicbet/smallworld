@@ -1,64 +1,404 @@
 # Memory, Handles, Instrumentation, and Reliability
 
-> **Draft chapter map.** Make resource identity, lifetime, memory budgets, and observability explicit engine services.
+Chapter 5 established the engine's input system: a polled snapshot that converts irregular platform events into a stable, frame-synchronized vocabulary of player intent. That system relies on several mechanisms introduced in earlier chapters but not yet examined in depth: the `AssetHandle<T>` and `ResourceHandle<T>` types that name assets without owning their memory, the `SlotMap` arenas that store entities and resources behind generational indices, and the named budgets that Chapter 3 promised would turn silent resource exhaustion into explicit policy decisions. This chapter makes all of those mechanisms precise.
 
-## Identity Before Address
+The problem these mechanisms solve is not performance. It is governance. A modern game engine manages tens of thousands of resources across two address spaces (CPU and GPU), multiple threads with different ownership rules, and a streaming pipeline that loads and evicts data continuously. Without a principled approach to identity, lifetime, capacity, and observability, the engine's behavior at scale becomes an emergent property of whichever subsystem happens to allocate last. Silent VRAM exhaustion, stale pointer dereferences, untraceable frame-time regressions, and test suites that pass on the developer's machine but fail on a target platform are all symptoms of the same architectural gap: the engine lacks a first-class vocabulary for naming resources, limiting their consumption, observing their behavior, and verifying its own contracts.
 
-- Explain why game code should name resources with stable handles rather than raw pointers or platform allocations.
-- Relate identity to loading, replacement, serialization, and safe asynchronous work.
+This chapter fills that gap. We begin with identity: why stable handles are the right abstraction for naming resources in a system where physical storage locations change. We then examine budgets: the named limits and arbitration policies that transform resource exhaustion from a crash into a decision. From there we turn to instrumentation: the profiling, tracing, and counter infrastructure that gives every subsystem a voice in the engine's performance story. Finally, we address reliability: the testing, configuration, and delivery practices that make the engine's contracts verifiable rather than aspirational.
 
-### Generational Handles and Resource Pools
 
-- Introduce generational indices and slot-map-style arenas as a practical safe-handle pattern.
-- Contrast stable identity with physical storage location.
+## What You Will Learn in This Chapter {.unnumbered}
 
-#### Handle Failure Modes
+- **Identity Before Address:** Why game code should name resources with stable handles rather than raw pointers, and how generational indices and slot-map arenas provide safe, cache-friendly indirection.
+- **Budgets as Policy:** How named limits for GPU memory, upload bandwidth, and frame time transform silent failures into explicit arbitration decisions, with the concrete `MemoryBudget` struct and its eviction policies.
+- **Resource Lifetime and Residency:** The distinction between logical asset lifetime, CPU residency, and GPU residency, and how each layer is managed independently.
+- **Instrumentation as Architecture:** How profiling scopes, counters, and gauges form a data flow that crosses thread and domain boundaries, feeding Tracy, an in-engine overlay, and trace exports through a single API.
+- **Reliability at Boundaries:** How unit, integration, and scenario tests target different classes of engine failure, and how configuration, feature policy, and delivery checks close the gap between a working engine and a dependable product.
 
-- Cover stale handles, use-after-free prevention, and diagnostic-friendly invalidation.
-- Establish what a handle can promise and what it deliberately cannot promise.
 
-## Budgets Turn Failure into Policy
+## Identity Before Address {#sec-identity}
 
-- Explain why CPU memory, GPU memory, upload bandwidth, and frame time need named limits.
-- Frame budgets as arbitration rules among competing services rather than late-stage optimization.
-- **Deferred from Chapter 3:** Chapter 3 introduces the named-budgets principle with a failure-mode story (silent VRAM exhaustion) but defers the concrete types. This section should present the `MemoryBudget` struct (limit, used, high-water mark), show how every GPU pool carries its budget, and explain the arbitration policy (evict LRU, lower LOD, or reject).
+Every engine manages resources: meshes, textures, materials, audio clips, entities, render targets, and dozens of other asset types. Game code needs to reference these resources, but the physical location of a resource is unstable. A texture may begin in system RAM, move to a staging buffer, then reside in device-local VRAM. An entity's component data sits in a dense array that is compacted when other entities are removed. A mesh LOD may be evicted from GPU memory under streaming pressure and reloaded minutes later into a different allocation. If game code holds a raw pointer or a direct memory address to any of these resources, every relocation invalidates every reference, and every invalidation is a potential crash.
 
-### Resource Lifetime and Residency
+The problem is older than game engines. Operating systems solved it for file descriptors in the 1970s: a file descriptor is an integer index into a per-process table, not a pointer to a kernel structure. Closing a file invalidates the descriptor; opening a new file may reuse the same index, but the kernel tracks a sequence number internally so that stale descriptors do not accidentally operate on the wrong resource. Database connection pools, Wayland's object IDs, X11 window handles, and GPU driver resource handles all follow the same principle. The consumer receives an opaque token. The owner keeps the real resource behind a lookup table. Lifetime is managed by the owner, not by the consumer.
 
-- Distinguish logical asset lifetime from CPU and GPU residency.
-- Connect eviction, streaming demand, and fallback behavior to explicit ownership.
+Game engines converged on this pattern independently, driven by the same pressures. Unreal Engine's `FRenderResource` system assigns opaque indices to GPU resources and uses proxy objects to decouple game-side references from render-side memory. Unity's `InstanceID` is a generational integer that identifies managed objects without exposing their heap address. Godot's `RID` (Resource ID) is an opaque handle into the `RenderingServer`'s internal pools, giving game code a stable name for GPU resources that the rendering backend is free to relocate or rebuild. The convergence is not coincidental: any engine that supports asynchronous loading, streaming, LOD transitions, or multi-threaded rendering must decouple the identity of a resource from its physical storage.
+
+Smallworld's resource model, introduced in Chapter 3, follows this consensus. Game code holds opaque handles: `AssetHandle<T>` for immutable shared assets and `ResourceHandle<T>` for mutable resources. Both are thin wrappers around a generational index. The engine owns the actual data and manages its lifetime, location, and residency. Handles are cheap to copy (they are two `u32` fields and a zero-sized type marker), safe to store in components, safe to serialize, and safe to hold across frames. They can outlive the resource they name, because a generation check on access produces a clean miss rather than undefined behavior.
+
+The rest of this section makes the mechanism precise: what a generational index is, how a slot map implements it, what failure modes the design prevents, and what guarantees a handle can and cannot provide.
+
+
+### Generational Handles and Resource Pools {#sec-generational-handles}
+
+A **generational index** is a pair: a slot number that identifies a position in a dense array, and a generation counter that distinguishes the current occupant from all previous and future occupants of that slot. Together, the two fields form a handle that is stable (the slot number does not change when other slots are modified), compact (two `u32` values: 8 bytes total), and tamper-evident (a stale generation is detectable at the cost of a single integer comparison).
+
+The data structure that backs generational handles is the **slot map**, sometimes called a generational arena. A slot map is a dense array of entries, where each entry pairs a generation counter with either live data or a free-list link. When a new resource is inserted, the slot map pops a slot from the free list, increments its generation, stores the data, and returns a handle containing the slot index and the new generation. When a resource is removed, the slot map increments the generation again (or simply marks the slot as free while retaining the generation), pushes the slot onto the free list, and leaves the data to be overwritten by the next insertion. Any handle that still refers to the old generation will find, on its next access attempt, that the generation in the slot does not match the generation in the handle. The access fails cleanly: the slot map returns `None`, or an error, or a sentinel value, depending on the API. It never returns the new occupant's data, because the new occupant has a different generation.
+
+Chapter 3 introduced the `AssetHandle<T>` and `ResourceHandle<T>` types and explained the generational index pattern at a conceptual level. Here we examine the slot map itself, starting with its core structure:
+
+```{#lst-slotmap .rust lst-cap="SlotMap: generational arena with dense storage and O(1) access"}
+struct SlotMap<K, V> {
+    entries: Vec<Entry<V>>,
+    free_head: Option<u32>,
+    len: u32,
+}
+
+struct Entry<V> {
+    generation: u32,
+    value: Option<V>,
+    next_free: Option<u32>,
+}
+
+impl<K: HandleKey, V> SlotMap<K, V> {
+    fn insert(&mut self, value: V) -> K {
+        let index = match self.free_head {
+            Some(i) => {
+                self.free_head = self.entries[i as usize].next_free;
+                i
+            }
+            None => {
+                self.entries.push(Entry {
+                    generation: 0,
+                    value: None,
+                    next_free: None,
+                });
+                (self.entries.len() - 1) as u32
+            }
+        };
+        let entry = &mut self.entries[index as usize];
+        entry.generation += 1;
+        entry.value = Some(value);
+        self.len += 1;
+        K::from_raw(index, entry.generation)
+    }
+
+    fn remove(&mut self, key: K) -> Option<V> {
+        let (index, gen) = key.into_raw();
+        let entry = &mut self.entries[index as usize];
+        if entry.generation != gen || entry.value.is_none() {
+            return None;
+        }
+        let value = entry.value.take();
+        entry.next_free = self.free_head;
+        self.free_head = Some(index);
+        self.len -= 1;
+        value
+    }
+
+    fn get(&self, key: K) -> Option<&V> {
+        let (index, gen) = key.into_raw();
+        let entry = &self.entries[index as usize];
+        if entry.generation == gen {
+            entry.value.as_ref()
+        } else {
+            None
+        }
+    }
+}
+```
+
+The `HandleKey` trait abstracts over handle types so that the same slot map implementation serves entities (`EntityId`), GPU resources (`GpuId`), assets (`AssetHandle<T>`), and any other handle type the engine needs. Each handle type is a newtype around the same `(index, generation)` pair, but the type system prevents a mesh handle from being used to look up a texture, even though the underlying representation is identical. This is a deliberate use of Rust's zero-cost newtype pattern: the `PhantomData<T>` marker on `AssetHandle<T>` provides type safety at compile time without adding any runtime cost.
+
+@lst-slotmap shows the core operations. `insert` pops a free slot (or grows the array), bumps the generation, stores the value, and returns a handle. `remove` checks the generation, takes the value, and pushes the slot back onto the free list. `get` checks the generation and returns a reference only if it matches. Every operation is O(1). The lookup is a bounds-checked array index followed by an integer comparison, which modern CPUs execute in a handful of cycles with no cache misses beyond the initial array access. This is why slot maps are preferred over hash maps for resource pools in performance-critical engines: a hash map must compute a hash, probe a bucket chain, and compare keys; a slot map does an array index and an equality check.
+
+The dense storage also matters for iteration. When a system needs to iterate over all live resources in a pool (for example, the render thread iterating over all GPU meshes to rebuild the TLAS), a slot map's backing array provides cache-friendly sequential access. Entries that have been freed leave gaps, but the gaps are bounded by the pool's high-water mark, and the generation check skips them cheaply. For pools where iteration density is critical, a secondary dense array of live indices can eliminate gaps entirely, at the cost of maintaining the secondary array on insert and remove. Smallworld's GPU resource pools use this pattern: the `SlotMap<GpuId, GpuMesh>` holds the data, and a parallel dense `Vec<GpuId>` holds the keys of live entries for tight iteration during culling and draw submission.
+
+Figure \ref{fig:generational-handle} illustrates the generation check in action. A current handle with a matching generation resolves to live data. A stale handle whose generation does not match the slot's current generation produces a clean miss. The slot may now hold a completely different resource, but the stale handle never sees it.
+
+\input{figures/generational-handle.tex}
+
+
+#### Handle Failure Modes {#sec-handle-failure}
+
+The generational index design prevents the most dangerous failure mode in resource management: **use-after-free**. In a raw-pointer system, freeing a resource and then accessing it through a dangling pointer produces undefined behavior. The program may crash, may silently read garbage data, or may corrupt unrelated memory. The failure is non-deterministic and often manifests far from the bug's origin, making it one of the hardest classes of defect to diagnose. In a generational handle system, the equivalent scenario produces a defined, detectable result: the handle's generation does not match the slot's generation, the access returns `None`, and the caller can handle the miss explicitly.
+
+This guarantee holds even when slots are reused. Consider the following sequence: a texture is allocated in slot 5 with generation 1. A component stores the handle `(index=5, generation=1)`. The texture is freed; slot 5 returns to the free list with generation 1. Later, a new mesh is allocated in slot 5, bumping the generation to 2. The stale handle `(index=5, generation=1)` now points at a slot whose generation is 2. The access fails cleanly: the caller gets `None`, not a mesh masquerading as a texture. The generation counter has broken the ABA problem, the classic concurrent-programming hazard where a memory location is reused for a different value and a stale reference cannot distinguish the new value from the old one.
+
+There are several failure modes that the generational handle design addresses, and a few that it deliberately does not:
+
+**Stale handles after despawn.** When an entity is despawned, its `EntityId` handle becomes stale. Any system, behavior, or component that cached the handle will get a clean miss on the next access. This is the primary defense against a common class of gameplay bugs: a projectile targets an enemy, the enemy despawns, and the projectile's update function tries to read the enemy's transform. With a raw pointer, this is a crash. With a generational handle, `world.get(target)` returns `None`, and the projectile can respond appropriately (explode at last known position, despawn itself, or simply miss).
+
+**Double free.** Calling `remove` with a handle that has already been removed is a no-op: the generation has already been bumped by the first removal, so the second call's generation check fails. The caller can detect this (the return value is `None`), but even if it does not check, no state is corrupted.
+
+**Cross-type confusion.** Because each handle type (`AssetHandle<MeshAsset>`, `AssetHandle<TextureAsset>`, `GpuId`, `EntityId`) is a distinct Rust type, the compiler prevents using a mesh handle to look up a texture at compile time. This is a stronger guarantee than the runtime generation check: it catches an entire category of bugs before the program runs.
+
+**Generation overflow.** A `u32` generation counter can wrap around after approximately 4.3 billion increments per slot. In practice, this requires a single slot to be allocated and freed billions of times, which is not a realistic workload. If an engine needed to guard against this (for example, in a long-running server), the mitigation is straightforward: use a `u64` generation, or reserve generation 0 as a sentinel and skip it on wrap. Smallworld uses `u32` generations, which are sufficient for any practical session length.
+
+**Concurrent access races.** Generational handles do not provide thread-safety by themselves. A `SlotMap` is an ordinary mutable data structure; concurrent `insert` and `get` from different threads without synchronization is a data race. Smallworld's threading model, described in Chapter 3, prevents this structurally: each slot map is owned by a single thread. The entity slot map lives on the Game Thread. The GPU resource pools live on the Render Thread. Handles cross thread boundaries freely (they are `Send + Sync` by construction: two `u32` fields and a zero-size marker), but the slot maps they index do not. This is the thread-ownership principle applied to resource pools: the handle is a message; the pool is owned state.
+
+**What handles cannot promise.** A handle does not promise that the resource is *ready*. An `AssetHandle<TextureAsset>` may refer to a texture that has been requested but not yet loaded, or that has been loaded into CPU memory but not yet uploaded to the GPU. The handle's generation check confirms only that the resource *exists* in the slot map (it has been allocated and not yet freed). Readiness is a separate query, exposed through the asset system's loading-state API. This separation is deliberate: collapsing identity and readiness into a single check would force every handle access to also check loading state, penalizing the common case (the resource is already loaded) to handle the uncommon case (the resource is still in flight). Chapter 7 examines the loading-state model in detail.
+
+
+## Budgets Turn Failure into Policy {#sec-budgets}
+
+Chapter 3 introduced the budget-explicit principle with a failure-mode story: a level designer adds unique textures until VRAM is silently exhausted on a target GPU, frame times spike, and the team spends days diagnosing a problem that no system reported. The principle states that **frame time, GPU memory, upload bandwidth, and streaming distance are explicit budgets with engine arbitration, not emergent properties**. Chapter 3 promised that this chapter would present the concrete types and arbitration policies. Here we deliver on that promise.
+
+The core insight is that a budget is not a limit. A limit is a number that, when exceeded, causes a failure. A budget is a number that, when approached, causes a *decision*. The decision might be to evict the least-recently-used texture, to lower a distant entity's LOD, to throttle streaming IO to preserve frame-time headroom, or to reject an allocation outright and use a fallback. The critical difference is that the decision is explicit, logged, and observable. The engine does not silently degrade; it makes a traceable choice.
+
+This is not a novel idea. Every engine that ships on consoles enforces similar limits, because consoles have fixed memory and the certification process requires that the game never exceed it. The Xbox certification requirements include specific tests for memory stability under sustained load. PlayStation's Technical Requirements Checklist (TRC) mandates that games handle memory exhaustion gracefully. Mobile platforms are even more constrained: iOS will terminate a foreground app that exceeds its memory allocation without warning, making budget enforcement a survival requirement, not a quality-of-life feature. What varies across engines is whether these budgets are architectural (designed into every pool from the start) or retrofitted (bolted on after the first out-of-memory crash in QA). Smallworld makes them architectural.
+
+### The MemoryBudget Struct
+
+Every resource pool in the engine carries a `MemoryBudget`: a struct that records the pool's byte limit, current usage, and high-water mark. The struct is deliberately simple, because its value comes not from cleverness but from ubiquity: every pool has one, every allocation checks it, and every budget publishes its state as an instrumentation gauge.
+
+```{#lst-memory-budget .rust lst-cap="MemoryBudget: the universal resource accounting struct"}
+struct MemoryBudget {
+    limit_bytes:      u64,
+    used_bytes:       u64,
+    high_water_bytes: u64,
+}
+
+impl MemoryBudget {
+    fn can_allocate(&self, bytes: u64) -> bool {
+        self.used_bytes + bytes <= self.limit_bytes
+    }
+
+    fn allocate(&mut self, bytes: u64) {
+        self.used_bytes += bytes;
+        if self.used_bytes > self.high_water_bytes {
+            self.high_water_bytes = self.used_bytes;
+        }
+    }
+
+    fn free(&mut self, bytes: u64) {
+        self.used_bytes -= bytes;
+    }
+
+    fn pressure(&self) -> f32 {
+        self.used_bytes as f32 / self.limit_bytes as f32
+    }
+
+    fn headroom(&self) -> u64 {
+        self.limit_bytes.saturating_sub(self.used_bytes)
+    }
+}
+```
+
+@lst-memory-budget shows the struct and its core operations. `can_allocate` checks whether a proposed allocation would exceed the limit. `allocate` increments usage and updates the high-water mark. `free` decrements usage. `pressure` returns the fraction of the budget currently consumed (0.0 to 1.0), which the arbitration logic and the instrumentation overlay both read. `headroom` returns the remaining bytes before the limit, used by streaming and upload scheduling to size their next batch.
+
+The high-water mark deserves attention. It records the maximum `used_bytes` observed since the budget was created (or since the mark was manually reset). This value serves two purposes. First, it gives profiling tools a measure of peak demand, which is more informative than current usage for capacity planning. A pool that averages 60% utilization but peaks at 98% is one asset away from eviction pressure; a pool that averages 60% and peaks at 62% has comfortable headroom. Second, it provides a regression signal: if the high-water mark for the mesh pool increases by 30% between builds, something changed that is worth investigating, even if the pool never exceeded its limit.
+
+Every GPU pool in the architecture specification carries a budget field. The `GpuMeshPool`, `GpuTexturePool`, and staging pool each embed a `MemoryBudget`. When the engine initializes, it queries the GPU's available memory through `wgpu`'s adapter info, applies platform-specific scaling factors (a shipping console build may reserve a known fraction for the OS and system services), and distributes the total across pools according to a configuration table. The configuration is data, not code: a game can ship different budget profiles for different hardware tiers without recompiling the engine. The capability tier system (described in the architecture specification) sets the defaults; the game's configuration overrides them.
+
+### Budget Arbitration
+
+A budget without arbitration is just a counter. The value of the `MemoryBudget` struct comes from the decisions it enables. When a pool reaches its limit, the engine must decide what to do. The decision depends on the pool's role and the resource's importance. Smallworld defines three arbitration responses, applied in order of preference:
+
+**Evict LRU.** The least-recently-used resource in the pool is evicted to make room for the new allocation. This is the default response for GPU resource pools (meshes, textures) under streaming workloads. The streaming system continuously loads and evicts resources as the camera moves; LRU eviction ensures that resources the player is looking at stay resident while resources behind the camera or beyond the streaming radius are released. The LRU timestamp is updated on every access (not just on every frame), so a texture that is bound for rendering every frame stays fresh, while a texture that was loaded speculatively but never rendered ages naturally toward eviction.
+
+**Lower LOD.** When eviction alone is insufficient (the pool is full and every resident resource is actively in use), the arbiter can lower the LOD of distant resources. A high-resolution texture that serves a distant object can be replaced by a lower-resolution mip, freeing a significant fraction of the allocation while preserving visual coverage. This is the response that keeps the scene visually complete under memory pressure: the player sees blurrier textures in the distance, not missing geometry. The dynamic resolution scaling (DRS) controller, described in the rendering chapters, makes the complementary decision for render targets: if the frame-time budget is under pressure, it lowers the internal rendering resolution. Both are explicit, logged, observable tradeoffs.
+
+**Reject.** When neither eviction nor LOD reduction can free enough space (for example, a budget-protected resource like the current weapon's textures cannot be evicted or reduced), the allocation is rejected. The requesting system receives a failure signal and must use its fallback: a placeholder texture, a simpler mesh, or a deferred retry. Rejection is the least desirable outcome, but it is infinitely preferable to the alternative: silently exceeding the budget, causing driver-level memory pressure, and producing unpredictable performance degradation that no engine system reports.
+
+Figure \ref{fig:budget-arbitration} illustrates the arbitration flow. Named budgets publish their state to a central arbiter, which selects the appropriate response and logs the decision through the instrumentation system. The same gauges that drive arbitration decisions are displayed in the profiling overlay, closing the loop between allocation behavior and developer visibility.
+
+\input{figures/budget-arbitration.tex}
+
+The arbitration logic itself is straightforward. The complexity is in making it ubiquitous. Every pool must check its budget before allocating. Every eviction must free the resource cleanly (including any GPU-side cleanup that requires the render thread). Every rejection must be handled by the caller. And every decision must be logged so that a developer investigating a visual artifact or a performance regression can trace it to a specific budget event at a specific frame. This is why the budget system is architecture, not optimization: it touches every resource pool in the engine, and it must be designed in from the start. Retrofitting budgets onto pools that were built without them requires auditing every allocation site and every consumer of every pool, a task that grows superlinearly with the size of the codebase.
+
+The budget arbiter is not a global singleton. Each pool owns its own `MemoryBudget` and makes its own eviction decisions. The "arbiter" is the collection of budget-aware logic distributed across pools, unified by the shared `MemoryBudget` type and the shared instrumentation gauges. This design avoids the centralization trap: a global arbiter that must understand every pool's eviction semantics becomes a bottleneck for both execution (it serializes allocation decisions across threads) and development (every new pool type requires changes to the central arbiter). Distributed arbitration with a shared vocabulary is the pattern that scales.
+
+### Resource Lifetime and Residency {#sec-lifetime-residency}
+
+A resource in a game engine does not have a single lifetime. It has at least three, each managed by a different subsystem:
+
+**Logical lifetime.** The duration for which a handle exists and can be resolved. A game system spawns an entity and receives an `EntityId`. It stores that ID in a target list, passes it to a behavior, or serializes it into a save file. The logical lifetime begins at spawn and ends at despawn. During this window, the handle is valid: `world.get(id)` returns the entity's data.
+
+**CPU residency.** The duration for which the asset's decoded data occupies system RAM. A mesh's vertex data, a texture's pixel data, an audio clip's sample data: these consume memory and must be loaded from disk (or generated) before they can be used. CPU residency begins when the asset pipeline completes decoding and ends when the data is evicted under memory pressure. Crucially, CPU residency can end while the logical lifetime continues: the game still holds a valid `AssetHandle`, but the data behind it has been evicted. The next access triggers a reload.
+
+**GPU residency.** The duration for which the resource occupies device-local GPU memory. A texture's GPU-resident copy, a mesh's vertex buffer, a material's uniform data. GPU residency begins when the render thread uploads the data from the staging pool into device-local memory and ends when the GPU pool evicts it. GPU residency can end independently of both CPU residency and logical lifetime: the GPU pool may evict a distant texture to make room for a closer one, while the CPU-side data remains resident for fast re-upload if the camera returns.
+
+Figure \ref{fig:resource-lifetime-layers} illustrates the three layers. The key insight is that each layer is independently managed. Logical lifetime is determined by game logic (spawn and despawn). CPU residency is determined by the asset server and its memory budget. GPU residency is determined by the render thread's resource pools and their budgets. The three layers communicate through handles and loading states, but they do not share lifetime: evicting a resource from GPU memory does not despawn the entity that references it, and despawning an entity does not immediately free the GPU memory its mesh occupied.
+
+\input{figures/resource-lifetime-layers.tex}
+
+This independence is what makes the architecture specification's dictum precise: **zero references makes an asset evictable, not evicted.** When the last entity holding an `AssetHandle<TextureAsset>` is despawned, the texture's reference count drops to zero. The asset is now eligible for eviction, but eviction happens only when the budget arbiter needs the space. If the player re-enters the area before memory pressure triggers eviction, the texture is still resident, and the re-spawned entities can use it immediately without a load. This is the caching behavior that every virtual memory system provides: recently-freed pages remain in the page cache until pressure forces reclamation. The engine's asset system applies the same principle to game resources.
+
+The streaming system, detailed in Chapter 11, adds a fourth layer of complexity: **streaming residency**, where data is loaded at varying quality levels (mip levels for textures, LOD tiers for meshes, brick resolutions for voxel volumes) and the budget arbiter continuously adjusts which quality level is resident based on distance, priority, and available budget. The residency invariant from the architecture specification ensures that this process is always safe: the coarsest tier of everything is pinned resident, so every possible residency miss has a rendering answer (fall back to a coarser level), and the failure mode under any pressure is blur, never holes, never stalls.
 
 #### Memory for Rust Engines
 
-- Discuss how Rust’s safety model changes lifetime errors without eliminating capacity planning.
-- Defer allocator and platform-specific details to implementation material.
+Rust's ownership system changes the shape of memory errors without eliminating the need for capacity planning. In a C++ engine, a use-after-free in a resource pool is a memory-safety bug: the program reads deallocated memory and produces undefined behavior. In a Rust engine, the borrow checker prevents this class of bug at compile time: you cannot hold a reference to the interior of a `Vec` that another system might reallocate, because the compiler tracks the lifetime of every borrow. The generational handle pattern is not primarily a safety mechanism in Rust (the compiler already prevents dangling references); it is an *identity* mechanism that decouples names from storage locations, enabling relocation, serialization, and cross-thread communication.
 
-## Instrumentation Is Part of the Architecture
+What Rust does not prevent is capacity exhaustion. The compiler cannot know at build time how much GPU memory the game will consume at runtime, or whether the streaming system's demand will exceed the upload budget on a slow disk. These are runtime problems that require runtime infrastructure: the `MemoryBudget` struct, the arbitration policies, and the instrumentation gauges described in this chapter. Rust's type system ensures that the bookkeeping is correct (every allocation through the pool updates the budget, because the API does not expose an unbudgeted allocation path). But the policy, the decisions about what to evict and when, is engineering judgment encoded in data, not a property that any type system can derive.
 
-- Establish profiling, tracing, and counters as data flows that must cross domains cleanly.
-- Explain why a modern engine needs evidence before it can make budget decisions.
+The practical consequence for engine developers is that Rust eliminates the low-level memory-safety bugs (dangling pointers, use-after-free, data races) that consume enormous debugging effort in C++ engines, freeing that effort for the higher-level capacity problems (budget tuning, eviction policy, streaming priorities) that determine how the game performs on real hardware. This is a genuine productivity advantage, but it is not a substitute for the architectural infrastructure this chapter describes. A Rust engine without budgets will run out of GPU memory just as surely as a C++ engine without budgets; it will simply not crash while doing so.
 
-### Frame and Resource Telemetry
 
-- Outline CPU timings, GPU timings, allocation pressure, queue depth, and streaming state.
-- Distinguish current measurements from delayed or advisory feedback.
+## Instrumentation Is Part of the Architecture {#sec-instrumentation}
+
+A budget is only as useful as the evidence behind it. The `MemoryBudget` struct records usage and headroom, but the developer investigating a frame-time regression needs more than a current value: they need a timeline of when each pool's pressure changed, which system was responsible for the spike, how long the spike lasted, and whether it correlated with a streaming event, a physics solve, or a render pass. This is the job of the instrumentation system: to provide structured, cross-domain, cross-thread evidence that budget decisions, performance characteristics, and failure modes are observable rather than opaque.
+
+The game engine industry arrived at this conclusion through decades of painful experience. Early engines had no built-in profiling; developers relied on external tools like VTune, PIX, or Instruments to capture CPU and GPU traces. These tools are powerful but external: they cannot see the engine's semantic structure (which system was running, which pass was executing, which entity was being processed), only the raw instruction stream. A 4 ms spike in the "cull" function is visible in VTune, but VTune cannot tell you that the spike happened because the streaming system loaded 200 new entities this frame and the cull loop had to process them all before the render thread could begin recording.
+
+The solution, adopted by every major engine, is to embed instrumentation markers in the engine's own code. Unreal Engine's `SCOPED_NAMED_EVENT` and `stat` system annotate CPU work with hierarchical scopes that appear in Unreal Insights, Epic's profiling tool. Unity's `ProfilerMarker` and `Profiler.BeginSample` / `Profiler.EndSample` provide the same capability for Unity's Profiler window. Godot 4.3+ instruments its rendering pipeline with `RenderingDevice::push_debug_group`, visible in RenderDoc and its own performance monitor. The pattern is universal: engine code annotates its own structure, and profiling tools consume those annotations to present a semantically meaningful timeline.
+
+Smallworld follows this consensus with a deliberate design choice: **one instrumentation API, multiple sinks**. The engine defines a small set of macros that annotate code structure (scoped timers, counters, gauges). These macros produce data that flows to multiple consumers simultaneously: Tracy for deep offline analysis, an in-engine `egui` overlay for live monitoring during development, and a chrome-trace JSON export for CI integration and offline diffing. The engine never builds its own deep profiler; it builds the annotation layer and the transport, and it delegates deep analysis to tools that already do it well.
+
+### The Instrumentation API
+
+The instrumentation API is three macros:
+
+```{#lst-instrumentation-api .rust lst-cap="The instrumentation API: scopes, counters, and gauges"}
+profile_scope!("cull.shadow_views");    // scoped hierarchical timer
+counter!(DRAW_CALLS, n);                // per-frame counter
+gauge!(STREAMING_QUEUE_DEPTH, depth);   // sampled value
+```
+
+@lst-instrumentation-api shows the three primitives. `profile_scope!` creates a named scope that measures the wall-clock time of the enclosing block. The scope is hierarchical: `"cull.shadow_views"` nests under `"cull"`, which nests under the top-level frame scope. When the scope exits (via Rust's `Drop` trait on the scope guard), the elapsed time is recorded. `counter!` increments a named integer counter for the current frame: draw calls submitted, entities culled, bytes uploaded. The counter resets to zero at the start of each frame. `gauge!` sets a named value that represents a current measurement rather than a per-frame accumulation: queue depth, pool pressure, resident brick count.
+
+The **zero-cost rule** governs these macros: in shipping builds, all three compile to no-ops. The compiler eliminates the scope guards, counter increments, and gauge writes entirely. There is no conditional check, no branch, no function call: the macros expand to nothing. In development builds, the overhead per scope is nanoseconds (a `QueryPerformanceCounter` or `clock_gettime` call on scope entry and exit, plus a write to a thread-local ring buffer). Counters and gauges are atomic increments or stores to pre-allocated slots. The total per-frame overhead for instrumentation in a development build is typically under 100 microseconds, well within the noise floor of a 16 ms frame.
+
+Every execution context in the engine registers a **named thread lane**: Game, Render, game-pool workers, render-pool workers, Streaming Coordinator, Audio, and IO pool. When a scope fires on a thread, the instrumentation system attributes it to that thread's lane. This is what allows Tracy and the overlay to show a per-thread timeline: the Game Thread's scopes appear on one row, the Render Thread's on another, worker pool tasks appear as sub-lanes, and the developer can see at a glance which thread is the bottleneck.
+
+Games use the identical macros. A game system that instruments its own logic with `profile_scope!("ai.pathfinding")` appears in the same timeline, on the same thread lane, as the engine's `profile_scope!("update.physics")`. There is no separate game instrumentation API, no game-specific profiler, no special registration step. The engine's macros are public, and game code uses them directly. This ensures that a game developer investigating a frame-time spike sees the full picture: engine work and game work on the same timeline, with the same tools.
+
+### Sinks
+
+The instrumentation data flows to three sinks, each serving a different use case:
+
+**Tracy** is the deep-dive tool. Tracy is an open-source frame profiler with nanosecond resolution, GPU timeline support, memory allocation tracking, lock contention visualization, and capture-file export. It runs as a separate application that connects to the game process over a local socket. When Tracy is attached, the instrumentation macros write scope, counter, and gauge data to Tracy's ring buffer using its C API (wrapped in a thin Rust binding). Tracy renders the data as a hierarchical timeline with per-thread lanes, GPU work interleaved with CPU work, and the ability to inspect individual scopes, their call counts, and their distribution across frames.
+
+The choice to use Tracy rather than building a custom profiler is deliberate and consequential. Tracy represents over a decade of profiler engineering by Bartosz Taudul, with features (memory allocation tracking, lock contention, zone comparison, statistics, frame images) that would take years to replicate. Building a custom profiler is a common trap for engine teams: the MVP is achievable in a few weeks, but the depth required for real-world debugging (handling millions of scopes per frame, correlating CPU and GPU timelines, managing multi-gigabyte capture files) is a multi-year investment that diverts effort from the engine itself. The correct strategy is to build the annotation layer (the macros) and the transport (the thread-lane registration and ring buffer), and to delegate deep analysis to a tool that already excels at it.
+
+**The egui overlay** is the always-available live monitor. It renders directly in the engine's window as an `egui` panel, toggled by a debug key. The overlay shows a rolling frame-time graph, per-thread millisecond breakdowns, the top-N most expensive scopes, all active counters, and the **budget table**: every registered `MemoryBudget` with its limit, current usage, pressure percentage, and high-water mark. The overlay is available in any development build, on any machine, without Tracy or any external tool. It is the first thing a developer checks when something feels slow, and it is the tool that an artist or designer can read without profiling expertise.
+
+The budget table in the overlay deserves emphasis. Every `MemoryBudget` in the engine registers itself with a `BudgetRegistry` at creation time, publishing its limit, usage, and pressure as instrumentation gauges. The overlay reads whatever is registered and renders it. This is a structural guarantee: adding a new budgeted pool without registering it with the `BudgetRegistry` is not possible through the public API, because the `MemoryBudget` constructor takes a registry reference and registers itself. Budget receipts are not optional; they are a consequence of using the budget type.
+
+**Chrome-trace JSON export** is the offline and CI tool. On demand, the engine writes a JSON file in Chrome's trace-event format (the format consumed by `chrome://tracing` and Perfetto). This file can be committed to a CI artifact store, diffed between builds, and attached to bug reports. For CI, the export enables automated performance regression detection: a build that increases the p99 frame time by 10% relative to the previous build's trace can be flagged automatically. For bug reports, the export provides a complete, self-contained record of the engine's behavior during the problematic session, including thread timelines, counter values, and budget states.
+
+### GPU Timing and Cross-Domain Correlation
+
+CPU instrumentation alone is insufficient for a rendering engine. The GPU executes work asynchronously: a `queue.submit()` call returns immediately, and the actual GPU execution happens later, potentially overlapping with CPU work for the next frame. A frame-time regression may be caused entirely by GPU work, but if the instrumentation system only measures CPU time, the regression appears as "nothing changed" in the profiler.
+
+Smallworld's render thread maintains a `GpuTimingFeedback` ring: a set of timestamp queries inserted before and after each render pass, with results read back two or three frames later (GPU readback latency is inherent to the pipelined model). Each timing result is stamped with its frame index, allowing the instrumentation system to correlate GPU pass durations with the CPU frame that generated them. The same timing data feeds Tracy's GPU context, so the CPU timeline and the GPU timeline appear on the same view, aligned by frame. A developer can see that the "shadow" pass on the GPU took 3.2 ms on the same frame where the CPU's "cull.shadow_views" scope took 0.8 ms, and can reason about whether the bottleneck is CPU-side culling overhead or GPU-side shadow rendering.
+
+The timestamp query mechanism is capability-gated: not all GPUs support timestamp queries (`Capabilities::timestamp_query` is probed at startup). When timestamps are unavailable, the GPU timing ring is not created, and the instrumentation system reports no GPU data rather than incorrect data. This is the correct behavior: no data is better than misleading data, and the absence of GPU timings in the overlay is a visible signal that the developer should use an external GPU profiler on that platform.
+
+Figure \ref{fig:instrumentation-sinks} shows the complete instrumentation data flow, from engine and game code through the macro API to the three sinks, with the `BudgetRegistry` feeding the overlay's budget table.
+
+\input{figures/instrumentation-sinks.tex}
+
+
+### Frame and Resource Telemetry {#sec-telemetry}
+
+The instrumentation API provides the mechanism. The standard counter set provides the vocabulary: a fixed set of counters and gauges that every development build publishes, so that tooling (the overlay, CI regression detection, and Tracy presets) can rely on their existence.
+
+The standard set includes:
+
+- **Draw calls and instances per view.** The primary measure of rendering throughput. A regression in draw-call count often indicates a culling failure (entities that should be culled are being drawn) or a batching regression (draws that should be merged are being submitted separately).
+- **Culled counts per view.** The number of entities rejected by frustum culling, occlusion culling, and distance culling for each view. These mirror the `OcclusionFeedback` advisory data that the render thread sends back to the game thread, but they appear in the instrumentation overlay for immediate developer visibility.
+- **Brick residency.** For the Voxel Plugin: resident bricks, pinned bricks, and bricks evicted this frame. These counters are the direct readout of the streaming system's budget behavior for volumetric data.
+- **Streaming queue depth and in-flight bytes.** How many streaming requests are pending, and how many bytes are currently in the IO-to-staging-to-GPU pipeline. A steadily growing queue depth indicates that the streaming system's demand exceeds its IO or upload budget.
+- **Staging in-flight regions.** The number of staging-pool regions that have been populated by decode threads but not yet consumed by the render thread's GPU copy commands. This counter is the direct measure of the staging pool's utilization and its exposure to fence-reclamation delays.
+- **TLAS instance count.** When ray tracing is active, the number of instances in the top-level acceleration structure. A regression here may indicate that entities are being added to the TLAS that should be culled, increasing rebuild cost.
+
+Games add their own counters through the same `counter!` and `gauge!` macros. A game that tracks "active AI agents" or "physics constraint count" as custom counters gets those values in the same overlay, on the same timeline, with the same CI regression detection, without any engine modification.
 
 #### Designing for Diagnosis
 
-- Show how stable names, scopes, and correlation IDs make cross-thread work understandable.
-- Connect observability to AI-assisted development and reproducible performance work.
+The instrumentation API and standard counters provide the data. But data alone is not diagnosis. When a frame-time regression appears in a CI trace, a developer must be able to trace it to a specific system, on a specific thread, processing a specific set of entities, during a specific phase of the frame. This requires three design properties that the instrumentation system must support:
 
-## Reliability Is an Engine Capability
+**Stable names.** Every scope, counter, and gauge has a string name that is stable across builds. `"cull.shadow_views"` is the same scope in today's build and in last month's build. Automated regression detection compares scope durations by name; if names change with refactors, the comparison breaks and regressions go undetected. The naming convention is hierarchical and dot-separated: `"update.physics"`, `"extract.mesh_delta"`, `"render.gbuffer"`. New scopes are added freely; existing scopes are renamed only when the code they measure is itself renamed, and the rename is noted in the commit message for CI tooling to handle.
 
-- Establish tests, deterministic scenarios, and reproducible builds as architecture work rather than a final verification phase.
-- Explain why cross-domain contracts need executable checks as well as prose and type signatures.
+**Scoped correlation.** When a scope nests inside another scope, the instrumentation system records the parent-child relationship. This produces a call tree, not a flat list. A developer seeing a 2 ms spike in `"update"` can expand it to find that `"update.physics"` took 1.8 ms, expand further to find that `"update.physics.broad_phase"` took 1.5 ms, and identify the broad-phase collision detection as the bottleneck without reading any code. The call tree is what makes scope-based profiling practical at scale: without nesting, a flat list of hundreds of scopes is unnavigable.
 
-### Tests at Architectural Boundaries
+**Cross-thread identity.** When the game thread dispatches work to the game worker pool, the worker's scopes must be attributable to the dispatching scope. If the physics system dispatches island solves to workers, the worker scopes should appear as children of `"update.physics"` in the profiler, even though they execute on different threads. Tracy supports this through its "fiber" and "source location" features; the engine's worker-pool integration passes the parent scope's identity to child tasks so that the profiler can reconstruct the logical call tree across thread boundaries.
 
-- Cover unit, integration, property, and regression tests, with each form aimed at a different class of engine failure.
-- Use fixed seeds, controlled clocks, and recorded inputs to make simulation and streaming failures repeatable.
+These properties are not features of the instrumentation API itself; they are design disciplines that the engine's use of the API must follow. The API provides scopes, counters, and gauges. The engine's code must use them consistently: stable names, proper nesting, and cross-thread correlation. The result is an engine where every frame produces a self-describing record of what happened, why, and how long each part took, in enough detail to diagnose a performance regression from a CI artifact without reproducing it locally.
 
-#### Configuration, Features, and Delivery
 
-- Treat configuration as validated data with clear ownership, defaults, and versioning rules.
-- Cover feature policy, continuous integration, packaging, and cross-platform release checks as the path from a working engine to a dependable deliverable.
+## Reliability Is an Engine Capability {#sec-reliability}
+
+The preceding sections established systems for naming resources, limiting their consumption, and observing their behavior. These systems are designed to be correct, but correctness is not self-maintaining. Code changes. New subsystems are added. Existing contracts are extended. A change that is correct in isolation may violate a cross-domain invariant that was established three chapters ago. Without executable verification, the engine's architectural contracts are prose that developers must remember, not constraints that the build enforces.
+
+Reliability in a game engine is not testing in the conventional software-engineering sense of "write unit tests for your functions." It is a layered verification strategy that targets different classes of failure at different architectural boundaries. A unit test that verifies a quaternion multiplication is valuable but narrow: it catches arithmetic bugs in a single function. An integration test that verifies the extract step produces correct render descriptions from a known world state catches contract violations at the game-render boundary, a class of bug that no unit test can reach. A scenario test that replays a recorded input sequence through the full engine loop and checks that the simulation produces the same world state catches emergent failures: bugs that appear only when physics, streaming, rendering, and input interact over hundreds of frames.
+
+The game industry's relationship with testing has historically been complicated. Studios often rely heavily on manual QA, with testers playing the game to find bugs. Manual QA is irreplaceable for subjective quality (does the game feel good? is the difficulty curve right? are the textures readable at 4K?), but it is inefficient for regression detection. A tester cannot re-play every possible input sequence after every commit. Automated testing fills this gap, but adopting it in a game engine context requires adapting conventional testing practices to the engine's specific constraints: non-determinism from floating-point arithmetic, frame-rate dependence, GPU-specific behavior, and the difficulty of defining "correct output" for a visual medium.
+
+Studios that have invested in automated testing report substantial returns. Bungie has described using recorded input sessions to regression-test *Halo*'s gameplay systems across builds. Naughty Dog's presentations on *The Last of Us Part II* testing infrastructure describe deterministic replay systems used to verify gameplay correctness. Epic Games' testing framework for Unreal Engine includes automated functional tests that run gameplay scenarios and verify outcomes. The common thread is that effective game-engine testing requires infrastructure, specifically the deterministic replay and fixed-timestep foundations described in Chapters 4 and 5, applied to verification.
+
+
+### Tests at Architectural Boundaries {#sec-tests}
+
+Smallworld's testing strategy is organized by the architectural boundary each test targets, not by the conventional unit/integration/end-to-end taxonomy. The boundaries in the engine are the load-bearing contracts: the game-render firewall, the thread-ownership rules, the budget invariants, the streaming residency guarantees, and the frame lifecycle's phase ordering. Each boundary has failure modes that tests at that boundary can detect, and that tests at other boundaries cannot.
+
+**Component and math tests** verify the correctness of individual data transformations: quaternion operations, frustum plane extraction, AABB intersection, budget arithmetic, and generation-counter logic. These tests are conventional unit tests: pure functions with known inputs and expected outputs, no engine state, no threads, no GPU. They run in milliseconds and catch arithmetic errors, off-by-one mistakes, and edge-case handling failures. Every engine has these; they are necessary but insufficient.
+
+**Contract tests** verify that the interfaces between domains produce correct results when composed. A contract test for the extract step creates a `World` with known entities, runs the extract function, and verifies that the resulting `FramePacket` contains the expected deltas. A contract test for the budget system allocates until the budget is exhausted and verifies that the pool's arbitration response (evict, lower LOD, or reject) matches the configured policy. A contract test for the handle system allocates, frees, reallocates, and verifies that stale handles produce `None` rather than the new occupant's data.
+
+Contract tests are the most architecturally valuable category, because they verify the engine's cross-domain invariants. A unit test for the slot map verifies that the data structure works. A contract test for entity despawn verifies that despawning an entity, which involves the World, the ChangeTracker, the extract step, the render scene, and the GPU resource pools, produces the correct downstream effects across all participating systems. These tests catch the bugs that slip between domains: a change to the despawn order that is correct from the World's perspective but violates the extract step's assumption that physics bodies are cleaned up before component removal.
+
+**Scenario tests** exercise the full engine loop with recorded inputs and deterministic replay. A scenario test loads a known scene, feeds a recorded input sequence (the `Input` snapshots described in Chapter 5), runs the engine for a fixed number of frames with a fixed timestep, and verifies properties of the resulting world state: entity positions, resource residency, budget pressure, counter values. Because the timestep is fixed and the input is recorded, the simulation is deterministic (subject to the caveats about floating-point non-associativity discussed in Chapter 4), and the test produces the same result on every run.
+
+Scenario tests catch the emergent failures that no other test category can reach. A streaming regression where the camera movement pattern causes the streaming coordinator to thrash between two LOD levels, consuming upload bandwidth without making progress. A physics instability where a specific arrangement of rigid bodies causes the solver to diverge after 300 frames. An input-handling bug where the intent pattern drops a jump request during a specific frame-rate/timestep combination. These failures emerge from the interaction of multiple systems over time, and they require the full engine loop, with all its phases and cross-domain communication, to reproduce.
+
+Figure \ref{fig:test-boundary-layers} illustrates the three test layers and the failure classes each targets.
+
+\input{figures/test-boundary-layers.tex}
+
+**Fixed seeds, controlled clocks, and recorded inputs** are the infrastructure that makes scenario tests reproducible. The engine's random number generators accept explicit seeds, so procedural content generation produces the same output on every run. The time source is injectable: scenario tests provide a synthetic clock that advances by exactly `fixed_dt` per tick, eliminating variation from wall-clock timing. Input is replayed from recordings, as described in Chapter 5. Together, these controls eliminate the three primary sources of non-determinism in gameplay: randomness, timing, and input. The remaining source, floating-point non-associativity in parallel reductions, is mitigated by ensuring that parallel work is partitioned deterministically (same partition boundaries, same reduction order) and by using comparison tolerances in scenario-test assertions.
+
+#### Property Tests
+
+Some engine invariants are best expressed as properties that must hold for all valid inputs, rather than as specific input-output pairs. **Property-based testing** (also called generative testing or fuzzing) generates random inputs within specified bounds and verifies that the invariant holds for each. The test framework generates thousands of cases, and if any case fails, it reports the minimal failing input.
+
+For a game engine, property tests are particularly valuable for:
+
+- **Handle invariants.** For any sequence of `insert`, `remove`, and `get` operations on a slot map, a `get` with a stale handle must never return another occupant's data. The property test generates random operation sequences and verifies the invariant exhaustively.
+- **Budget accounting.** For any sequence of `allocate` and `free` operations, `used_bytes` must never exceed `limit_bytes` after a successful `can_allocate` check, and must never go negative after a `free`.
+- **Serialization round-trips.** For any valid component value, `deserialize(serialize(value)) == value`. This catches encoding bugs, precision loss, and missing fields that specific-case tests might miss.
+
+
+#### Configuration, Features, and Delivery {#sec-configuration}
+
+An engine's reliability extends beyond runtime correctness into the infrastructure that delivers it to players. Configuration management, feature policy, continuous integration, and cross-platform packaging are each potential failure points, and each deserves the same architectural attention as the runtime systems they support.
+
+**Configuration is validated data.** Engine and game configuration (window size, audio quality, rendering tier, budget limits, keybindings) is not a bag of key-value pairs. It is a typed, versioned data structure with explicit defaults, range constraints, and an owner. Each configuration domain (video settings, audio settings, input bindings, engine internals) has a schema that defines the valid values, and the engine validates configuration against the schema at load time. Invalid values produce a diagnostic (logged through the instrumentation system) and fall back to defaults, never to undefined behavior. The schema is also what the settings UI reads: it knows the valid range for "render scale" because the schema declares it, not because a programmer hardcoded it in a slider widget.
+
+Configuration versioning matters for long-lived games. When a new engine version changes the default shadow resolution from 2048 to 4096, existing user configurations that specify 2048 should be respected (the user made a deliberate choice), but configurations that relied on the old default should pick up the new one. The engine handles this by versioning the configuration schema: a user's saved configuration records the schema version it was written against, and a migration step runs at load time to handle schema changes. Migrations are small, testable functions, and they are tested in CI alongside the schema they migrate.
+
+**Feature policy** determines which engine capabilities are available in a given build. A shipping build excludes the `egui` overlay, the Tracy connection, and the chrome-trace export (the zero-cost macros compile to no-ops). A development build includes all three. A playtest build may include the overlay but not Tracy. These policies are compile-time feature flags (Rust's `cfg` features), not runtime toggles: the dead code is eliminated entirely, ensuring that shipping builds pay zero cost for development instrumentation. The feature matrix is tested in CI: the build system compiles the engine in each supported configuration (shipping, development, playtest) on each target platform, and each configuration must compile cleanly and pass its applicable test suite.
+
+**Continuous integration** runs the full test suite, compiles all feature configurations, and archives performance traces for regression detection. The CI pipeline is the engine's last line of defense before a change reaches the team or the player. A CI run that takes ten minutes catches most regressions within the PR review cycle. A CI run that takes two hours catches regressions before the next playtest. The tradeoff is wall-clock time versus coverage; the engine's test suite should be structured so that the fast tests (component tests, contract tests, compilation checks) run first and fail fast, while the slow tests (scenario tests, cross-platform compilation) run in parallel and fail with detailed diagnostics.
+
+**Packaging and delivery** close the loop. A shipping build is a cooked asset package, a compiled engine binary with shipping feature flags, and a platform-specific installer or archive. The build system verifies that the cooked assets match the engine's expected formats, that no development-only assets leak into the package, and that the binary size is within the target platform's constraints. For console platforms, the build system additionally checks compliance with the platform holder's packaging requirements (file layout, icon specifications, content ratings metadata). These checks are automated: a developer should not need to remember that PlayStation requires a specific directory structure for DLC content. The build system knows, because the packaging specification is part of the engine's configuration.
+
+
+## Chapter Summary {.unnumbered}
+
+This chapter established four infrastructure systems that the rest of the engine depends on:
+
+1. **Identity.** Generational handles decouple resource identity from physical storage. Slot-map arenas provide O(1) access with use-after-free detection through generation counters. The type system prevents cross-type handle confusion at compile time, and the thread-ownership model prevents concurrent slot-map access structurally. Handles are cheap to copy, safe to serialize, and safe to hold across frames and thread boundaries.
+
+2. **Budgets.** The `MemoryBudget` struct gives every resource pool a named limit, current usage, and high-water mark. Arbitration responses (evict LRU, lower LOD, reject) transform silent resource exhaustion into explicit, logged decisions. The `BudgetRegistry` ensures that every budget publishes its state as an instrumentation gauge, closing the loop between allocation and observability. Budget configuration is data, not code, enabling per-platform and per-hardware-tier profiles.
+
+3. **Instrumentation.** Three macros (`profile_scope!`, `counter!`, `gauge!`) annotate engine and game code with zero shipping-build cost. Data flows to Tracy (deep analysis), the egui overlay (live monitoring with a budget table), and chrome-trace export (CI regression detection). GPU timing feedback unifies CPU and GPU timelines. The standard counter set provides a stable vocabulary for automated performance comparison across builds.
+
+4. **Reliability.** Tests target architectural boundaries: component tests for pure logic, contract tests for cross-domain invariants, and scenario tests for emergent failures under deterministic replay. Property tests verify handle and budget invariants exhaustively. Configuration is validated, versioned, and migrated. Feature policy is compile-time. CI compiles all configurations, runs all test layers, and archives performance traces.
+
+The next chapter turns to the **resource pipeline and virtual filesystem**: how assets travel from authored source content through import, cooking, and the virtual filesystem to become runtime-ready resources identified by the handles and managed by the budgets established here.
+
+
+## Review Questions {.unnumbered}
+
+1. Explain why a generational index prevents the ABA problem for resource handles. Describe the specific sequence of events (allocate, free, reallocate, stale access) and what each participant observes.
+
+2. A `MemoryBudget` reports `pressure() == 0.95` for the texture pool. The streaming system wants to upload a new texture that would push usage over the limit. Describe the arbitration sequence: what decisions does the pool make, in what order, and what happens if each response is insufficient?
+
+3. Why does the architecture specify that "zero references makes an asset evictable, not evicted"? Describe a gameplay scenario where eagerly freeing zero-reference assets would cause a visible problem for the player.
+
+4. The instrumentation macros compile to no-ops in shipping builds. What would be the consequences of leaving them active? Consider CPU overhead, memory overhead, and security surface.
+
+5. Explain the difference between a counter and a gauge in the instrumentation system. Give an example of a metric that is correctly modeled as a counter and one that is correctly modeled as a gauge, and explain why the other type would be wrong for each.
+
+6. A scenario test replays a recorded input sequence and compares the resulting world state to a reference. The test passes on the developer's machine but fails on the CI server. List three possible sources of non-determinism that could cause this failure, and describe how the engine's infrastructure mitigates each.
+
+7. The `BudgetRegistry` ensures that every `MemoryBudget` automatically publishes its state as instrumentation gauges. Why is this structural guarantee (enforced by the constructor API) preferable to a convention (documented in a coding standard)?
+
+8. Describe a failure mode that a contract test can catch but a unit test cannot, and a failure mode that a scenario test can catch but a contract test cannot. Be specific about which systems interact and how the failure manifests.
+
+9. The chapter states that Rust eliminates low-level memory-safety bugs but not capacity exhaustion. Explain the practical difference: what class of bugs does the borrow checker prevent, and what class requires the `MemoryBudget` infrastructure regardless of language?
+
+10. A game ships on a console with 8 GB of total memory, of which the OS reserves 2 GB. The engine must distribute the remaining 6 GB across GPU pools (meshes, textures, render targets), CPU pools (asset cache, streaming buffers), and a staging pool. Describe the factors that determine the budget for each pool, and how the engine should respond when total demand exceeds 6 GB.

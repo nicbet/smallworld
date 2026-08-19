@@ -1,0 +1,71 @@
+# Accessibility
+
+> **Draft chapter map.** A dedicated treatment of accessibility as a cross-cutting engine capability, covering motor, visual, auditory, and cognitive accommodations, the legal and certification landscape, and how the engine provides primitives that games compose into accessibility features.
+
+## Accessibility Is an Engineering Discipline
+
+- Accessibility is not a feature list bolted on after the game is finished. It is a set of engineering constraints that, like performance or security, must be considered throughout the architecture.
+- The shift from afterthought to first-class concern: *The Last of Us Part II* (2020) shipped over 60 accessibility options. *Celeste* (2018) shipped an assist mode without compromising its identity. The Game Awards introduced a Best Accessibility category in 2020.
+- The business case: a broader player base, positive press, awards recognition, and legal compliance.
+
+## The Legal and Certification Landscape
+
+- **CVAA (21st Century Communications and Video Accessibility Act):** US law, enforcement began for games in 2019. Requires accessible input options for games with communication features.
+- **Xbox Accessibility Guidelines (XAGs):** Influence certification for Xbox and Game Pass titles. Explicitly recommend full input remapping, text-to-speech, subtitle customization, and high-contrast modes.
+- **Sony PlayStation accessibility requirements:** Similar provisions for PlayStation certification.
+- **EU European Accessibility Act (EAA):** Coming into effect, will affect games sold in EU markets.
+- Certification is not optional: a game that fails accessibility requirements may not ship on major platforms.
+
+## Motor Accessibility
+
+- **Input remapping** (covered in Chapter 5's action system): full rebinding, device-agnostic actions, persistent user overrides.
+- **Hold-to-toggle conversion:** "Hold to aim" becomes "press once to aim, press again to stop." Engine primitive: a binding modifier that converts held state to toggled state.
+- **Sensitivity curves:** Per-axis adjustable curves for stick and mouse input. Engine primitive: a curve function applied in the binding evaluation pipeline.
+- **One-handed control presets:** Remap an entire half of the controller. Engine primitive: preset action map overlays loaded from `user://`.
+- **Auto-aim and aim assist:** Varying levels of targeting assistance. Typically game code, but the engine can provide aim-assist primitives (target queries, magnetism curves).
+- **Adaptive controllers:** Microsoft's Xbox Adaptive Controller and similar devices. The engine's `DeviceFilter` and `ControllerId` system handles these as standard HID devices with custom bindings.
+
+## Visual Accessibility
+
+- **Colorblind modes:** Protanopia, deuteranopia, tritanopia simulation and correction. Engine-level post-process filter or UI color palette swaps.
+- **High-contrast modes:** Reduce visual complexity, increase UI element contrast. Engine provides a UI theming system that games can override.
+- **Font scaling and readability:** Adjustable font sizes, dyslexia-friendly font options. Engine provides a text rendering system with scalable fonts.
+- **Subtitle customization:** Size, color, background opacity, speaker identification. Engine provides subtitle rendering primitives in the UI system.
+- **Reduced motion:** Disable or reduce screen shake, camera bob, particle intensity. Engine provides a motion-intensity scalar that systems can read.
+- **Screen magnification:** Zoom into portions of the screen. Engine-level render target scaling.
+
+## Auditory Accessibility
+
+- **Subtitles and closed captions:** Not just dialogue, but sound effect descriptions ("[explosion nearby]", "[footsteps behind]").
+- **Visual indicators for audio cues:** Directional threat indicators, visual beat cues in rhythm games. Game-level, but the engine provides the audio event system that triggers them.
+- **Mono audio and balance adjustment:** Engine-level audio mixing option for single-ear hearing.
+- **Volume sliders per category:** Music, SFX, dialogue, ambient. Standard engine audio architecture (Chapter 20).
+
+## Cognitive Accessibility
+
+- **Difficulty scaling:** Not just enemy health, but pacing, puzzle hints, navigation assistance.
+- **Objective reminders and waypoints:** Reduce memory load.
+- **Simplified UI modes:** Reduce information density.
+- **Tutorial replay and pause-anywhere:** Structural engine support (pause is already a time-scale-zero operation from Chapter 4).
+
+## Engine Primitives vs. Game Policy
+
+- The engine provides accessibility *primitives*: binding modifiers, color palette systems, font scaling, audio mixing categories, motion-intensity scalars, subtitle rendering.
+- The game provides accessibility *policy*: which options to expose, how to present them, what presets to offer, what the default experience looks like.
+- The settings screen is game code. The engine provides the data types and persistence path (`user://`). The game provides the UI, matching the game's visual style.
+- Design question: should the engine ship with a default accessibility settings panel that games can customize, or only provide primitives?
+
+## Testing Accessibility
+
+- Automated testing: colorblind simulation screenshots, contrast ratio checks, font-size minimum verification.
+- Manual testing: involve players with disabilities in playtesting. The AbleGamers Charity and SpecialEffect provide consultation services.
+- Certification checklists: map engine primitives to XAG and CVAA requirements.
+
+## Industry References
+
+- *The Last of Us Part II* (Naughty Dog, 2020): 60+ accessibility options, industry benchmark.
+- *Celeste* (Matt Makes Games, 2018): Assist mode in a challenging game.
+- *Forza Horizon 5* (Playground Games, 2021): Sign language interpreter for cutscenes, screen reader support for menus.
+- *God of War Ragnarok* (Santa Monica Studio, 2022): Over 70 accessibility settings.
+- Microsoft Xbox Accessibility Guidelines: public documentation.
+- AbleGamers Accessible Player Experiences (APX) design patterns.

@@ -46,9 +46,13 @@ book:
        - chapters/19-animation-systems.qmd
        - chapters/20-audio-architecture.qmd
        - chapters/21-networking-and-multiplayer.qmd
-    - part: "Tools and User Interface"
+       - chapters/22-replay-and-determinism.qmd
+    - part: "Player Experience and Production"
       chapters:
-       - chapters/22-user-interface-and-tooling.qmd
+       - chapters/23-developer-tools-and-diagnostics.qmd
+       - chapters/24-user-interface.qmd
+       - chapters/25-accessibility.qmd
+       - chapters/26-game-production.qmd
   appendices:
    - appendices/a-mathematics-for-game-engines.qmd
    - appendices/b-glossary.qmd

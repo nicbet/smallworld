@@ -1,0 +1,52 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Named budgets (top row)
+  \node[engine-package, text width=1.8cm, minimum height=0.7cm] (gpu) at (0,2.8)
+    {\textbf{GPU Memory}};
+  \node[engine-package, text width=1.8cm, minimum height=0.7cm] (upload) at (2.8,2.8)
+    {\textbf{Upload BW}};
+  \node[engine-package, text width=1.8cm, minimum height=0.7cm] (frame) at (5.6,2.8)
+    {\textbf{Frame Time}};
+  \node[engine-package, text width=1.8cm, minimum height=0.7cm] (stream) at (8.4,2.8)
+    {\textbf{Streaming IO}};
+
+  % Arbiter (center)
+  \node[engine-boundary, minimum width=9.6cm, minimum height=0.85cm] (arbiter) at (4.2,1.3)
+    {Budget Arbiter};
+
+  % Arrows from budgets to arbiter
+  \draw[-Latex, line width=0.5pt] (gpu.south) -- ($(arbiter.north west)!0.12!(arbiter.north east)$);
+  \draw[-Latex, line width=0.5pt] (upload.south) -- ($(arbiter.north west)!0.38!(arbiter.north east)$);
+  \draw[-Latex, line width=0.5pt] (frame.south) -- ($(arbiter.north west)!0.62!(arbiter.north east)$);
+  \draw[-Latex, line width=0.5pt] (stream.south) -- ($(arbiter.north west)!0.88!(arbiter.north east)$);
+
+  % Decisions (bottom row)
+  \node[engine-package, text width=1.7cm, minimum height=0.65cm, fill=black!5] (evict) at (1.2,-0.2)
+    {\textbf{Evict LRU}};
+  \node[engine-package, text width=1.7cm, minimum height=0.65cm, fill=black!5] (lod) at (4.2,-0.2)
+    {\textbf{Lower LOD}};
+  \node[engine-package, text width=2.0cm, minimum height=0.65cm, fill=black!5] (reject) at (7.2,-0.2)
+    {\textbf{Reject Alloc}};
+
+  \draw[-Latex, line width=0.5pt] ($(arbiter.south west)!0.18!(arbiter.south east)$) -- (evict.north);
+  \draw[-Latex, line width=0.5pt] (arbiter.south) -- (lod.north);
+  \draw[-Latex, line width=0.5pt] ($(arbiter.south west)!0.82!(arbiter.south east)$) -- (reject.north);
+
+  \node[font=\sffamily\tiny\itshape, black!50] at (4.2,0.5) {arbitration decisions};
+
+  % Gauge feedback loop to overlay
+  \node[engine-package, text width=2.2cm, minimum height=0.7cm] (overlay) at (11.8,1.3)
+    {\textbf{Overlay}\\{\tiny budget table}};
+
+  \draw[-Latex, line width=0.4pt, dotted] (arbiter.east) -- (overlay.west)
+    node[midway, above, font=\sffamily\tiny\itshape, black!50] {gauges};
+
+  % Each budget struct annotation
+  \node[font=\sffamily\tiny, black!50, text width=3.0cm, anchor=north west] at (0,-1.1)
+    {Each budget: \texttt{limit}, \texttt{used},\\\texttt{high\_water\_mark}. Registered\\as gauges at creation.};
+\end{tikzpicture}
+\caption{Budget arbitration. Named budgets feed a central arbiter that makes explicit capacity decisions. Every budget publishes its state as a gauge, closing the loop between allocation and observability.}
+\label{fig:budget-arbitration}
+\end{figure}
+\FloatBarrier

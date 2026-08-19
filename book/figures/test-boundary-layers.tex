@@ -1,0 +1,39 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Outer ring: Scenario Tests
+  \node[engine-layer, minimum width=12.0cm, minimum height=5.2cm, rounded corners=12pt] (scenario) at (4.5,0) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (4.5,2.4) {Scenario Tests};
+  \node[font=\sffamily\tiny, black!55, anchor=north] at (4.5,2.05) {full-frame deterministic replay};
+
+  % Middle ring: Integration Tests
+  \node[engine-package, minimum width=8.0cm, minimum height=3.0cm, rounded corners=8pt] (integration) at (4.5,-0.15) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=north] at (4.5,1.2) {Integration Tests};
+  \node[font=\sffamily\tiny, black!55, anchor=north] at (4.5,0.85) {cross-domain contracts};
+
+  % Inner ring: Unit Tests
+  \node[engine-package, minimum width=4.0cm, minimum height=1.3cm, rounded corners=5pt, fill=black!8] (unit) at (4.5,-0.35) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (4.5,-0.1) {Unit Tests};
+  \node[font=\sffamily\tiny, black!55] at (4.5,-0.5) {component logic};
+
+  % Annotations: what each layer catches (right side)
+  \draw[-Latex, line width=0.4pt, black!50] (9.2,1.8) -- (10.3,1.8);
+  \node[font=\sffamily\tiny, black!60, anchor=west, text width=3.2cm] at (10.4,1.8)
+    {Emergent failures across\\frames (load $\rightarrow$ stream $\rightarrow$ render)};
+
+  \draw[-Latex, line width=0.4pt, black!50] (8.0,0.4) -- (10.3,0.4);
+  \node[font=\sffamily\tiny, black!60, anchor=west, text width=3.2cm] at (10.4,0.4)
+    {Contract violations at\\thread and domain boundaries};
+
+  \draw[-Latex, line width=0.4pt, black!50] (6.2,-0.35) -- (10.3,-0.8);
+  \node[font=\sffamily\tiny, black!60, anchor=west, text width=3.2cm] at (10.4,-0.8)
+    {Logic errors in isolated\\functions and data structures};
+
+  % Left side: test infrastructure
+  \node[font=\sffamily\tiny, black!45, text width=2.8cm, anchor=north east] at (-0.3,1.8)
+    {Fixed seeds,\\controlled clocks,\\recorded inputs};
+\end{tikzpicture}
+\caption{Testing at architectural boundaries. Unit tests verify component logic in isolation. Integration tests check cross-domain contracts. Scenario tests exercise full-frame deterministic replay to catch emergent failures.}
+\label{fig:test-boundary-layers}
+\end{figure}
+\FloatBarrier

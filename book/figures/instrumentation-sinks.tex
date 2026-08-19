@@ -1,0 +1,53 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Source: engine and game code
+  \node[engine-layer, minimum width=3.8cm, minimum height=0.7cm] (engine) at (-1.0,2.8) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (-1.0,2.8) {Engine Systems};
+  \node[engine-layer, minimum width=3.8cm, minimum height=0.7cm] (game) at (-1.0,1.8) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (-1.0,1.8) {Game Systems};
+
+  % Instrumentation API (center)
+  \node[engine-boundary, minimum width=4.6cm, minimum height=1.4cm] (api) at (4.8,2.3) {};
+  \node[font=\sffamily\bfseries\scriptsize] at (4.8,2.85) {Instrumentation API};
+  \node[font=\sffamily\tiny, black!65] at (4.8,2.45) {\texttt{profile\_scope!()}};
+  \node[font=\sffamily\tiny, black!65] at (4.8,2.1) {\texttt{counter!()}\quad\texttt{gauge!()}};
+  \node[font=\sffamily\tiny\itshape, black!45] at (4.8,1.7) {zero-cost in shipping builds};
+
+  \draw[-Latex, line width=0.5pt] (engine.east) -- (2.45,2.8);
+  \draw[-Latex, line width=0.5pt] (game.east) -- (2.45,1.8);
+
+  % BudgetRegistry
+  \node[engine-package, text width=2.4cm, minimum height=0.7cm] (budget) at (4.8,0.3)
+    {\textbf{BudgetRegistry}\\{\tiny limit, used, peak}};
+
+  \draw[-Latex, line width=0.4pt, dotted] (budget.north) -- (4.8,1.5)
+    node[midway, right, font=\sffamily\tiny\itshape, black!50] {gauges};
+
+  % Sinks (right side)
+  \node[engine-package, text width=2.6cm, minimum height=0.7cm] (tracy) at (10.2,3.2)
+    {\textbf{Tracy}\\{\tiny zones, GPU, memory}};
+  \node[engine-package, text width=2.6cm, minimum height=0.7cm] (overlay) at (10.2,2.0)
+    {\textbf{egui Overlay}\\{\tiny budget table, top-N}};
+  \node[engine-package, text width=2.6cm, minimum height=0.7cm] (trace) at (10.2,0.8)
+    {\textbf{Trace Export}\\{\tiny chrome JSON, CI}};
+
+  \draw[-Latex, line width=0.5pt] (7.1,2.8) -- (tracy.west);
+  \draw[-Latex, line width=0.5pt] (7.1,2.3) -- (overlay.west);
+  \draw[-Latex, line width=0.5pt] (7.1,1.8) -- (trace.west);
+
+  % GPU timeline unification
+  \node[engine-package, text width=2.6cm, minimum height=0.55cm, fill=black!5] (gputime) at (10.2,-0.3)
+    {\textbf{GPU Timings}\\{\tiny readback ring}};
+
+  \draw[-Latex, line width=0.4pt, dotted] (gputime.north) -- (trace.south);
+  \draw[-Latex, line width=0.4pt, dotted] (gputime.north west) -- (overlay.south);
+  \draw[-Latex, line width=0.4pt, dotted] ($(gputime.north west)+(-0.2,0.2)$) -- (tracy.south);
+
+  % Label for sinks
+  \node[font=\sffamily\tiny\itshape, black!40] at (10.2,3.85) {sinks};
+\end{tikzpicture}
+\caption{One instrumentation API, multiple sinks. Engine and game code use the same macros; the data flows to Tracy for deep profiling, to the in-engine overlay for live monitoring, and to trace exports for CI and offline analysis.}
+\label{fig:instrumentation-sinks}
+\end{figure}
+\FloatBarrier

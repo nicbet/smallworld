@@ -1,0 +1,40 @@
+\begin{figure}[!tb]
+\centering
+\begin{tikzpicture}[>=Latex, x=1cm, y=1cm]
+  % Logical lifetime (outermost bar)
+  \node[engine-layer, minimum width=13.0cm, minimum height=1.1cm] (logical) at (5.0,2.4) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (-0.8,2.4) {Logical Lifetime};
+  \node[font=\sffamily\tiny, black!60, anchor=west] at (0.2,2.15) {game holds \texttt{AssetHandle<T>}};
+
+  % CPU residency (middle bar, shorter)
+  \node[engine-package, minimum width=9.5cm, minimum height=1.1cm] (cpu) at (4.0,0.9) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (-0.8,0.9) {CPU Residency};
+  \node[font=\sffamily\tiny, black!60, anchor=west] at (0.2,0.65) {decoded asset data in RAM};
+
+  % GPU residency (innermost bar, shortest)
+  \node[engine-package, minimum width=6.0cm, minimum height=1.1cm, fill=black!8] (gpu) at (3.0,-0.6) {};
+  \node[font=\sffamily\bfseries\scriptsize, anchor=west] at (-0.8,-0.6) {GPU Residency};
+  \node[font=\sffamily\tiny, black!60, anchor=west] at (0.2,-0.85) {device-local buffer or texture};
+
+  % Right-edge markers showing extent
+  \draw[line width=0.3pt, black!30, dashed] (11.5,2.9) -- (11.5,-1.2);
+  \node[font=\sffamily\tiny\itshape, black!40, anchor=south, rotate=90] at (11.7,0.7) {handle dropped};
+
+  \draw[line width=0.3pt, black!30, dashed] (8.75,1.5) -- (8.75,-1.2);
+  \node[font=\sffamily\tiny\itshape, black!40, anchor=south, rotate=90] at (8.95,0.0) {CPU eviction};
+
+  \draw[line width=0.3pt, black!30, dashed] (6.0,0.3) -- (6.0,-1.2);
+  \node[font=\sffamily\tiny\itshape, black!40, anchor=south, rotate=90] at (6.2,-0.5) {GPU eviction};
+
+  % Eviction policy annotations
+  \node[font=\sffamily\tiny, black!50, text width=4.5cm, anchor=north west] at (0,-1.5)
+    {Eviction is policy, not automatic. Zero references makes\\an asset \textit{evictable}, not evicted. The budget arbiter\\decides when to reclaim, based on memory pressure.};
+
+  % Left-edge marker
+  \draw[line width=0.3pt, black!30, dashed] (-1.5,2.9) -- (-1.5,-1.2);
+  \node[font=\sffamily\tiny\itshape, black!40, anchor=south, rotate=90] at (-1.3,0.7) {load requested};
+\end{tikzpicture}
+\caption{Resource lifetime layers. Logical ownership (handle), CPU residency (decoded data in RAM), and GPU residency (device-local memory) are independently managed. Eviction between layers is policy, not automatic.}
+\label{fig:resource-lifetime-layers}
+\end{figure}
+\FloatBarrier

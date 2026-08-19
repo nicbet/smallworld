@@ -1,0 +1,39 @@
+# Developer Tools and Diagnostics
+
+> **Draft chapter map.** Treat inspection, profiling, debugging overlays, and editor infrastructure as production systems that the engine provides, not afterthoughts bolted on at the end.
+
+## Developer Tools Are Production Systems
+
+- Explain inspection, profiling, asset authoring, and debugging as requirements for a usable engine, not luxuries.
+- Connect tools to the observability architecture from Chapter 6 (named budgets, structured diagnostics, frame telemetry).
+- A game engine without tools is a library. The tools are what make it an engine.
+
+### Debug Overlays and Diagnostic Visualization
+
+- Frame-time graphs, GPU budget bars, streaming-state indicators, physics debug draw, audio source visualization.
+- These run inside the engine's render pipeline and read the same telemetry data that the budget system produces.
+- Overlay rendering as an engine service: game code can register custom debug draws without owning the render path.
+
+### Profiling and Instrumentation
+
+- CPU timings, GPU timings, allocation pressure, queue depth, streaming state.
+- Distinguish current measurements from delayed or advisory feedback.
+- Connection to Chapter 6's instrumentation architecture: stable names, scopes, and correlation IDs make cross-thread work understandable.
+
+### Immediate-Mode and Retained Tools
+
+- Compare rapid diagnostic interfaces (immediate-mode debug UI for in-game inspection) with persistent editor models (retained-mode property editors, scene graphs).
+- Frame the choice around workflow and state ownership rather than fashion.
+- Immediate-mode is right for transient diagnostic panels. Retained-mode is right for editor state that persists across frames.
+
+### Building an Editor as an Engine Application
+
+- Show how the same public APIs, handles, and plugins can support an editor.
+- The editor is an application built on the engine, not a separate architecture. It uses GameContext, the asset system, and the render pipeline like any game would.
+- This avoids a divergent tool architecture where the editor can do things the game cannot (or vice versa).
+
+## Extensibility and AI-Assisted Development
+
+- Connect clear module boundaries, tests, and diagnostics to productive AI-assisted peer programming.
+- Explain how architecture makes incremental implementation and review tractable.
+- A durable engine is an understandable engine: revisit the book's thesis that proven ideas survive, accidental legacy gets discarded, and modern tools are chosen deliberately.

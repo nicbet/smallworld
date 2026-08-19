@@ -1,0 +1,67 @@
+# Video Game Production
+
+> **Draft chapter map.** Walks the reader through the production process that turns engine capabilities into a shipped game. Covers the full lifecycle from vision to post-release, with emphasis on the phases, gates, and disciplines that keep a project on track.
+
+## The Production Lifecycle
+
+- Game development follows a well-established lifecycle that the industry arrived at through decades of shipped titles: vision, pre-production, prototypes, vertical slice, full production, alpha, beta, release candidate, release, and post-release.
+- These are not dates on a schedule. Each phase answers a different question, and the gate between phases is a decision about whether the answer is good enough to proceed.
+- The lifecycle applies regardless of team size. A solo developer and a 200-person studio go through the same phases, but the formality and documentation differ.
+
+### Vision: "What Game Are We Making?"
+
+- Establish the small set of things that must remain true: game pillars, target audience, core loop, visual identity, world structure, progression philosophy, tone, and player fantasy.
+- The output is not a 500-page GDD. It is a compact body of canonical direction that later decisions can be evaluated against.
+- Gate: leave this phase when everyone can answer "what is this game?" in approximately the same way.
+
+### Pre-Production: "Can This Game Work?"
+
+- Attack uncertainty, not content volume. Identify the risky questions and build prototypes specifically to answer them.
+- A prototype is cheap and disposable. Its purpose is proving a design or technical hypothesis, not becoming final production content. "Does this work?" is a different question from "Can we ship this?"
+- Unity's best-practice guidance emphasizes prototyping as a way of testing ideas efficiently before committing to larger-scale creation.
+- Gate: leave pre-production when the major unanswered questions have become manageable risks rather than guesses.
+
+### The Vertical Slice: "Can We Actually Make This?"
+
+- A vertical slice is a production prototype: a small portion of the real game built through the complete production pipeline at approximately target quality.
+- It answers two questions simultaneously. The creative proof: "Is this game good?" The production proof: "Can we make this game repeatedly at an affordable rate?"
+- The vertical slice is the most important phase for establishing production confidence, because it forces every discipline (art, design, engineering, audio, narrative, QA) to cooperate through the actual pipeline.
+- Gate: leave when the slice demonstrates both the experience and the process used to manufacture it.
+
+### Full Production: "Make the Game"
+
+- The longest phase. The project shifts from inventing the factory to running the factory.
+- Good production creates finished vertical chunks continuously rather than assembling disciplines sequentially. Each chunk crosses disciplines and gives real feedback early.
+- Asset and content pipelines matter here: a biome, a creature, a quest should each have a repeatable production pipeline from brief through integration to QA.
+
+### The Work-Item Lifecycle
+
+- Every individual piece of content follows the same flow: backlog, design, prototype/blockout, approval, production, integration, review, playtest/QA, polish, done.
+- "Done" means the player-facing experience works, not that one discipline finished their part.
+- Design review happens before expensive production. Changing a silhouette on a sketch costs nothing. Changing it after modeling, UVs, texturing, rigging, 20 animations, hitboxes, and VFX is painful. Stage gates prevent expensive downstream rework.
+
+### Alpha, Beta, and Release
+
+- **Alpha:** every intended major system and the complete game progression exist and can be played end-to-end. Not polished, but complete. The question shifts from "what should we add?" to "what prevents this from shipping?"
+- **Beta:** stabilization. Stop inventing, make it good. Bugs, crashes, performance, memory, balance, UX, accessibility, localization, hardware compatibility. Every change must make the existing game more shippable.
+- **Release candidate:** a build treated as if it were the released product. No random improvements enter the build. Protect stability.
+- **Release:** package the known-good RC. Preserve source revision, data revision, build configuration, toolchain version, and release artifacts for reproducibility.
+- **Post-release:** crash fixes, save corruption fixes, compatibility, performance patches, balance, quality-of-life. New content enters a new production cycle.
+
+## Playtesting Runs Through the Entire Process
+
+- Do not build the game first and test at the end. Design, implementation, playtest, and iteration form a continuous loop.
+- Important assumptions need empirical answers, not debates. These become playtest questions with measurable outcomes.
+
+## Engine Team and Game Team Meet at a Contract
+
+- The engine provides capabilities. The game production process turns design intent into finished, tested player experience.
+- The contract flows: game need, engine requirement, engine feature, engine tests, versioned capability, game uses it.
+- Engine builds capabilities. Game production builds experiences from those capabilities. Technology should not push features into the game merely because they are interesting to implement. The game pulls technology into existence.
+
+## Production Scaling
+
+- Do not scale production until the vertical slice has proven both the experience and the process used to manufacture it.
+- The first time through a content type (biome, creature, quest chain) is expensive because the process is being designed simultaneously. The second time is cheaper. The tenth time is routine.
+- Every content type should have a repeatable pipeline and a completeness contract (what must a biome satisfy? what must a creature deliver?).
+- 80% established vocabulary, 20% new idea per content unit. Data-driven production can accidentally produce formulaic content without novelty.
