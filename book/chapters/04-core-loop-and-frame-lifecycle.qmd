@@ -47,7 +47,7 @@ The durable solution, arrived at independently by every major engine, is to main
 
 - Godot exposes `delta` as the per-frame variable delta in `_process()` and a separate `_physics_process()` with its own fixed step.
 
-The names differ, but the separation is universal: if you do not distinguish these clocks at the data level, you end up distinguishing them in ad-hoc conditional logic scattered across every system.
+The names differ, and so does the default. Unity and Godot run their stock physics on the fixed clock, while Unreal's stock gameplay tick is variable-delta, with fixed cadence arriving through physics substepping (a bounded, semi-fixed subdivision of the frame delta) or the opt-in fixed-rate asynchronous physics tick. What is universal is the separation itself: if you do not distinguish these clocks at the data level, you end up distinguishing them in ad-hoc conditional logic scattered across every system. And where the fixed clock is opt-in rather than the default, the burden of choosing it correctly shifts to each game team, which is how frame-rate-dependent physics can still ship on an engine that nominally provides a fixed step.
 
 The three clocks serve distinct consumers, as shown in Figure \ref{fig:three-clocks}.
 
@@ -128,7 +128,7 @@ The fixed timestep introduces a visual problem. Because fixed steps do not align
 
 The solution to this problem is interpolation: each entity that participates in fixed-rate updates stores two transforms. First, the state at the end of the previous fixed tick and second, the state at the end of the current one. The FIXED phase rotates current into previous before applying each new step, so both values are always available. When the engine is ready to hand off visual state to the renderer, it computes an interpolation factor, conventionally called alpha, from the fraction of a fixed step that remains unconsumed in the accumulator.
 
-An `alpha` value of `0.0` means the renderer is displaying right at the last completed tick. An `alpha` of `0.5` means it is halfway to the next one. The engine blends the previous and current transforms using this factor (linear interpolation for position and scale, spherical interpolation for rotation) and writes the blended result into the render-facing data. The Render Thread never sees the raw fixed-tick state - it receives smooth transforms at whatever frequency it renders.
+An `alpha` value of `0.0` means the renderer is displaying right at the last completed tick. An `alpha` of `0.5` means it is halfway to the next one. The engine blends the previous and current transforms using this factor (linear interpolation for position and scale, spherical interpolation for rotation) and writes the blended result into the render-facing data. The Render Thread never sees the raw fixed-tick state; it receives smooth transforms at whatever frequency it renders.
 
 Two properties of this scheme deserve attention:
 
@@ -152,7 +152,7 @@ fn interpolated_transform(
 ```
 
 ::: {.callout-tip appearance="simple" title="Extrapolation vs. Interpolation"}
-Some engines extrapolate forward from the current state rather than interpolating between previous and current. Extrapolation avoids the one-tick visual lag but introduces prediction errors: an object that reverses direction will overshoot visually before the next fixed tick corrects it. Interpolation is the safer default. It trades a small, constant, imperceptible lag for guaranteed visual smoothness without prediction artifacts. Smallworld uses interpolation.
+The alternative is extrapolating forward from the current state instead of interpolating between previous and current, and among the major engines only Unity ships it: `Rigidbody.interpolation` offers an `Extrapolate` mode per rigid body that predicts the pose from current velocity. Extrapolation avoids the one-tick visual lag but introduces prediction errors, and Unity's own documentation names the artifact: a fast-moving or direction-reversing object overshoots, then visibly snaps back when the next fixed tick corrects it. Interpolation is the safer choice. It trades a small, constant, imperceptible lag for guaranteed visual smoothness without prediction artifacts. Smallworld uses interpolation, engine-wide rather than per-body, because a uniform policy keeps every entity's visual timeline consistent under one alpha.
 :::
 
 ### Time Policies
@@ -182,7 +182,7 @@ An overlapped pipeline lets both threads run concurrently. The game tick for fra
 
 The trade-off is one frame of input latency. When the player presses a button during frame *N*, the game processes it in frame *N*'s INPUT phase, but the visual result does not appear until frame *N*'s packet reaches the Render Thread and is drawn, by which time the Game Thread has moved on to frame *N+1*. At 60 fps, this adds approximately 16.67 ms to the input-to-photon path. For most games, this is an acceptable cost for the throughput benefit. For latency-critical applications (competitive multiplayer, VR), the engine can offer lockstep mode as an alternative.
 
-The pattern is well-established in the industry. Unreal Engine 5 takes it further with a three-frame pipeline that separates the Game Thread, the Render Thread (which builds command lists), and the RHI Thread (which submits to the graphics API) [@epic-parallel-rendering]. Naughty Dog's engine, as described by Christian Gyrling at GDC 2015, uses a fiber-based architecture that allows even finer-grained overlap across frames [@gyrling-gdc2015]. Smallworld uses a simpler two-stage variant: the Render Thread handles both command-list building and API submission, because `wgpu` already abstracts the graphics API and handles device-level submission internally. The result is a cleaner two-stage pipeline with the same fundamental overlap property that Unreal's three-stage design provides.
+The pattern is well-established in the industry. Unreal Engine 5 takes it further with a three-frame pipeline that separates the Game Thread, the Render Thread (which builds command lists), and the RHI Thread (which submits to the graphics API) [@epic-parallel-rendering]. Unity reaches overlap by configuration rather than architecture: its render thread translates the main thread's intermediate command stream, and its graphics-jobs modes fan command generation and conversion out to worker threads, so the depth of the pipeline is a per-project setting. Naughty Dog's engine, as described by Christian Gyrling at GDC 2015, uses a fiber-based architecture that allows even finer-grained overlap across frames [@gyrling-gdc2015]. Smallworld uses a simpler two-stage variant: the Render Thread handles both command-list building and API submission, because `wgpu` already abstracts the graphics API and handles device-level submission internally. The result is a cleaner two-stage pipeline with the same fundamental overlap property that Unreal's three-stage design provides.
 
 ### Game Thread Phases
 
@@ -288,7 +288,7 @@ fn submit_with_throttle(
 }
 ```
 
-The cost of bounding the queue is that the GPU may momentarily idle between frames if submission is late, but in an engine with dynamic resolution scaling, which will discuss next, we can keep the GPU inside budget and that idle window rarely opens.
+The cost of bounding the queue is that the GPU may momentarily idle between frames if submission is late, but in an engine with dynamic resolution scaling, which we discuss next, the GPU stays inside budget and that idle window rarely opens.
 
 ### Dynamic Resolution as a Control Loop
 
@@ -306,7 +306,7 @@ The important insight is that DRS should be a **control loop**, not a threshold 
 
 3. **Step-limited changes.** The resolution scale changes by at most a fixed increment per frame. This keeps the temporal upscaler's history valid, because large jumps in resolution invalidate accumulated history and produce a visible pop.
 
-In Smallworld, we collect these controls into a single configuration struct alongside vsync, target frame time, queue depth, and the latency mode selector - as shown in @lst-pacing-config.
+In Smallworld, we collect these controls into a single configuration struct alongside vsync, target frame time, queue depth, and the latency mode selector, as shown in @lst-pacing-config.
 
 ```{#lst-pacing-config .rust lst-cap="Pacing configuration"}
 struct PacingConfig {
@@ -320,8 +320,8 @@ struct PacingConfig {
 struct DrsConfig { enabled: bool, min_scale: f32 }
 
 enum LatencyMode {
-    Standard,    // v1: queue-depth throttle + DRS
-    LowLatency,  // v2: + predictive tick pacing
+    Standard,    // queue-depth throttle + DRS
+    LowLatency,  // + predictive tick pacing
 }
 ```
 
@@ -376,6 +376,8 @@ So far, we have described how data flows from the Game Thread to the Render Thre
 - **GPU-computed results the game needs.** Some gameplay systems issue queries that only the GPU can answer efficiently: picking via depth-buffer readback, GPU-driven physics results, or compute-shader outputs that feed back into AI or visibility. These results must travel from GPU memory, through the Render Thread, and back to the Game Thread. As an example, particle systems simulated entirely on the GPU via compute shaders may need to report live particle counts or collision events back to the game: a fire-spread system needs to know how many embers landed on flammable surfaces, but that intersection test ran on the GPU, not the CPU.
 
 None of this data can travel on the forward packet channel, which flows in the wrong direction. Instead, it flows backward through a dedicated **feedback channel**, separate from both the data-plane packet channel and the control channel, so that it can arrive asynchronously without blocking either thread.
+
+The major engines expose pieces of this information as profiling surfaces rather than as a formalized channel. Unity's `FrameTimingManager` reports per-frame CPU and GPU timings to scripts, with GPU results arriving several frames late and occasionally not at all, the same delay semantics the readback ring below imposes; Unity names dynamic resolution and adaptive performance as its intended consumers. Unreal's stat system and CSV profiler stream similar telemetry. Smallworld differs in making the feedback a typed, per-frame value on its own channel, because its consumers are engine and game systems running in the loop (streaming, the DRS controller, the quality policy), not only humans reading a profiler.
 
 The feedback has two important properties that game code must respect:
 
@@ -528,6 +530,8 @@ Given the invariant, an engine has two options for responding to device loss, an
 
 **Recovery walk.** The engine pauses the pipeline, recreates the device, recreates resource pools, re-requests content through the existing asset and streaming paths (the same paths used for normal loading), lets transient data rebuild over subsequent frames, and resumes. The player sees a brief hitch, not a crash. This path is possible precisely because the "GPU is a cache" invariant guarantees that every piece of GPU state can be reconstructed from CPU-side sources. The work is additive (the recovery walk reuses existing loading infrastructure, not a parallel recovery system) but the testing surface is large: every GPU resource type, every async upload path, and every piece of transient state must be verified to rebuild correctly. Unreal Engine and Unity both implement recovery walks for their supported platforms, and console certification on some platforms requires it.
 
+Smallworld's design commits to the recovery walk. The invariant makes it purely additive over the normal loading paths, so the architecture reserves nothing for it: no parallel recovery system, no special-cased resource types. Fatal with grace remains what it should be in any engine, the fallback of last resort when recovery itself fails, with the save intact either way.
+
 
 
 ### Minimize, Focus Loss, and Render Throttling
@@ -561,7 +565,7 @@ This chapter has made the engine's control and lifecycle contracts concrete:
 
 2. **The overlapped pipeline doubles throughput.** The Game Thread and Render Thread operate on different frames simultaneously, synchronized only by a bounded channel at the extract/receive boundary. Each thread runs a fixed sequence of six phases per tick, and the phase ordering is a correctness invariant, not a stylistic choice. Lockstep mode is available for latency-critical applications.
 
-3. **Pacing is a control problem.** Three composable loops (GPU queue-depth throttle, dynamic resolution scaling, and predictive tick pacing) keep the pipeline smooth. DRS is the first line of defense, keeping the GPU inside budget proactively. The queue-depth throttle is the backstop, bounding worst-case latency deterministically. Predictive pacing is a future refinement for minimum input-to-photon latency. Vsync and software limiters govern the overall cadence through designed backpressure.
+3. **Pacing is a control problem.** Three composable loops (GPU queue-depth throttle, dynamic resolution scaling, and predictive tick pacing) keep the pipeline smooth. DRS is the first line of defense, keeping the GPU inside budget proactively. The queue-depth throttle is the backstop, bounding worst-case latency deterministically. Predictive pacing is the opt-in tool for minimum input-to-photon latency. Vsync and software limiters govern the overall cadence through designed backpressure.
 
 4. **Lifecycle events are not gameplay events.** Resize, device loss, minimize, and shutdown travel on an out-of-band control channel, applied at frame boundaries by the Render Thread. The "GPU is a cache" invariant ensures that device loss is recoverable in principle. The five-stage teardown protocol (stop simulation while services live, quiesce producers, drain the pipeline, stop services, destroy) prevents hangs, data loss, and ordering-dependent crashes.
 
