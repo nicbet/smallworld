@@ -1,0 +1,3 @@
+# Walkthrough (summary)
+
+Nitpick repairs from the audits: ch01's review question 7 rewritten against actual ch01 content (wgpu vs in-house RHI) instead of the orphaned "GPU is a cache" concept; ch05's cursor-capture phrasing corrected to winit's actual Locked semantics; the input-frame-timing figure caption now notes CLEAR's elision. Also codified the no-roadmap rule into the book skill (voice bullet + checklist item) so future chapter passes inherit it. Details in the diff.

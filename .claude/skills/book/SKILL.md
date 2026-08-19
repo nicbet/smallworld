@@ -41,6 +41,12 @@ decision, compare industry approaches, and use Smallworld as the concrete exampl
 - Authoritative but not dogmatic: present the reasoning, not just the conclusion.
 - **NO emojis.**
 - **NO em-dashes** (no `---`, no `—`). Link clauses naturally with colons, commas, semicolons, or restructure the sentence.
+- **NO roadmap language.** The book describes end-point architecture in timeless
+  terms; implementation staging lives in `docs/architecture/capability-tiers.md`
+  as explicit tier marks, never in chapter prose. Do not write "planned",
+  "v1/v2", "future refinement", "starting architecture", or "for now". Where
+  alternatives really are staged, argue the designed end-point on its merits
+  and present the alternatives as points on one architecture or spectrum.
 
 ### Didactic pyramid
 
@@ -135,6 +141,7 @@ After writing, verify:
 - [ ] Every `\ref{fig:...}` has a matching `\label{fig:...}` in the TikZ file.
 - [ ] Every `[@citation-key]` exists in `book/references.bib`.
 - [ ] No em-dashes (`---` or `—`) anywhere in the text.
+- [ ] No roadmap language (planned / v1 / v2 / future / for now); staging belongs in `capability-tiers.md`.
 - [ ] No emojis.
 - [ ] Opening connects to the previous chapter.
 - [ ] Summary tees up the next chapter.

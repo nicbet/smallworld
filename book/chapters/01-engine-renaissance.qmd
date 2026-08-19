@@ -306,6 +306,6 @@ Modern engines are products, workflows, and technical architectures at once. The
 
 6. The chapter lists several constraints that mature C++ engines carry. Pick two and explain why a new engine built in Rust on `wgpu` can start without them.
 
-7. What does it mean to say that GPU memory should be treated as a cache rather than authoritative state? What recovery capability does this enable?
+7. The chapter argues that Smallworld adopts `wgpu` rather than building an in-house rendering hardware interface. What does an engine gain and give up with this choice, and under what circumstances would building an in-house abstraction be justified?
 
 8. The chapter cautions that AI-generated code must "earn its place through review, tests, captures, and measurement." Why is this especially important for engine code compared to application code?

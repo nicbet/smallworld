@@ -54,7 +54,7 @@
   \draw[line width=0.35pt, black!50] (4.45,-0.35) -- (4.45,-0.45);
   \node[font=\sffamily\tiny\itshape, black!45, anchor=north] at (4.45,-0.45) {all read Frame N snapshot};
 \end{tikzpicture}
-\caption{Input frame timing. OS events arrive irregularly throughout a frame. The INPUT phase drains them into a frozen snapshot at tick start. All subsequent phases (FIXED, UPDATE, LATE, EXTRACT) read the same immutable snapshot. Events arriving after the drain are held for the next frame.}
+\caption{Input frame timing. OS events arrive irregularly throughout a frame. The INPUT phase drains them into a frozen snapshot at tick start. All subsequent phases (FIXED, UPDATE, LATE, EXTRACT; the CLEAR phase is elided here) read the same immutable snapshot. Events arriving after the drain are held for the next frame.}
 \label{fig:input-frame-timing}
 \end{figure}
 \FloatBarrier
