@@ -1,24 +1,24 @@
 # Input and Platform Interaction
 
-Chapter 4 defined the engine's fixed-phase loop and showed that the INPUT phase drains platform events into a polled snapshot. In this chapter, we follow that signal from the operating system to the game system that consumes it.
+Have you ever played a console port of a video game on PC and felt the mouse move like it was swimming through syrup? *Elden Ring*'s PC launch in 2022 is the textbook example: the game was a masterpiece of open-world design sitting on top of a deeply uncomfortable keyboard-and-mouse experience.
 
-Have you ever played a console port of a video game on PC and felt the mouse move like it was swimming through syrup? *Elden Ring*'s PC launch in 2022 is the textbook example: the game was a masterpiece of open-world design sitting on top of a deeply uncomfortable keyboard-and-mouse experience. Mouse movement felt sluggish and disconnected because the input layer was filtering it through a system tuned for analog sticks, applying smoothing and acceleration curves that made sense on a gamepad but felt wrong with a mouse. On-screen prompts displayed Xbox button icons regardless of whether the player was using a controller. Key rebinding was limited. The community response was immediate: mods to fix mouse input appeared within days, and FromSoftware spent months patching improvements. It's not that Elden Ring's input system didn't work - it simply had not been designed for the platform it shipped on. *Elden Ring* was far from alone. *Dark Souls*' original PC port had similar issues a decade earlier. *No Man's Sky* launched with restricted rebinding. *Cyberpunk 2077* exposed input latency on PC that console players never noticed. These are not obscure edge cases - they are the predictable consequences of an input system that was built for one device and one context, then asked to serve many.
+Mouse movement felt sluggish and disconnected because the input layer was filtering it through a system tuned for analog sticks, applying smoothing and acceleration curves that made sense on a gamepad but felt wrong with a mouse. Key rebinding was limited. The community response was immediate: mods to fix mouse input appeared within days, and FromSoftware spent months patching improvements. It's not that Elden Ring's input system didn't work; it simply had not been designed for the platform it shipped on. *Elden Ring* was far from alone, even within its own studio. *Sekiro: Shadows Die Twice* had shipped on PC three years earlier showing Xbox button prompts to players using a keyboard and mouse, and *Dark Souls*' original PC port had similar mouse problems a decade before that. *No Man's Sky* launched with restricted rebinding. These are not obscure edge cases; they are the predictable consequences of an input system that was built for one device and one context, then asked to serve many.
 
-Every engine reads keyboard, mouse and controller inputs and tutorials cover it in a page. An modern game engine lets the player rebind keys, swap between keyboard and gamepad mid-session, open a menu without accidentally firing a weapon, record input for replay, and present a consistent experience on platforms with different conventions, all without exposing the windowing library's types to gameplay code. The naive approach, where game systems read raw key codes from a global singleton, fails on every one of those requirements. The robust approach separates platform signals from engine input, engine input from game intent, and game intent from the fixed-timestep simulation that ultimately consumes it. Each layer has a distinct purpose, and the boundaries between them are load-bearing.
+Every modern game engine reads keyboard, mouse and controller inputs, but most tutorials stop where the hard parts begin: letting the player rebind keys, swap between keyboard and gamepad mid-session, open a menu without accidentally firing a weapon, record input for replay, and present a consistent experience on platforms with different conventions, all without exposing the windowing library's types to gameplay code. The naive approach, where game systems read raw key codes from a global singleton, fails on every one of those requirements. The robust approach separates platform signals from engine input, engine input from game intent, and game intent from the fixed-timestep simulation that ultimately consumes it. Each layer has a distinct purpose, and the boundaries between them are load-bearing.
 
-In this chapter, we make those boundaries precise. We begin with the platform events that arrive at the engine's edge (window focus, display changes, device connections, raw key and axis data) and show how the INPUT phase quarantines them into a single consistent snapshot. We then build from that snapshot upward through device polling, action mapping, context stacks, and the fixed-tick intent pattern. Along the way we address mouse capture, controller dead zones, replay, and cross-platform rebinding. By the end, the game sees a stable, frame-synchronized vocabulary of named actions and continuous axes, and the platform library that produced the signals is invisible.
+In this chapter, we make those boundaries precise. We begin with the platform events that arrive at the engine's edge (window focus, display changes, device connections, raw key and axis data) and show how the INPUT phase quarantines them into a single consistent snapshot. We then build from that snapshot upward through device polling, action mapping, context stacks, and the fixed-tick edge machinery. Along the way we address mouse capture, controller dead zones, replay, and cross-platform rebinding. By the end, the game sees a stable, frame-synchronized vocabulary of named actions and continuous axes, and the platform library that produced the signals is invisible.
 
 
 ## What You Will Learn in This Chapter {.unnumbered}
 
 - **The Quarantine Principle:** Why the INPUT phase exists, what it normalizes, and how it converts an irregular stream of OS callbacks into a single deterministic snapshot.
-- **Device Polling:** The `Input` struct's held/pressed/released semantics, edge detection via previous-frame state, analog inputs, and the fixed-size controller array.
-- **Action Mapping:** Named, rebindable, device-agnostic actions; the `ActionMap`, `ActionDef`, and `Binding` types; composite bindings and dead zones.
+- **Device Polling:** The `Input` struct's held/pressed/released semantics, edge detection via previous-frame state, analog inputs, and the slot-stable controller list.
+- **Action Mapping:** Named, rebindable, device-agnostic actions built from `ActionMap`, `ActionDef`, and `Binding` types, with composite bindings and dead zones.
 - **The Context Stack:** How gameplay, menus, consoles, and editors share input through a stack of maps with passthrough control, implementing UI focus and capture.
 - **Rebinding and Persistence:** Action maps as data-driven assets, user overrides serialized to `user://`, and the settings screen as an ordinary consumer of the action system.
-- **Frame Timing and Fixed-Tick Edges:** When events arrive, when the engine samples them, and the documented intent pattern that prevents edges from being missed or double-fired across fixed ticks.
-- **Input for Replay and Determinism:** Why the polled snapshot makes recording trivial, and how replay connects to the deterministic fixed timestep from Chapter 4.
-- **Cross-Platform Policy:** How one action vocabulary accommodates different devices, why remapping is a player-facing quality feature, and where IME text composition fits.
+- **Frame Timing and Fixed-Tick Edges:** When events arrive, when the engine samples them, and the tick-stamped edge queries that prevent edges from being missed or double-fired across fixed ticks.
+- **The Input Foundation for Replay:** Why the polled snapshot is the input-side prerequisite for deterministic replay, and how Chapter 22 builds on it.
+- **Cross-Platform Policy:** How one action vocabulary accommodates different devices, how the engine tracks device switching and adapts on-screen prompts, and why text input travels a separate path from the action system.
 - **The Platform Boundary:** How Rust types isolate `winit` behind stable engine data, and why the platform adapter is a thin shell rather than a deep abstraction.
 
 
@@ -26,7 +26,7 @@ In this chapter, we make those boundaries precise. We begin with the platform ev
 
 A game engine sits between the operating system and the game, and the operating system delivers a continuous, irregular stream of platform events: window resize notifications, keyboard interrupts, mouse movements, controller connections, display-scale changes, focus transitions, and more. These events arrive at the operating system's own cadence: some are batched, some are immediate, some are synthesized by the window manager, and their ordering guarantees vary by platform. The engine's first responsibility is to receive this stream and convert it into something the game can consume reliably.
 
-The distinction between platform events and game input is fundamental. A platform event is a notification from the OS: "the user pressed the key whose scan code is 0x1E" or "the window lost focus." A game input is a question the game asks: "is the jump action active this frame?" or "what is the current mouse delta?" The first is pushed; the second is polled. The first uses platform-specific identifiers; the second uses a game-defined vocabulary. The engine's job is to bridge the gap cleanly, so that game systems never need to understand the platform's event model, timing, or type system.
+The distinction between platform events and game input is fundamental. A platform event is a notification from the OS: "the user pressed the key whose scan code is 0x1E" or "the window lost focus." A game input is a question the game asks: "is the jump action active this frame?" or "what is the current mouse delta?" The first is pushed, the second is polled. The first uses platform-specific identifiers, the second uses a game-defined vocabulary. The engine's job is to bridge the gap cleanly, so that game systems never need to understand the platform's event model, timing, or type system.
 
 ### The Quarantine Principle
 
@@ -44,9 +44,9 @@ The quarantine principle serves three purposes:
 
 \input{figures/input-quarantine.tex}
 
-The quarantine principle is the standard modern answer to a problem that every engine faces. Unreal Engine's `FSlateApplication` processes platform messages in a dedicated input-processing pass and populates `FInputState` before any gameplay tick begins. Unity's `InputSystem` captures device state at frame start. Godot's `Input` singleton processes OS events and exposes polled state through methods like `is_action_pressed()`. The implementation details differ, but the principle is universal: absorb the OS's callback-driven model at the boundary and expose a polled-snapshot model to the game.
+The quarantine principle is the standard modern answer to a problem that every engine faces [@gregory2026game]. Unreal Engine's `FSlateApplication` processes platform messages in a dedicated input-processing pass, accumulating key and axis state in `UPlayerInput` before any gameplay tick reads it. Unity's `InputSystem` captures device state at frame start. Godot's `Input` singleton processes OS events and exposes polled state through methods like `is_action_pressed()`. The implementation details differ, but the principle is universal: absorb the OS's callback-driven model at the boundary and expose a polled-snapshot model to the game.
 
-In Smallworld, the quarantine is a single function that runs at the top of every tick. @lst-quarantine shows the drain-and-freeze step: previous state is rotated, the platform event buffer is drained into engine types, and single-frame transitions like "just pressed" or "just released are computed by diffing the two frames.
+In Smallworld, the quarantine is a single function that runs at the top of every tick. @lst-quarantine shows the drain-and-freeze step: previous state is rotated, the platform event buffer is drained into engine types, and single-frame transitions like "just pressed" or "just released" are computed by diffing the two frames.
 
 \floattop
 ```{#lst-quarantine .rust lst-cap="The quarantine: drain platform events and freeze the snapshot"}
@@ -65,6 +65,9 @@ fn quarantine(input: &mut Input, adapter: &mut PlatformAdapter) {
         // accumulate, never replace
         input.mouse.delta += d;
       }
+      PlatformEvent::CursorMoved(p) => {
+        input.mouse.position = p;   // state, not a delta
+      }
       PlatformEvent::MouseButton { btn, pressed } => {
         input.mouse.buttons.set(btn, pressed);
       }
@@ -76,6 +79,12 @@ fn quarantine(input: &mut Input, adapter: &mut PlatformAdapter) {
           c.set_axis(axis, value);
         }
       }
+      PlatformEvent::ControllerConnected { info } => {
+        input.occupy_free_slot(info);  // first None slot, or grow
+      }
+      PlatformEvent::ControllerDisconnected { id } => {
+        input.controllers[id] = None;  // hole keeps other indices stable
+      }
       // ... window events update WindowState, not Input
     }
   }
@@ -83,7 +92,7 @@ fn quarantine(input: &mut Input, adapter: &mut PlatformAdapter) {
 }
 ```
 
-Note what happens inside the loop: mouse deltas are accumulated (summed), not replaced. Keyboard state is written into a current-frame bitfield while the previous frame's bitfield is preserved for edge computation. Controller axes are written directly (they are state, not deltas). Platform types (`PlatformEvent`) exist only inside this function; by the time it returns, the `Input` struct contains only engine-owned values.
+Note what happens inside the loop: mouse deltas are accumulated (summed), not replaced, while cursor position is a state write that records the last reported location. Keyboard state is written into a current-frame bitfield while the previous frame's bitfield is preserved for edge computation, and OS key auto-repeat is harmless here: a repeat event sets a bit that is already set, so no spurious edge is produced. Controller axes are written directly (they are state, not deltas). Connection events manage controller slots: a new device occupies the first free slot, and a disconnect leaves a `None` hole rather than shifting later entries, so every other controller keeps its index. Platform types (`PlatformEvent`) exist only inside this function. By the time it returns, the `Input` struct contains only engine-owned values.
 
 ### The Platform Adapter
 
@@ -93,11 +102,11 @@ The depth of this adapter varies significantly across engines, and the variation
 
 These deep abstractions are not relics. They remain essential for any engine that ships on consoles, because console platforms expose proprietary input APIs under NDA that no open-source library can wrap. An engine targeting PlayStation, Xbox, or Switch must provide a platform-specific adapter backend for each, and that backend must conform to the platform holder's SDK and certification requirements. The deep abstraction layer exists precisely so that the engine above it does not need to know which backend is active.
 
-For an engine that targets desktop platforms (Windows, macOS, Linux), mature cross-platform libraries can absorb much of the platform-specific work that a deep abstraction would otherwise need to handle. For instance, Smallworld uses `winit` as its desktop platform adapter - a Rust crate that provides cross-platform window creation, event delivery, and display management. It abstracts the platform's native windowing API (Win32 on Windows, Cocoa on macOS, X11/Wayland on Linux) behind a single event loop and a set of Rust types. The engine receives `winit::event::Event` variants for keyboard input, mouse movement, window focus, resize, scale-factor changes, and device connections.
+For an engine that targets desktop platforms (Windows, macOS, Linux), mature cross-platform libraries can absorb much of the platform-specific work that a deep abstraction would otherwise need to handle. For instance, Smallworld uses `winit` as its desktop platform adapter: a Rust crate that provides cross-platform window creation, event delivery, and display management. It abstracts the platform's native windowing API (Win32 on Windows, Cocoa on macOS, X11/Wayland on Linux) behind a single event loop and a set of Rust types. The engine receives `winit::event::Event` variants for keyboard input, mouse movement, window focus, resize, scale-factor changes, and device connections.
 
-What `winit` provides is a normalized event stream. What it does *not* provide is the game-facing input model. `winit` delivers events one at a time through a callback; the engine needs a polled snapshot. `winit` identifies keys by platform-dependent scan codes and logical key values; the engine needs a stable `KeyCode` enum. `winit` reports mouse position in window coordinates; the engine may need to track deltas, accumulate scroll, or enforce cursor capture. And `winit` knows nothing about controllers; the engine pairs it with `gilrs` or a similar library for gamepad input. A console port would replace `winit` and `gilrs` entirely with platform-specific backends, but the `Input` struct and everything above it would remain unchanged, because the quarantine principle ensures that no platform type leaks past the adapter boundary.
+What `winit` provides is a normalized event stream. What it does *not* provide is the game-facing input model. `winit` delivers events one at a time through a callback, but the engine needs a polled snapshot. `winit` identifies keys by platform-dependent scan codes and logical key values, but the engine needs a stable `KeyCode` enum. `winit` reports mouse position in window coordinates, yet the engine may need to track deltas, accumulate scroll, or enforce cursor capture. And `winit` knows nothing about controllers, so the engine pairs it with `gilrs` or a similar library for gamepad input.
 
-The platform adapter is therefore a thin shell: it drains the `winit` event loop and any controller library, translates their types into engine-internal representations, and populates the `Input` struct. The shell is small (a few hundred lines) and it is the only code in the engine that imports platform-specific types. Everything above it speaks the engine's vocabulary. The engine's stability comes from the types it defines, not from the adapter beneath them. A console port rewrites the adapter against that platform's SDK; the `Input` struct, the action system, the context stack, and every game system that reads input remains unchanged.
+The platform adapter is therefore a thin shell: it drains the `winit` event loop and any controller library, translates their types into engine-internal representations, and populates the `Input` struct. The shell is small (a few hundred lines) and it is the only code in the engine that imports platform-specific types. Everything above it speaks the engine's vocabulary. The engine's stability comes from the types it defines, not from the adapter beneath them. A console port rewrites the adapter against that platform's SDK, but the `Input` struct, the action system, the context stack, and every game system that reads input remains unchanged.
 
 ### Window and Display State
 
@@ -122,44 +131,37 @@ Smallworld captures platform state in a dedicated `WindowState` struct as shown 
 
 ## From Device Signals to Game Intent {#sec-device-to-intent}
 
-With the quarantine principle in place, the engine has a clean snapshot of device state for this frame. The next question is how game systems consume it. Smallworld provides two layers: a raw device-polling API that exposes held/pressed/released semantics for every key, button, and axis; and an action-mapping layer that translates device signals into named, rebindable, device-agnostic game actions. The raw layer exists for tools, debug input, and the rare system that genuinely needs device-level detail. The action layer is the standard game-facing API.
+With the quarantine principle in place, the engine has a clean snapshot of device state for this frame. The next question is how game systems consume it. Smallworld provides two layers. The first is a raw device-polling API that exposes held/pressed/released semantics for every key, button, and axis. The second is an action-mapping layer that translates device signals into named, rebindable, device-agnostic game actions. The raw layer exists for tools, debug input, and the rare system that genuinely needs device-level detail. The action layer is the standard game-facing API.
 
 ### The Raw Polling API
 
 Beneath any action-mapping or intent layer, every engine provides a raw device-polling API: a way to ask, for any key, button, or axis, "what is its state right now?" This layer exists because not every consumer of input needs the abstraction of named actions. Debug tools, editor viewports, profiling overlays, and the occasional system that genuinely needs device-level detail all query raw device state directly. The layer is also the foundation on which higher abstractions are built: the action mapping system ultimately resolves its queries by reading raw state from the snapshot.
 
-The shape of this API is consistent across engines. Unity's `Keyboard.current[Key.W].isPressed` and `Mouse.current.delta.ReadValue()` query device state directly from the current frame's snapshot. Godot's `Input.is_key_pressed()` and `Input.get_axis()` do the same through a singleton. Unreal's `APlayerController::IsInputKeyDown()` reads raw key state beneath the Enhanced Input layer. In each case, the API is polled (the game asks questions; it does not register callbacks) and frame-coherent (every query within a tick returns values from the same snapshot).
+The shape of this API is consistent across engines. Unity's `Keyboard.current[Key.W].isPressed` and `Mouse.current.delta.ReadValue()` query device state directly from the current frame's snapshot. Godot's `Input.is_key_pressed()` and `Input.get_axis()` do the same through a singleton. Unreal's `APlayerController::IsInputKeyDown()` reads raw key state beneath the Enhanced Input layer. In each case, the API is polled (the game asks questions rather than registering callbacks) and frame-coherent (every query within a tick returns values from the same snapshot).
 
-Smallworld's raw polling API follows this consensus. The `Input` struct is the engine's per-frame snapshot of all connected devices. @lst-input-struct defines the struct and its query methods for keyboard state, mouse state, and controller state.
+Smallworld's raw polling API follows this consensus. @lst-input-struct defines the `Input` struct, which holds per-frame state for the keyboard, mouse, and all connected controllers.
 
 ```{#lst-input-struct .rust lst-cap="The Input struct: per-frame device snapshot"}
 struct Input {
     keyboard:    KeyboardState,
     mouse:       MouseState,
-    controllers: Vec<ControllerState>,
-}
-
-impl Input {
-    fn key_held(&self, key: KeyCode) -> bool;
-    // true on the frame the key goes down
-    fn key_pressed(&self, key: KeyCode) -> bool;
-    // true on the frame the key goes up
-    fn key_released(&self, key: KeyCode) -> bool;
-    fn mouse_position(&self) -> Vec2;
-    fn mouse_delta(&self) -> Vec2;
-    fn mouse_button_held(&self, button: MouseButton) -> bool;
-    fn scroll_delta(&self) -> f32;
-    fn controller(&self, index: usize) -> Option<&ControllerState>;
+    controllers: Vec<Option<ControllerState>>,  // connection slots; None = disconnected
 }
 ```
+
+The struct carries the complete device state for one frame. Game code queries it through methods like `key_held`, `key_pressed`, `mouse_delta`, and `controller`. The full query API (raw device queries, action queries, and fixed-tick variants) is listed in @lst-action-queries after the action mapping layer is introduced.
 
 The API is polled, not pushed. A system does not register a callback for "key W pressed." It asks, during its phase, "is key W held right now?" or "was key W pressed this frame?" The answers come from the snapshot that was frozen during INPUT. This is the direct consequence of the quarantine: every query returns a value from a consistent point in time, and no query can trigger a side effect or modify the snapshot.
 
 ### Edge Detection
 
-A key can be in one of two states: up or down. An **edge** is the single-frame transition between them: the moment a key goes from up to down (a **press edge**) or from down to up (a **release edge**). Edges are distinct from state. State tells you *what is true right now*; an edge tells you *what changed this frame*. The distinction matters because gameplay actions fall into two categories: continuous actions that care about state ("is the player holding the shield?") and discrete actions that care about transitions ("did the player just press jump?"). Confusing the two is one of the most common input bugs in game development. A jump system that reads "is the spacebar down?" instead of "was the spacebar pressed this frame?" will apply the jump impulse on every frame the key is held, launching the character into orbit. A weapon system that reads "pressed" when it should read "held" will fire exactly once and then stop, even if the player is holding the trigger. These bugs are easy to write and surprisingly hard to diagnose, because the system *works* in the common case (a quick tap) and fails only when timing matters.
+A key can be in one of two states: up or down. An **edge** is the single-frame transition between them: the moment a key goes from up to down (a **press edge**) or from down to up (a **release edge**). Edges are distinct from state. State tells you *what is true right now*. An edge tells you *what changed this frame*.
 
-The polling API exposes three queries that make the distinction explicit:
+The distinction matters because gameplay actions fall into two categories: continuous actions that care about state ("is the player holding the shield?") and discrete actions that care about transitions ("did the player just press jump?").
+
+Confusing the two is one of the most common input bugs in game development. A jump system that reads "is the spacebar down?" instead of "was the spacebar pressed this frame?" will apply the jump impulse on every frame the key is held, launching the character into orbit. A weapon system that reads "pressed" when it should read "held" will fire exactly once and then stop, even if the player is holding the trigger.
+
+These bugs are easy to write and surprisingly hard to diagnose, because the system *works* in the common case (a quick tap) and fails only when timing matters. The polling API exposes three queries that make the distinction explicit:
 
 - **`key_held(key)`** returns `true` if the key is currently down. It is `true` on the first frame of the press, on every subsequent frame while the key remains down, and `false` on the frame after release. This is the state query, the right choice for continuous actions: moving a character, holding a shield, charging a weapon.
 
@@ -173,29 +175,25 @@ Edge detection requires the engine to store the previous frame's key state along
 2. Drain all keyboard events from the platform adapter, updating the current state.
 3. For each key, compute edges: `pressed = current && !previous`, `released = !current && previous`.
 
-This is a standard technique, implemented identically in every engine that supports edge queries. Unity's legacy `Input.GetButtonDown` and `Input.GetButtonUp` perform exactly this comparison, as do Godot's `is_action_just_pressed()` and `is_action_just_released()`. Unreal's Enhanced Input system tracks transitions through its `ETriggerEvent` enum, distinguishing `Started`, `Ongoing`, and `Completed` phases. The cost is one additional bit per key per frame: negligible. The benefit is that game systems never need to track previous state themselves, which eliminates a class of bugs where two systems independently track the same key and disagree about its edge timing.
+This is a standard technique, implemented identically in every engine that supports edge queries. Unity's legacy `Input.GetButtonDown` and `Input.GetButtonUp` perform exactly this comparison, as do Godot's `is_action_just_pressed()` and `is_action_just_released()`. Unreal's Enhanced Input system tracks transitions through its `ETriggerEvent` enum, distinguishing `Started`, `Ongoing`, and `Completed` phases.
 
-Edge detection is also the bridge to the two more complex problems discussed later in this chapter: action mapping (which must propagate edges through the binding table so that `action_pressed("jump")` fires exactly once, not once per bound key) and the fixed-tick edge problem (where edges interact with the accumulator in ways that require the intent pattern to resolve correctly).
+The cost is one additional bit per key per frame: negligible. The benefit is that game systems never need to track previous state themselves, which eliminates a class of bugs where two systems independently track the same key and disagree about its edge timing.
+
+Edge detection is also the bridge to the two more complex problems discussed later in this chapter: action mapping (which must propagate edges through the binding table so that `action_pressed("jump")` fires exactly once, not once per bound key) and the fixed-tick edge problem (where edges interact with the accumulator in ways that require the tick-stamped queries introduced later in this chapter).
 
 ### Analog Inputs
 
 Not all input is digital. Mouse movement, scroll wheels, controller sticks, and triggers produce continuous values that cannot be reduced to pressed/released edges. Analog input is where the gap between "works in a tutorial" and "works in a shipped game" is widest, because the physical characteristics of analog devices introduce noise, drift, and precision issues that digital keys simply do not have.
 
-**Mouse delta** is the change in mouse position since the last frame. The INPUT phase accumulates all mouse-motion events received since the previous snapshot and reports the sum as a single `Vec2`. This accumulation is important: if the OS delivers three motion events during a single frame, the game sees one delta that is the sum of all three. Individual events are not exposed because they would reintroduce event-ordering concerns inside the snapshot model.
-
-The accumulation model is particularly important for high-polling-rate mice. Competitive FPS players routinely use mice that report at 1000 Hz or higher, delivering dozens of motion events during a single 16 ms frame. If the engine reads only the latest event, it discards the majority of the player's actual movement. If it exposes individual events, it forces game systems to iterate over a variable-length queue, breaking the polled-snapshot model. Accumulation is the only approach that preserves both the full range of player motion and the simplicity of a single per-frame value. This is why every engine that takes mouse input seriously (and certainly every engine used for competitive shooters) accumulates mouse deltas rather than sampling the latest position.
-
-**Scroll delta** works the same way: all scroll events since the last frame are accumulated into a single `f32`.
-
-**Mouse position** is the cursor's location in window coordinates at the time the snapshot is taken. Unlike delta and scroll, position is a state query rather than an accumulation: it reflects the last reported position, not a sum.
+**Mouse delta and scroll** are accumulated values: the INPUT phase sums all motion or scroll events received since the previous snapshot and reports the total as a single `Vec2` (delta) or `f32` (scroll, positive for up, negative for down). **Mouse position** is a state query: it reflects the last reported cursor location in window coordinates, not a sum. The accumulation model, its interaction with high-polling-rate mice, and cursor capture are discussed in detail in the Mouse Delta Accumulation and Cursor Capture section below.
 
 **Controller sticks and triggers** present a different set of challenges. Sticks report a `Vec2` in the range `[-1.0, 1.0]` per axis. Triggers report an `f32` in the range `[0.0, 1.0]`. These values are sampled directly from the controller's current state.
 
 But physical sticks are imperfect mechanisms: they drift, they have manufacturing tolerances, and they wear over time. The Nintendo Switch Joy-Con drift issue, which became so widespread that it prompted a class-action lawsuit and a free repair program, is the most visible example of a problem that every controller exhibits to some degree. A brand-new Xbox controller may report `(0.02, -0.01)` when the stick is centered. An older DualSense may drift further. Without compensation, the game would register constant low-magnitude movement even when the player is not touching the stick. Dead zones (discussed in the action mapping section below) address this at the binding level, but the raw polling API reports the unfiltered value, leaving the choice of threshold to the consumer.
 
-@lst-controller-state shows how Smallworld defines the per-controller struct.
+@lst-controller-state defines the per-controller types. `ControllerId` captures the USB HID descriptor fields that uniquely identify a physical device: a vendor ID (assigned by the USB Implementers Forum), a product ID (assigned by the vendor), and an optional serial number (not all devices report one). `DeviceFilter` lets a binding target either any connected controller or one specific physical device; the action mapping section below discusses when each mode is the right choice. `ControllerState` itself carries the identity alongside the analog and digital state: two sticks as `Vec2` values in `[-1.0, 1.0]`, two triggers as `f32` values in `[0.0, 1.0]`, and a bitfield of buttons.
 
-```{#lst-controller-state .rust lst-cap="ControllerState: analog and digital gamepad state"}
+```{#lst-controller-state .rust lst-cap="ControllerState: identity and per-frame device state"}
 struct ControllerId {
     vendor:  u16,
     product: u16,
@@ -221,19 +219,25 @@ struct ControllerState {
 
 A modern engine must support more than one controller. Local multiplayer on consoles expects four gamepads sharing a screen, a convention that has been stable since the arcade era. Simulation enthusiasts on PC may connect a stick, a throttle quadrant, rudder pedals, and a button box simultaneously, each recognized by the OS as a separate HID controller. These are different use cases, but they place the same demand on the input system: it must track the state of multiple controllers concurrently and let game code address them by stable index.
 
-The `Input` struct stores connected controllers in a `Vec<ControllerState>`. The quarantine phase populates this vector from the OS device list each frame. Slot indices are stable within a session (a controller that appears at index 2 stays at index 2 as long as it remains connected), but they are *not* stable across sessions. If a player connects their throttle before their stick on Tuesday but reverses the order on Wednesday, the OS may assign different indices. This is a well-known problem: XInput on Windows assigns gamepad indices 0-3 in connection order, and a disconnect/reconnect can shuffle them mid-session.
+The `Input` struct stores controllers in a vector of connection slots, `Vec<Option<ControllerState>>`. When a device connects, the quarantine assigns it the first free slot (growing the vector only if none is free); when it disconnects, its slot becomes `None` rather than being removed, so no other controller's index shifts. Slot indices are therefore stable within a session (a controller that appears at index 2 stays at index 2 as long as it remains connected), but they are *not* stable across sessions. If a player connects their throttle before their stick on Tuesday but reverses the order on Wednesday, the OS may assign different indices. This is a well-known problem: XInput on Windows assigns gamepad indices 0-3 in connection order, and a disconnect/reconnect can shuffle them mid-session.
 
 The solution is device identity. Each USB HID controller reports a vendor ID, product ID, and (on some devices) a serial number. The engine's controller library (`gilrs` on desktop, platform-specific APIs on consoles) exposes these identifiers, and the action mapping layer uses them to bind actions to specific physical devices rather than to slot indices. A flight sim binding that says "throttle axis on the Thrustmaster TWCS (vendor 0x044F, product 0xB687)" survives reconnection in any order. Device assignments persist to `user://` alongside key rebindings, so the player configures their setup once.
 
-A dynamic collection is the right choice for the raw controller list because the number of connected controllers varies widely across use cases. A console game with four gamepads and a PC cockpit setup with six USB HID devices both work without recompiling the engine or raising an arbitrary constant. The `Vec` is allocated once per frame during the quarantine (not in a hot loop), and controller counts are small enough that the cost is negligible. The `Vec` is a plain owned value: it is `Send`, `'static`, and serializable without lifetime concerns.
+A dynamic collection of slots is the right choice for the raw controller list because the number of connected controllers varies widely across use cases. A console game with four gamepads and a PC cockpit setup with six USB HID devices both work without recompiling the engine or raising an arbitrary constant. The vector grows only when a device connects and no free slot exists; in steady state the quarantine mutates existing slots and allocates nothing. And the vector is a plain owned value: it is `Send`, `'static`, and serializable without lifetime concerns.
 
 ### The Action Mapping Layer
 
 The raw polling API is precise, but it is insufficient for a shipped game. Consider a character controller that reads `key_held(KeyCode::W)` to move forward. This code works on a keyboard. It does not work on a gamepad. It cannot be rebound by the player. It does not respect focus: if a text input field is active, pressing W should type a letter, not move the character. And it encodes a platform convention (W for forward) that may not apply on all platforms or in all locales.
 
-The industry arrived at this indirection through decades of iteration. Early engines hard-coded key bindings or treated rebinding as an afterthought: Quake (1996) let players remap keys through console commands like `bind W +forward`, but the binding system was bolted onto a fixed set of text commands, not a general abstraction for game intent. When DirectInput and later XInput gave Windows engines raw access to mice, keyboards, and controllers, they solved the device-communication problem without addressing the semantic one: the engine could read any axis or button, but translating device signals into game actions remained the developer's responsibility, scattered through gameplay code. Unity's original Input Manager attempted a static solution, defining named axes in a project-wide asset that could not be modified at runtime and offered no concept of contextual input or binding composites. Unity eventually replaced it with the Input System package, which introduced action maps, binding composites, interaction patterns, and runtime rebinding. Unreal followed a parallel path: UE4's legacy axis and action mappings gave way to UE5's Enhanced Input system, built around InputActions, InputMappingContexts, and per-action modifiers and triggers.
+The industry arrived at this indirection through decades of iteration. Early engines hard-coded key bindings or treated rebinding as an afterthought: Quake (1996) let players remap keys through console commands like `bind W +forward`, but the binding system was bolted onto a fixed set of text commands, not a general abstraction for game intent.
 
-The evolution accelerated as rebinding shifted from a power-user convenience to a certification and legal requirement. The 21st Century Communications and Video Accessibility Act (CVAA) in the United States, which began enforcement for games in 2019, requires that games with communication features provide accessible input options, including remapping. Microsoft's Xbox Accessibility Guidelines (XAGs), which influence certification for Xbox and Game Pass titles, explicitly recommend full input remapping. Sony's PlayStation certification includes similar provisions. Studios like Naughty Dog demonstrated with *The Last of Us Part II* (2020) that comprehensive accessibility, including full remapping, one-handed play modes, and custom control schemes, could ship in a AAA title without compromising the core experience. Rebinding is no longer a convenience; it is a certification prerequisite on major platforms and a legal requirement in some jurisdictions. The architectural consequence is that rebinding must be a data operation on the action map, not a code change.
+When DirectInput and later XInput gave Windows engines raw access to mice, keyboards, and controllers, they solved the device-communication problem without addressing the semantic one: the engine could read any axis or button, but translating device signals into game actions remained the developer's responsibility, scattered through gameplay code. Unity's original Input Manager attempted a static solution, defining named axes in a project-wide asset that could not be modified at runtime and offered no concept of contextual input or binding composites. Unity eventually replaced it with the Input System package, which introduced action maps, binding composites, interaction patterns, and runtime rebinding. Unreal followed a parallel path: UE4's legacy axis and action mappings gave way to UE5's Enhanced Input system, built around InputActions, InputMappingContexts, and per-action modifiers and triggers.
+
+The evolution accelerated as rebinding shifted from a power-user convenience to an accessibility expectation with regulatory weight behind it. The 21st Century Communications and Video Accessibility Act (CVAA) in the United States, which began enforcement for games in 2019, requires that the communication features games ship, such as text and voice chat, be accessible to players with disabilities, which constrains how the input to those features is handled.
+
+Microsoft's Xbox Accessibility Guidelines (XAGs), which influence certification for Xbox and Game Pass titles, explicitly recommend full input remapping. Sony's PlayStation certification includes similar provisions. Studios like Naughty Dog demonstrated with *The Last of Us Part II* (2020) that comprehensive accessibility, including full remapping, one-handed play modes, and custom control schemes, could ship in a AAA title without compromising the core experience.
+
+Rebinding is no longer a convenience: it is a certification expectation on major platforms, and the accessibility of input more broadly carries legal weight in some jurisdictions. The architectural consequence is that rebinding must be a data operation on the action map, not a code change.
 
 \floattop
 ```{#lst-action-types .rust lst-cap="ActionMap, ActionDef, and Binding: the action vocabulary"}
@@ -244,7 +248,7 @@ struct ActionMap {                   // asset: "gameplay", "ui", "vehicle", ...
 
 struct ActionDef {
     name: InternedString,            // "jump", "move", "fire"
-    kind: ActionKind,                // Button | Axis1d | Axis2d
+    kind: ActionKind,                // Button | Axis1d | Axis2d | Axis3d
     bindings: Vec<Binding>,          // rebindable; user edits serialize to user://
 }
 
@@ -255,12 +259,18 @@ enum ActionKind {
     Axis3d,
 }
 
+enum StickSide {
+    Left,
+    Right,
+}
+
 enum Binding {
     Key(KeyCode),
     MouseButton(MouseButton),
     MouseMotion,                                       // Axis2d
     ControllerButton { device: DeviceFilter, button: u8 },
     ControllerAxis  { device: DeviceFilter, axis: u8, dead_zone: f32 },
+    ControllerStick { device: DeviceFilter, stick: StickSide, dead_zone: f32 }, // radial
     Composite { axes: Vec<(KeyCode, KeyCode)> }, // (positive, negative) per axis
 }
 ```
@@ -271,46 +281,61 @@ The action mapping layer solves all of these problems by introducing an indirect
 
 @lst-action-types shows how Smallworld defines the three types that compose the mapping: `ActionMap`, `ActionDef` with its `ActionKind`, and the `Binding` enum.
 
-An `ActionMap` is a collection of action definitions, each with a name, a kind, and a set of bindings. The name is an interned string (a pointer-sized handle that can be compared in constant time), so action lookups in the hot path are cheap. The kind declares the action's value type: `Button` for digital on/off, `Axis1d` for a single continuous scalar (trigger pull, throttle), `Axis2d` for a two-dimensional continuous value (stick direction, mouse look), and `Axis3d` for a three-dimensional continuous value (a `Vec3`).
+An `ActionMap` is a collection of action definitions, each with a name, a kind, and a set of bindings. The name is an interned string, a pointer-sized handle that can be compared in constant time. A query like `action_held("jump")` still hashes its string argument once to find that handle; at the tens of action queries a frame typically issues this is negligible, and a system that queries inside a hot inner loop can resolve the name to a handle once and reuse it. The kind declares the action's value type: `Button` for digital on/off, `Axis1d` for a single continuous scalar (trigger pull, throttle), `Axis2d` for a two-dimensional continuous value (stick direction, mouse look), and `Axis3d` for a three-dimensional continuous value (a `Vec3`).
 
 `Axis3d` exists because a modern engine cannot treat 3D spatial input as an afterthought. VR controllers report position as a continuous 3D vector. 6DOF desktop controllers like the 3Dconnexion SpaceMouse report three translation axes and three rotation axes, each naturally expressed as an `Axis3d` action. Decomposing these into three independent `Axis1d` actions is technically possible, but it forces the game to reassemble a spatial value that the hardware already provides as a unit, and it breaks the action system's promise that a single query returns a complete, typed answer. With `Axis3d`, a VR game reads `axis3d("hand_position")` and gets a `Vec3` the same way a gamepad game reads `axis2d("move")` and gets a `Vec2`.
 
-The four value types cover the full range of input dimensionality without being open-ended. A flight simulator with a HOTAS (hands-on throttle and stick) setup does not need a richer `ActionKind`; it needs more named actions. Pitch, roll, yaw, throttle, mixture, propeller RPM, and trim are each a separate `Axis1d` action, each bound to a different physical axis on whichever controller the player has assigned. The `ControllerAxis` binding identifies the source by device filter and axis index. When `device` is `DeviceFilter::Any`, the binding matches any connected controller, which is the right default for a gamepad game where any controller should work. When `device` is `DeviceFilter::Specific(id)`, the binding is pinned to a specific physical device by its HID identity, which is the right choice for a simulation cockpit where each USB device has a distinct role. The system scales by adding actions and bindings, not by adding new kinds.
+The four value types cover the full range of input dimensionality without being open-ended. A flight simulator with a HOTAS (hands-on throttle and stick) setup does not need a richer `ActionKind`, it needs more named actions. Pitch, roll, yaw, throttle, mixture, propeller RPM, and trim are each a separate `Axis1d` action, each bound to a different physical axis on whichever controller the player has assigned. The `ControllerAxis` binding identifies the source by device filter and axis index. When `device` is `DeviceFilter::Any`, the binding matches any connected controller, which is the right default for a gamepad game where any controller should work. When `device` is `DeviceFilter::Specific(id)`, the binding is pinned to a specific physical device by its HID identity, which is the right choice for a simulation cockpit where each USB device has a distinct role. The system scales by adding actions and bindings, not by adding new kinds.
+
+Sticks are bound through `ControllerStick`, which addresses a gamepad's left or right stick as a single two-dimensional unit rather than as two independent scalar axes. This mirrors how mature engines model the hardware: Unreal exposes each thumbstick as a single 2D-axis key alongside the per-axis scalars, and Unity's Input System models a stick as a `Vector2` control whose component axes are children. Binding the stick as a unit is also what makes a *radial* dead zone possible, a distinction taken up below.
 
 Each action can have multiple bindings simultaneously. Consider a "move" action of kind `Axis2d`. In a legacy engine like Quake, movement was four separate boolean actions: `+forward`, `+back`, `+moveleft`, `+moveright`. The game checked each independently and summed the results into a direction. This worked for keyboards, but it could not represent the partial deflection of an analog stick, and it forced every character controller to reconstruct a direction vector from four booleans. Modern engines replaced this pattern with a single multi-dimensional action. UE5's Enhanced Input defines a "Move" `InputAction` with a `FVector2D` value type. Unity's Input System defines a "Move" action with a `Vector2` control type. The game reads one value and gets a continuous direction vector, regardless of whether it came from a stick, a touchscreen virtual joystick, or four digital keys reassembled by a composite binding.
 
-Smallworld follows the same pattern. A "move" action of kind `Axis2d` might bind to `Composite { axes: [(W, S), (A, D)] }` for keyboard and `ControllerAxis { device: Any, axis: 0, dead_zone: 0.15 }` for any connected gamepad. The engine evaluates all bindings and produces the appropriate result: for a `Button` action, any active binding triggers the action; for an `Axis2d` action, the engine returns the most recent non-zero contributor (with analog sources taking priority over digital composites when both are active). The game reads `axis2d("move")` and gets a `Vec2` with magnitude in `[0.0, 1.0]`, pointing in the direction the player intends to move. It never asks which key is down or which stick is deflected.
+Smallworld follows the same pattern. A "move" action of kind `Axis2d` might bind to `Composite { axes: [(W, S), (A, D)] }` for keyboard and `ControllerStick { device: Any, stick: Left, dead_zone: 0.15 }` for any connected gamepad. The engine evaluates all bindings and produces the appropriate result: for a `Button` action, any active binding triggers the action; for an axis action, the engine evaluates every binding and returns the contribution with the largest magnitude that frame. This rule is deterministic, requires no cross-frame history, and produces the behavior players expect: an idle stick (zero after its dead zone) never overrides held keys, a deflected stick wins over untouched keys, and when both are active the stronger signal carries. Unity's Input System disambiguates conflicting controls bound to one action the same way, by comparing actuation magnitudes. The game reads `axis2d("move")` and gets a `Vec2` with magnitude in `[0.0, 1.0]`, pointing in the direction the player intends to move. It never asks which key is down or which stick is deflected.
 
-The game-facing query API mirrors the raw API but operates on action names rather than key codes. @lst-action-queries lists the methods, which include the same held/pressed/released edge queries as the raw layer plus continuous axis readers and stack operations.
+@lst-action-queries lists the complete query API on `Input`. The top group provides raw device queries (the same methods introduced in the Raw Polling API section above). The bottom group provides action queries that resolve through the binding table: `action_held`, `action_pressed`, and `action_released` mirror their raw counterparts but operate on named actions. The `fixed_action_pressed` and `fixed_action_released` variants are tick-stamped edge queries designed for the FIXED phase, explained in the Tick-Stamped Edges section below. The axis readers return continuous values at the appropriate dimensionality.
 
-```{#lst-action-queries .rust lst-cap="Querying actions by name"}
+```{#lst-action-queries .rust lst-cap="The complete Input query API"}
 impl Input {
+    // Raw device queries
+    fn key_held(&self, key: KeyCode) -> bool;
+    fn key_pressed(&self, key: KeyCode) -> bool;
+    fn key_released(&self, key: KeyCode) -> bool;
+    fn mouse_position(&self) -> Vec2;
+    fn mouse_delta(&self) -> Vec2;
+    fn mouse_button_held(&self, button: MouseButton) -> bool;
+    fn scroll_delta(&self) -> f32;
+    fn controller(&self, index: usize) -> Option<&ControllerState>;
+
+    // Action queries (resolved through bindings)
     fn action_held(&self, name: &str) -> bool;
     fn action_pressed(&self, name: &str) -> bool;
     fn action_released(&self, name: &str) -> bool;
+    fn fixed_action_pressed(&self, name: &str) -> bool;  // true only in the
+    fn fixed_action_released(&self, name: &str) -> bool; //   edge's stamped tick
     fn axis1d(&self, name: &str) -> f32;
     fn axis2d(&self, name: &str) -> Vec2;
     fn axis3d(&self, name: &str) -> Vec3;
-    fn push_map(&mut self, map: AssetHandle<ActionMap>);
-    fn pop_map(&mut self);
 }
 ```
 
 The symmetry is intentional: `action_held` behaves like `key_held`, `action_pressed` behaves like `key_pressed`, and `action_released` behaves like `key_released`, but resolved through the binding table. A system that was written against `key_held(KeyCode::W)` to move forward can be migrated to `axis2d("move")`, and it gains rebindability, device agnosticism, and context-stack awareness for free.
 
+Action edges are computed at the action layer, not collected from devices. During the INPUT phase the engine resolves each button action's value from its bindings and diffs it against the previous frame's resolved value: `action_pressed` is true when the action is active this frame and was not active last frame. Because the diff operates on the action's resolved value, controller buttons get the same pressed/released semantics as keys without any device-level edge state, and an action bound to several keys fires its press edge exactly once, when the action *as a whole* becomes active, not once per bound key.
+
 Two binding types deserve special attention because they bridge the gap between digital and analog input:
 
 **Composite** converts digital keys into a continuous axis value of any dimensionality. Each entry in the `axes` list is a `(positive, negative)` key pair that contributes one axis. Two pairs produce an `Axis2d` (WASD: `[(W, S), (A, D)]`). Three pairs produce an `Axis3d` (WASD + Space/Ctrl for a free-camera flythrough: `[(W, S), (A, D), (Space, LCtrl)]`). The engine validates at bind time that the number of pairs matches the action's `ActionKind` dimensionality.
 
-When multiple keys are active simultaneously, the resulting vector is normalized to unit length. Without normalization, diagonal movement would be approximately 41% faster than cardinal movement in 2D, and the problem compounds in 3D where a player pressing three axes at once would move $\sqrt{3} \approx 1.73$ times faster than along a single axis. The normalization happens inside the binding evaluation, so game code that reads `axis2d("move")` or `axis3d("fly")` always receives a vector with magnitude in `[0.0, 1.0]`.
+When multiple keys are active simultaneously, the resulting vector is clamped to unit length (opposing keys on one axis simply cancel). Without the clamp, diagonal movement would be approximately 41% faster than cardinal movement in 2D, and the problem compounds in 3D where a player pressing three axes at once would move $\sqrt{3} \approx 1.73$ times faster than along a single axis. The clamp happens inside the binding evaluation, so game code that reads `axis2d("move")` or `axis3d("fly")` always receives a vector with magnitude in `[0.0, 1.0]`.
 
-**Dead zones** on controller axes suppress small deflections that occur when the stick is nominally centered. Physical sticks rarely rest at exactly `(0.0, 0.0)`; they drift slightly, and without a dead zone the game would register constant low-magnitude movement. The `dead_zone` field on `ControllerAxis` specifies the radius below which the axis reports zero. Above the dead zone, the value is rescaled so that the range `[dead_zone, 1.0]` maps to `[0.0, 1.0]`, preserving the full analog range above the threshold.
+**Dead zones** suppress the small deflections that a nominally centered stick reports (the drift problem introduced in the Analog Inputs section), and the two controller binding types apply them at different dimensionalities. `ControllerAxis` applies a scalar dead zone: values whose magnitude falls below the threshold report zero, and the remainder is rescaled so that `[dead_zone, 1.0]` maps to `[0.0, 1.0]`, preserving the full analog range above the threshold. `ControllerStick` applies a **radial** dead zone: the threshold is compared against the magnitude of the two-dimensional stick vector, and the rescaling preserves the vector's direction. The distinction matters because applying independent scalar dead zones to a stick's two axes carves a cross-shaped dead region: near-cardinal directions snap onto the axes, and a smooth circular sweep of the stick stutters as each component crosses its own threshold independently. Every mature engine makes the same distinction. Unreal's Enhanced Input dead-zone modifier offers explicit Radial and Axial types and applies the radial form across all of an action's axes simultaneously, Unity's Input System pairs a `StickDeadzone` processor for two-dimensional stick controls with an `AxisDeadzone` for scalars, and Godot's `Input.get_vector()` applies a circular dead zone when composing a two-dimensional vector from four actions.
 
-Dead zone application is a binding-level concern, not a game-level concern. The game receives a clean `[0.0, 1.0]` value; it never needs to implement its own dead zone logic. This is a common source of bugs in engines that leave dead zones to game code: every system that reads a stick must independently apply the dead zone, and if they disagree on the threshold, the player experiences inconsistent behavior.
+Dead zone application is a binding-level concern, not a game-level concern. The game receives a clean `[0.0, 1.0]` value and never needs to implement its own dead zone logic. This is a common source of bugs in engines that leave dead zones to game code: every system that reads a stick must independently apply the dead zone, and if they disagree on the threshold, the player experiences inconsistent behavior.
 
 ### The Context Stack
 
-A game is not a single activity. The player may be controlling a character, browsing a menu, typing in a console, or editing a settings screen. Each activity has its own input vocabulary: gameplay uses "jump" and "fire"; the menu uses "navigate" and "select"; the console uses text entry. These vocabularies must coexist, and at any given moment exactly one (or a controlled subset) should be active.
+A game is not a single activity. The player may be controlling a character, browsing a menu, typing in a console, or editing a settings screen. Each activity has its own input vocabulary: gameplay uses "jump" and "fire," the menu uses "navigate" and "select," and the console uses text entry. These vocabularies must coexist, and at any given moment exactly one (or a controlled subset) should be active.
 
 The naive solution is a set of boolean flags like `is_menu_open`, `is_console_active`, or `is_text_field_focused`. Every system checks the relevant flags before reading input. This approach scales poorly: each new activity adds a flag that every existing system must check, and it encodes priority implicitly. If the console and the menu are both open, which one receives input? The answer depends on the order of the flag checks, which is scattered across unrelated systems. Anyone who has played a game where opening the inventory did not prevent the character from moving, or where pressing Escape closed a dialog *and* opened the pause menu simultaneously, has experienced the consequences of ad-hoc input routing.
 
@@ -318,7 +343,7 @@ Every major engine has arrived at some form of structured input routing to solve
 
 Each approach encodes the same fundamental idea: input routing is a structured priority problem, not a collection of per-system boolean checks.
 
-Smallworld's version of this structure is a **context stack**. Active action maps are pushed onto a stack; the topmost map receives input first. Each map carries a `passthrough` flag that controls whether maps below it on the stack also receive input:
+Smallworld's version of this structure is a **context stack**. Active action maps are pushed onto a stack with the topmost map receiving input first. Each map carries a `passthrough` flag that controls whether maps below it on the stack also receive input:
 
 - **`passthrough: false`** (the default): The map blocks all maps below it. Opening the pause menu pushes the `ui` map, which blocks the `gameplay` map beneath it. The player can navigate the menu but cannot move the character or fire weapons. This is the input half of the UI focus/capture rule described in the UI architecture: when a UI layer captures input, it does so by pushing a blocking map.
 
@@ -332,18 +357,18 @@ The stack model has several advantages over boolean flags:
 
 1. **Implicit priority.** The topmost map wins. There is no ambiguity about which activity receives input, and no scattered flag checks.
 2. **Composable.** Activities can be nested: gameplay $\rightarrow$ pause menu $\rightarrow$ settings screen $\rightarrow$ rebind dialog. Each pushes its own map, and popping restores the previous context automatically.
-3. **Symmetric push/pop.** The code that activates an activity is responsible for pushing its map; the code that deactivates it is responsible for popping. This mirrors the lifetime of the activity itself.
+3. **Symmetric push/pop.** The code that activates an activity is responsible for pushing its map and the code that deactivates it is responsible for popping. This mirrors the lifetime of the activity itself.
 4. **Connection to UI focus.** The UI framework's focus and capture semantics are implemented through the same stack. When a text field captures focus, it pushes a text-entry map that blocks gameplay actions. When the text field loses focus, it pops the map. The input system and the UI system agree on priority because they share the mechanism.
 
-The connection to the UI framework deserves emphasis. Chapter 22 will describe Smallworld's UI architecture in detail, but the key input contract is established here: UI consumes input ahead of game systems. This is not a special case or a priority number. It is a structural consequence of the stack: the UI map sits above the gameplay map, and its `passthrough: false` flag blocks gameplay actions when the UI is capturing input.
+The connection to the UI framework deserves emphasis. In Chapter 24 we describe UI architecture in detail, but the core input contract is established here: UI consumes input ahead of game systems. This is not a special case or a priority number. It is a structural consequence of the stack: the UI map sits above the gameplay map, and its `passthrough: false` flag blocks gameplay actions when the UI is capturing input.
 
 ### Rebinding and Persistence
 
-Because action maps are **assets** (loaded through the asset pipeline, identified by name, modifiable at runtime), rebinding is a data operation rather than a code change. The settings screen reads the current action map, displays the bindings, and lets the player modify them. No special rebinding API exists; the same `ActionMap` and `Binding` types that define actions at development time are the types the player edits at runtime.
+Because action maps are **assets** (loaded through the asset pipeline, identified by name, modifiable at runtime), rebinding is a data operation rather than a code change. The settings screen reads the current action map, displays the bindings, and lets the player modify them. No special rebinding API exists: the same `ActionMap` and `Binding` types that define actions at development time are the types the player edits at runtime.
 
-User modifications are persisted to `user://`, the virtual filesystem path for per-user settings discussed in Chapter 7. When the game starts, the engine loads the default action map from the game's asset package and then overlays any user overrides from `user://`. If the player has rebound "jump" from Space to Enter, the overlay replaces that single binding; all other bindings remain at their defaults. Device assignments (which physical controller is bound to which role, via `DeviceFilter::Specific`) are persisted in the same overlay, so a simulation player's cockpit setup survives across sessions.
+User modifications are persisted to `user://`, the virtual filesystem path for per-user settings discussed in Chapter 7. When the game starts, the engine loads the default action map from the game's asset package and then overlays any user overrides from `user://`. If the player has rebound "jump" from Space to Enter, the overlay replaces that single binding and all other bindings remain at their defaults. Device assignments (which physical controller is bound to which role, via `DeviceFilter::Specific`) are persisted in the same overlay, so a simulation player's cockpit setup survives across sessions.
 
-The overlay model has two useful properties. First, version upgrades are conflict-free: when a game update adds a new action, the default map contains the new binding, and the user override (which does not mention the new action) does not conflict. Both coexist without a migration step. Second, "reset to defaults" is a file deletion: remove the user override, reload the default map, and rebuild the input state. The default map is never modified; it is always available as the canonical fallback.
+The overlay model has two useful properties. First, version upgrades are conflict-free: when a game update adds a new action, the default map contains the new binding, and the user override (which does not mention the new action) does not conflict. Both coexist without a migration step. Second, "reset to defaults" is a file deletion: remove the user override, reload the default map, and rebuild the input state. The default map is never modified: it is always available as the canonical fallback.
 
 This design makes the settings screen an ordinary consumer of the action system, not a special case. It reads `ActionMap` assets, modifies `Binding` entries, and writes the result to `user://`. The engine provides the data types and the persistence path. The game provides the UI. This separation ensures that the rebinding interface matches the game's visual style rather than being a generic engine dialog.
 
@@ -358,7 +383,7 @@ The quarantine establishes *what* the game sees. The frame lifecycle establishes
 
 The polled model's core advantage is that every query within a tick returns a value from the same point in time. A system that reads `action_held("fire")` does not need to iterate over an event queue, handle out-of-order events, or deduplicate events that the OS delivered twice (a real problem on some platforms with auto-repeat).
 
-A snapshot is also a compact, self-contained record: recording input for replay means saving one snapshot per frame, while a pushed-event model would require recording events with sub-frame timestamps and replaying them in the correct order relative to the frame boundary. The pushed model is not wrong - it is appropriate for text entry, where character ordering matters and a snapshot that reports only "key A is held" loses information. Smallworld handles text entry as a separate path (discussed in @sec-cross-platform), not through the action system.
+The pushed model is not wrong; it is appropriate for text entry, where character ordering matters and a snapshot that reports only "key A is held" loses information. Smallworld handles text entry as a separate path (discussed in @sec-cross-platform), not through the action system.
 
 Figure \ref{fig:input-frame-timing} shows the relationship between event arrival, snapshot creation, and system consumption across the frame lifecycle.
 
@@ -376,13 +401,13 @@ Edge queries like `action_pressed("jump")` return `true` for exactly one frame. 
 
 This is the **fixed-tick edge problem**: edges are properties of the frame, but fixed ticks are properties of the accumulator, and the two clocks are not synchronized.
 
-Chapter 4 introduced Glenn Fiedler's "Fix Your Timestep!" [@gaffer-fix-timestep] in the context of the accumulator and interpolation; the edge problem is the input-side consequence of the same mismatch. Unity's documentation explicitly warns against reading `Input.GetButtonDown` inside `FixedUpdate`, and the topic is one of the most persistent questions on Unity's forums. Godot's documentation calls it out when explaining the relationship between `_input` callbacks and `_physics_process`.
+The fixed-tick edge problem is the input-side consequence of the accumulator-driven fixed timestep described in Chapter 4 [@gaffer-fix-timestep]. Unity's documentation explicitly warns against reading `Input.GetButtonDown` inside `FixedUpdate`, and the topic is one of the most persistent questions on Unity's forums. Godot's documentation calls it out when explaining the relationship between `_input` callbacks and `_physics_process`.
 
 To see why, consider a frame where the player presses the jump button. `action_pressed("jump")` returns `true` for this frame. Now consider what happens in the fixed-update phase:
 
 - **Case 1: One fixed tick.** The accumulator has enough time for exactly one tick. `fixed_update` runs once, reads `action_pressed("jump")`, sees `true`, and applies the jump impulse. Everything works.
 
-- **Case 2: Zero fixed ticks.** The frame was very fast; perhaps the game is running at 240 fps with a 60 Hz fixed step. The accumulator does not reach `fixed_dt`, so `fixed_update` does not run. The edge is never seen by the fixed-tick systems. The jump is lost.
+- **Case 2: Zero fixed ticks.** The frame was very fast. Perhaps the game is running at 240 fps with a 60 Hz fixed step. The accumulator does not reach `fixed_dt`, so `fixed_update` does not run. The edge is never seen by the fixed-tick systems. The jump is lost.
 
 - **Case 3: Two fixed ticks.** The frame was slow, or the game is running at 30 fps with a 60 Hz fixed step. The accumulator holds enough time for two ticks. `fixed_update` runs twice. On both iterations, `action_pressed("jump")` returns `true` (it is still the same frame). The jump impulse is applied twice. The character jumps too high.
 
@@ -390,128 +415,201 @@ Figure \ref{fig:fixed-tick-edge-problem} illustrates these three cases. The left
 
 \input{figures/fixed-tick-edge-problem.tex}
 
-### The Intent Pattern
+### Tick-Stamped Edges and the Intent Pattern
 
-The standard solution across engines is the **intent pattern**: read the edge in the variable-rate update, latch a flag, and consume that flag in the fixed-rate tick. The flag is a one-shot latch: the update phase sets it, the fixed phase clears it after acting on it exactly once. Because the flag persists across frames, it survives the zero-tick case (the next fixed tick will see it). Because it is cleared on first consumption, it prevents the double-fire case. The pattern is explicit, trivial to implement, and puts the game developer in control of the semantics rather than hiding the mismatch behind fragile automatic buffering.
+The traditional solution to the fixed-tick edge problem is the **intent pattern**: game code latches the edge when it fires in the variable-rate update and consumes the latch at most once in the fixed-rate tick. The latch persists across frames, so it survives the zero-tick case (the next fixed tick will see it). It is cleared on first consumption, so it prevents the double-fire case.
 
-Unity's community documentation recommends exactly this approach for `FixedUpdate` input. Godot's manual suggests forwarding `_input` events into state variables that `_physics_process` reads. The pattern has no canonical name in the literature, but it appears independently in every engine that has confronted the problem.
+The pattern has no canonical name in the literature, and left entirely to game code it must be known in advance, reimplemented for every discrete action, and cleared correctly after consumption. A developer who simply calls `action_pressed("jump")` inside `fixed_update` without knowing about the mismatch ships a bug that surfaces only at unusual frame rates. This is precisely the kind of bug an engine should absorb, and every major engine has confronted it. Their answers fall into three distinct strategies.
 
-@lst-intent-pattern demonstrates the two halves in Smallworld: the UPDATE phase latches a boolean when the edge fires, and the FIXED phase consumes and clears it.
+**Unity re-clocks the input system.** The Input System's update mode setting offers two processing clocks, Process Events in Dynamic Update (the default) and Process Events in Fixed Update, and Unity's timing guidance recommends the fixed mode for physics-driven games: all event processing is re-timed to the physics loop, and edge queries inside `FixedUpdate` become correct. But the switch is global. A game chooses one clock for its entire input system, so per-frame edge reads in the variable-rate update now sit on the wrong clock and inherit the mirror image of the original problem. The mode's history also shows how subtle the re-timing is: Unity's own changelog records both of this section's failure cases as bugs in fixed mode, an edge reading true across consecutive ticks, and a press-and-release inside a single frame being lost. The legacy Input Manager offered nothing beyond a documentation warning against `GetButtonDown` in `FixedUpdate`, and its community settled on the manual intent pattern.
 
-```{#lst-intent-pattern .rust lst-cap="The intent pattern: bridging frame edges and fixed ticks"}
-// In App::update -- read the edge, set intent
-if ctx.input.action_pressed("jump") {
-    self.jump_requested = true;
+**Unreal avoids the mismatch structurally, and marshals input where it returns.** Classic Unreal has no fixed-rate gameplay tick: Enhanced Input delivers its `Started`, `Triggered`, and `Completed` events to gameplay code once per game-thread frame, and physics substepping stays internal to the physics engine, so ordinary gameplay code never polls an edge from inside a fixed tick. The mismatch reappears when a project opts into UE5's fixed-rate asynchronous physics tick, and Epic's answer there is `UAsyncPhysicsInputComponent`: input is captured on the game thread, written into a data block, and delivered by the engine to the async physics tick on both client and server. This is the intent pattern productized as a command buffer, built for the harder requirements of networked physics prediction. Input travels into the fixed tick by value; nothing is queried from inside it.
+
+**Godot makes the query itself clock-aware.** Its `Input` singleton knows which loop is calling: it stamps every action edge with both the current process-frame counter and the current physics-frame counter, and `is_action_just_pressed()` compares the stamp against whichever counter belongs to the executing loop. Called from `_physics_process`, the query is true only in the physics tick whose number matches the stamp; called from `_process`, it is true only in the matching render frame. The same query works correctly in both contexts, and reading it mutates nothing.
+
+Smallworld adopts Godot's strategy, and the reasons it wins over the other two deserve to be explicit. Unity's global re-clock is ruled out by the phase model itself: Chapter 4's tick runs both clocks every frame, with UPDATE consuming frame edges and FIXED consuming tick edges, so re-timing the whole input system to one clock would fix one consumer by breaking the other. A clock-aware query serves both without a mode. Unreal's marshaling component solves a harder problem than Smallworld has: it exists to move input across a thread boundary for networked physics prediction, and buying that machinery for a single-threaded game tick would import a queue and an ownership handoff where a stamp comparison suffices. Godot's design is the only one of the three in which the same query is correct in both loops with no global configuration and no data movement, and its entire cost is two integers per action.
+
+Picking Godot's strategy is not a rejection of marshaling forever; it is a refusal to pay for it before anything needs it. Two roadmap items would take that escape hatch: moving fixed ticks off the main thread, and networked play, where client-side prediction and rollback require each tick's input to exist as a serializable value that can be transmitted to the server and re-applied during re-simulation (a query against live state cannot be replayed; a value can). The tick stamp is what makes that future migration mechanical rather than a redesign. It already defines precisely which tick every edge belongs to, so the per-tick input record falls out of it: at the top of fixed tick $T$, the resolved action values plus every edge stamped $T$ *are* the record. The query API survives unchanged with a different backing store, live stamps during normal play and recorded per-tick input during rollback re-simulation, and the manual intent pattern shown below is already the marshaling shape in miniature. Chapter 21 picks this thread back up when networked prediction makes the per-tick record concrete, and Chapter 22 uses the same record as the unit of replay.
+
+The engine implements the strategy as the pair of queries `fixed_action_pressed` and `fixed_action_released`. During the INPUT phase, after resolving action edges from the new snapshot, the engine stamps each edge with the index of the *next fixed tick to run*. `fixed_action_pressed("jump")` returns `true` exactly when the currently executing fixed tick's index equals the stamp. Only the fixed-tick half of Godot's dual stamp is needed, because the per-frame side is already covered by the action-layer diff, which recomputes frame edges every frame. The engine can stamp every action because the game's `ActionMap` assets are loaded at startup and contain every `ActionDef` by name; no game-side bookkeeping is needed. The three problem cases from the previous section resolve mechanically:
+
+- **One tick.** That tick's index matches the stamp, and the query fires once.
+- **Zero ticks.** The tick counter does not advance, so the stamp still names the *next* tick to run, whenever it comes. The edge is deferred, not lost.
+- **Two ticks.** The first tick's index matches the stamp; the second tick, with an incremented index, does not. The edge cannot double-fire.
+
+Tick stamping has a property that a consumed-on-read latch would not have: the query is pure. It mutates nothing, which keeps the promise made earlier in this chapter that no input query has side effects. It also means any number of systems can ask `fixed_action_pressed("jump")` in the same fixed tick and all receive `true`; a latch cleared on first read would hand `true` to whichever system ran first and `false` to the rest, coupling correctness to system ordering.
+
+Three boundary conditions deserve explicit answers, because they are where any buffering mechanism quietly surprises developers:
+
+1. **The context stack applies at stamp time.** Edges are stamped only for actions that resolve through the active map stack. Pressing Space while a blocking `ui` map is on top does not stamp the gameplay "jump" action, so closing the menu does not release a phantom jump into the next fixed tick.
+2. **A stamped edge waits for exactly one tick, however long that takes.** If the game stops running fixed ticks without blocking input, say a time scale of zero with no menu map pushed, a pending stamp fires in the first tick after resume. This is the same behavior the manual pattern produces, and it is one more reason a pause should push a blocking map rather than merely zeroing the time scale.
+3. **Edges within one frame collapse.** Two presses of the same action in a single frame produce one stamp, exactly as they produce one per-frame edge. A game that needs to count sub-frame presses needs event-level input, which the action system deliberately does not provide.
+
+@lst-intent-pattern shows the difference in practice. The engine-managed version is a single query in `fixed_update` with no manual bookkeeping. The manual version, shown for comparison, requires the game to declare a flag, set it in `update`, and clear it in `fixed_update`.
+
+```{#lst-intent-pattern .rust lst-cap="Fixed-tick edges: engine-managed vs. the manual intent pattern"}
+// Engine-managed: one call, correct by construction
+fn fixed_update(&mut self, ctx: &mut GameContext, fixed_dt: f32) {
+    if ctx.input.fixed_action_pressed("jump") {
+        apply_jump_impulse(ctx, player);
+    }
 }
 
-// In App::fixed_update -- consume the intent
-if self.jump_requested {
-    self.jump_requested = false;
-    apply_jump_impulse(ctx, player);
+// Manual equivalent (still available for custom semantics):
+fn update(&mut self, ctx: &mut GameContext, dt: f32) {
+    if ctx.input.action_pressed("jump") {
+        self.jump_requested = true;
+    }
+}
+fn fixed_update(&mut self, ctx: &mut GameContext, fixed_dt: f32) {
+    if self.jump_requested {
+        self.jump_requested = false;
+        apply_jump_impulse(ctx, player);
+    }
 }
 ```
 
-The intent flag `jump_requested` is a boolean on the game's `App` struct (or on a component, or in a shared intent buffer; the mechanism is flexible). The UPDATE phase sets it when the edge fires. The FIXED phase consumes it, exactly once, and clears it. Because `jump_requested` is a latch (set once, consumed once), it survives the zero-tick case (the flag persists until the next fixed tick) and prevents the double-fire case (the flag is cleared after the first consumption).
+The manual approach remains available for cases where the game needs custom consumption semantics: a charged attack that latches on press and triggers on release across multiple fixed ticks, or a combo system that accumulates edges over a timing window. But for the common case of "this discrete action should fire exactly once in the physics tick," the engine-managed query is the right default.
 
-::: {.callout-warning appearance="simple" title="Why Not Automatically Buffer Edges for Fixed Ticks?"}
-Some engines attempt to solve this problem transparently by buffering per-frame edges and replaying them into each fixed tick. This approach is fragile for several reasons. First, it introduces a hidden queue between the input system and the game, making behavior harder to reason about. Second, it must decide how to handle multiple edges in a single frame (did the player press and release between ticks? or press twice?), and every decision has edge cases. Third, it obscures the fundamental mismatch from the developer, who then discovers it only when the buffer's assumptions do not match the game's needs. The intent pattern is explicit, trivial to implement, and puts the game developer in control of the semantics.
+::: {.callout-warning appearance="simple" title="Why Not Automatically Buffer All Edges for Fixed Ticks?"}
+The engine provides `fixed_action_pressed` as an opt-in query, not as a replacement for `action_pressed`. Automatically buffering all edges and replaying them into each fixed tick is a different and more fragile approach. It introduces a hidden queue between the input system and the game, it must decide how to handle multiple edges in a single frame (did the player press and release between ticks, or press twice?), and it obscures the fundamental mismatch from the developer. The opt-in query makes the correct pattern trivial to use without hiding the underlying model.
 :::
 
 ### Mouse Delta Accumulation and Cursor Capture
 
-Mouse input has a unique timing property: deltas are relative, not absolute. When the cursor is captured (locked to the window center, invisible, with raw motion reporting), the engine must accumulate all motion events between frames into a single delta vector. If three motion events arrive during a frame with deltas `(5, 0)`, `(0, 3)`, and `(2, -1)`, the snapshot reports a single `mouse_delta()` of `(7, 2)`.
+Mouse input has a unique timing property: deltas are relative, not absolute. Unlike a key (which is either up or down) or a stick (which reports an absolute position), the mouse reports *how far it moved* since the OS last sampled it. The INPUT phase accumulates all motion events received since the previous snapshot and reports the sum as a single `Vec2`. If three motion events arrive during a frame with deltas `(5, 0)`, `(0, 3)`, and `(2, -1)`, the snapshot reports a single `mouse_delta()` of `(7, 2)`. Individual events are not exposed because they would reintroduce event-ordering concerns inside the snapshot model.
 
-Cursor capture is a platform-level request. The game calls `window.set_cursor_grab(true)` through the platform adapter, and the adapter configures `winit` to lock the cursor and enable raw motion. The captured state persists until the game releases it, typically when a menu opens, the window loses focus, or the game pauses. Focus loss automatically releases the cursor capture (the OS may enforce this regardless), and the INPUT phase detects the change and reports zero deltas until capture is re-established.
+This accumulation model is particularly important for high-polling-rate mice. Competitive FPS players routinely use mice that report at 1000 Hz or higher, delivering dozens of motion events during a single 16 ms frame. If the engine reads only the latest event, it discards the majority of the player's actual movement. If it exposes individual events, it forces game systems to iterate over a variable-length queue, breaking the polled-snapshot model. Accumulation is the only approach that preserves both the full range of player motion and the simplicity of a single per-frame value. The difference between a mouse that reports at 125 Hz and one that reports at 1000 Hz is perceptible in fast flick-shots, and any engine that drops motion events between polls will feel less responsive than one that accumulates them.
 
-Cursor capture interacts with the context stack in a natural way. When gameplay is active and the player is controlling a camera, the cursor is captured and mouse deltas drive look rotation. When the player opens a menu (pushing a UI context onto the stack), the game releases the cursor so the player can interact with UI elements. When the menu is dismissed (popping the UI context), the cursor is recaptured. The context stack already manages which action map is active; cursor capture state follows the same transitions, ensuring that the mouse behaves correctly for each activity without ad-hoc management.
+**Cursor capture** is the platform-level mechanism that makes mouse-look work. When the cursor is captured (locked to the window center, invisible, with raw motion reporting), the game receives pure deltas without the cursor hitting screen edges. The game requests capture through the platform adapter, and the adapter configures `winit` to lock the cursor and enable raw motion. The captured state persists until the game releases it, typically when a menu opens, the window loses focus, or the game pauses. Focus loss automatically releases capture (the OS may enforce this regardless), and the INPUT phase detects the change and reports zero deltas until capture is re-established.
 
-The accumulation model ensures that no motion is lost, regardless of how many events the OS delivers per frame. This is particularly important for high-polling-rate mice (1000 Hz and above), which can deliver dozens of motion events per 16 ms frame. Competitive FPS players are especially sensitive to mouse input fidelity: the difference between a mouse that reports at 125 Hz and one that reports at 1000 Hz is perceptible in fast flick-shots, and any engine that drops motion events between polls will feel less responsive than one that accumulates them. Without accumulation, the engine would either lose events (if it reads only the latest) or force systems to iterate over an event queue (which breaks the polled-snapshot model). Accumulation is the approach that preserves both the full range of player motion and the simplicity of the polled snapshot.
+Cursor capture interacts with the context stack in a natural way. When gameplay is active and the player is controlling a camera, the cursor is captured and mouse deltas drive look rotation. When the player opens a menu (pushing a UI context onto the stack), the game releases the cursor so the player can interact with UI elements. When the menu is dismissed (popping the UI context), the cursor is recaptured. The context stack already manages which action map is active and cursor capture state follows the same transitions, ensuring that the mouse behaves correctly for each activity without ad-hoc management.
 
-### Input for Replay and Determinism
+### The Input Foundation for Replay
 
-The polled-snapshot model makes input recording straightforward. Each frame's `Input` snapshot is a self-contained value that describes every device's state at that moment. Recording input for replay means serializing one snapshot per frame into a compact binary format. Replaying means deserializing snapshots in sequence and substituting them for live input during the INPUT phase.
+The polled-snapshot model has a valuable structural property: each frame's `Input` snapshot is a self-contained, serializable value. Recording input for replay means saving one snapshot per frame, while replaying means feeding recorded snapshots into the INPUT phase in place of the live quarantine drain. A pushed-event model would instead have to record every event with a sub-frame timestamp and replay each in the correct order relative to the frame boundary. Combined with Chapter 4's deterministic fixed timestep, the same sequence of input snapshots produces the same sequence of world states. Shipped games rely on exactly this property at scale: Overwatch's networking model, for example, is built on deterministically re-simulating the world from recorded player inputs [@ford-gdc2017].
 
-This technique has a long and successful history in the game industry. Real-time strategy games pioneered input-only replay out of necessity: *StarCraft* (1998) recorded only player commands (not world state), because the game state was too large to snapshot at useful frequency. The replay file was tiny (often under 100 KB for a 30-minute match), and deterministic simulation reproduced the entire game from that record. Fighting games adopted the same principle for a different reason: rollback netcode, as implemented in GGPO (now integrated into virtually every modern fighting game), records each player's input per frame and replays the simulation to reconcile prediction errors. When the server receives a corrected input, it rolls back to the last confirmed state and re-simulates forward using the corrected input stream. This only works if the simulation is deterministic given the same inputs. Racing games use input recording for ghost replay: *Gran Turismo* and *Forza* record the player's input (steering, throttle, brake) per tick and replay it to produce the ghost car in time trials.
-
-The connection to Chapter 4's deterministic fixed timestep is direct. The fixed timestep guarantees that the same sequence of `fixed_dt` steps produces the same simulation results. The polled snapshot guarantees that the same sequence of input states drives the same game logic. Together, they provide the foundation for deterministic replay: given a recording of `(frame_index, Input)` pairs and the same `fixed_dt`, the game produces identical world states.
-
-This is not free determinism: the game must also avoid sources of nondeterminism in its own logic (uninitialized memory, hash-map iteration order, floating-point non-associativity in parallel reductions). But the input and timing layers provide a deterministic *foundation*, which is the precondition for replay, automated testing, and network prediction.
-
-::: {.callout-tip appearance="simple" title="What Gets Recorded"}
-The recording does not need to include every field of the `Input` struct. For replay, only the fields that affect simulation matter: action states, axis values, and (if the game uses raw input) key states. Window state, scale factor, and other platform metadata can be omitted from the recording, since they do not affect game logic. The recording format should include a header with the engine version, `fixed_dt`, and any configuration that affects simulation, so the replay system can validate compatibility before playback.
-:::
-
-Replay has uses beyond entertainment. Automated testing can record a sequence of inputs, run them against a build, and verify that the output matches expectations. This catches regressions that unit tests miss: bugs that emerge only from specific sequences of player actions over time. Bungie has described using recorded input sessions to regression-test *Halo*'s gameplay systems across builds: a recorded playthrough that completes successfully on one build but fails on another isolates the breaking change to the commits between them. Network prediction and rollback also rely on input recording: the server records each client's input and replays the authoritative simulation. These are advanced features, but they all begin with the same foundation: a compact, per-frame input record and a deterministic timestep.
-
+We will revisit replay, recording and determinism as a dedicated topic in Chapter 22, building on the input foundation established here.
 
 ## Cross-Platform Policy {#sec-cross-platform}
 
-A game that ships on multiple platforms (or even a PC game that supports both keyboard and gamepad) must accommodate devices with fundamentally different capabilities. A keyboard has over a hundred discrete keys. A gamepad has two sticks, two triggers, and roughly fifteen buttons. A touchscreen has variable-count pressure-sensitive contacts. A flight stick has a hat switch and a throttle axis. The action mapping layer provides the mechanism for bridging these differences; this section discusses the policy.
+A game that ships on multiple platforms (or even a PC game that supports both keyboard and gamepad) must accommodate devices with fundamentally different capabilities. A keyboard has over a hundred discrete keys. A gamepad has two sticks, two triggers, and roughly fifteen buttons. A touchscreen has variable-count pressure-sensitive contacts. A flight stick has a hat switch and a throttle axis. The action mapping layer provides the mechanism for bridging these differences. This section discusses three cross-platform concerns that the mechanism enables: seamless multi-device support, platform-specific conventions, and text entry. One scoping note: a full touch model (contact tracking, gesture recognition, virtual sticks) follows the same quarantine pattern as an additional device block in the snapshot, but this chapter develops the keyboard, mouse, and controller paths; touch appears here only as a device class for prompt adaptation.
 
-### One Vocabulary, Many Devices
+### Multi-Device Support and Prompt Adaptation
 
-The action system's central value proposition is that game code speaks a single vocabulary regardless of the active device. A character controller reads `axis2d("move")` and gets a direction vector; it does not care whether that vector came from WASD, a left stick, or a touchscreen virtual joystick. A weapon system reads `action_pressed("fire")` and does not care whether it was a mouse click, a trigger pull, or a screen tap.
+The action mapping layer resolves bindings from all connected devices simultaneously, so a player who sets down a controller and reaches for the keyboard does not need to change a setting or restart the game. If the player presses W on the keyboard while the controller is idle, the action resolves from the keyboard binding. If the player then deflects the right stick, the action resolves from the controller binding. But seamless resolution is only half of multi-device support. The other half is player-facing: on-screen prompts must show the correct icons for the device the player is currently using, and the transition between device classes must feel instantaneous and stable.
 
-This is not merely a convenience. It is a prerequisite for several player-facing features:
+Getting this wrong is one of the most visible polish failures in shipped games. A tutorial tooltip that says "Press A to jump" while the player is on a keyboard, or one that flickers between keyboard and gamepad glyphs because a resting controller stick is drifting, undermines the player's confidence in the product before they have left the first room. The problem is that the action system is deliberately device-agnostic: `action_pressed("jump")` returns a boolean with no indication of which device produced it. The UI layer, however, needs to know whether to display a keyboard icon, a gamepad icon, or a touchscreen icon, and it needs that answer to be stable across frames. A naive implementation that checks "which device produced the last non-zero input" will flicker when a player rests their thumb on a drifting stick while typing on a keyboard, because the stick's micro-movements and the keyboard's key presses compete frame to frame.
 
-- **Seamless device switching.** A player who unplugs a controller and picks up a keyboard should not need to restart the game or change a setting. The action system evaluates all active bindings from all connected devices. If the player presses W on the keyboard while the controller is idle, the action resolves from the keyboard binding. If the player then touches the right stick, the action resolves from the controller binding. The transition is seamless because the game code never asked which device the input came from.
+The industry-standard solution is **last-active-device tracking with hysteresis**. The input system monitors all device activity during the quarantine drain. When a device produces input above a significance threshold (any key press or mouse movement for keyboard and mouse, deflection beyond the dead zone for analog sticks), and that device belongs to a different device class than the currently tracked one, the system does not switch immediately. It waits for a brief confirmation window, typically two to three consecutive frames of sustained input from the new device class, before committing the switch. This eliminates flicker without introducing perceptible latency. A genuine device switch involves sustained input from the new device: the player picked up the controller and started using it. Stick drift is sporadic and low-magnitude. The confirmation window filters the second without delaying the first.
 
-- **Prompt adaptation.** On-screen prompts ("Press A to jump" vs. "Press Space to jump") can be driven by the last-used device. The input system tracks which device last produced a non-zero input and exposes this as a query, allowing the UI to display the appropriate prompt icon. This is a presentation concern, not a logic concern; the action value is the same regardless of the prompt.
+```{#lst-active-device .rust lst-cap="Input source tracking with hysteresis and glyph selection"}
+enum InputSource { KeyboardMouse, Controller(ControllerId), Touch }
 
-- **Platform conventions.** Different platforms have different button conventions for the same semantic action. These conventions are handled by the binding table: the platform's default action map uses the conventional button for "confirm," and the player can rebind if desired. Game code never reads a specific button; it reads `action_pressed("confirm")`.
+impl InputSource {
+    fn same_class(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+struct DeviceTracker {
+    current:   InputSource,
+    pending:   Option<InputSource>,
+    holdoff:   u8, // frames of sustained input before switch
+}
+
+impl DeviceTracker {
+    fn update(&mut self, source: InputSource) {
+        if source.same_class(&self.current) {
+            self.current = source;   // update identity within same class
+            self.pending = None;
+            self.holdoff = 0;
+            return;
+        }
+        match &self.pending {
+            Some(p) if p.same_class(&source) => {
+                self.holdoff += 1;
+                if self.holdoff >= 2 {
+                    self.current = source;
+                    self.pending = None;
+                    self.holdoff = 0;
+                }
+            }
+            _ => {
+                self.pending = Some(source);
+                self.holdoff = 1;
+            }
+        }
+    }
+}
+
+impl Input {
+    fn active_source(&self) -> &InputSource;
+    fn glyph(&self, action: &str) -> GlyphId;
+}
+```
+
+Unreal Engine 5's CommonUI plugin implements this pattern through `UCommonInputSubsystem`, which tracks the "last input type" (gamepad, keyboard and mouse, or touch) and fires a delegate when it changes. The UI layer listens for the delegate and swaps icon sets accordingly. Unity's Input System exposes the concept through control schemes (`InputUser.controlScheme`) and the `onControlsChanged` callback, which fires when the player's active scheme changes. Godot provides lower-level building blocks: `InputEvent.device` identifies the source device for each event, and the game is responsible for aggregating this into a device-class tracker, though community plugins fill the gap.
+
+@lst-active-device defines how Smallworld tracks the active input source. `InputSource` distinguishes three input modalities, but the `Controller` variant carries the `ControllerId` established earlier in this chapter rather than collapsing all gamepads into a single category. This gives the glyph system the USB HID vendor and product identifiers it needs to select the correct icon set without hardcoding a list of supported controllers. `DeviceTracker` holds the current source alongside a pending candidate and a holdoff counter. The tracker is updated once per frame at the end of the quarantine drain, with the frame's dominant source (the device class that produced the largest significant input), so the holdoff counts frames rather than raw events. Hysteresis applies to *class* transitions (keyboard to controller, controller to touch) via `same_class`, which compares only the enum discriminant: `KeyboardMouse` vs. `Controller` vs. `Touch`. If the event belongs to the same class as the current source, the tracker updates the identity immediately (so that switching from an Xbox pad to a DualSense swaps the glyph set without delay) and resets the pending state. If the event belongs to a different class, the holdoff counter enforces the confirmation window before committing the switch. The `glyph` method on `Input` is the game-facing API for prompt adaptation: it takes an action name, inspects the active source, and returns a `GlyphId` that the UI resolves to the appropriate icon asset.
+
+The glyph system uses the `ControllerId` inside the active source to resolve prompt icons dynamically. The engine ships glyph atlas assets keyed by vendor ID: vendor `0x045E` (Microsoft) maps to Xbox icons, `0x054C` (Sony) maps to PlayStation icons, `0x057E` (Nintendo) maps to Nintendo icons. Adding support for a new controller manufacturer is an asset addition, not a code change: ship a new glyph atlas, register it under the vendor ID, and the system picks it up automatically. For an unrecognized vendor, the engine falls back to a generic gamepad atlas with positional labels (bottom face button, right face button) rather than manufacturer-specific names. For keyboards, the glyph resolves to a key cap label derived from the bound `KeyCode`. The game's UI code calls `input.glyph("jump")` and receives a `GlyphId` that resolves to the correct icon without needing to know which device or manufacturer is active. Prompt rendering stays entirely in the presentation layer, where it belongs.
+
+Different platforms also have different button conventions for the same semantic action. The standard approach is per-platform default action maps: the engine ships a default `ActionMap` for each supported platform, with bindings that match that platform's conventions. On PlayStation, "confirm" binds to Cross. On Nintendo Switch, "confirm" binds to A (the right face button, which occupies the position where Xbox places B). On Xbox, "confirm" binds to A (the bottom face button). Game code queries `action_pressed("confirm")` and never names a specific button. The per-platform default is loaded at startup based on the build target for consoles or the detected controller type for PC, where the player might connect any manufacturer's gamepad. User rebindings overlay the platform default through the same `user://` mechanism described earlier, so a player who prefers a different convention can change it in the settings screen without the game needing a special case.
 
 ::: {.callout-tip appearance="simple" title="The Confirm Button Problem"}
-The history of the confirm button illustrates why action mapping exists. On PlayStation, the confirm button was traditionally Cross in Western territories and Circle in Japan, a split that persisted for over 25 years. Japanese players who imported Western games (or vice versa) found that confirm and cancel were swapped, because the game had hard-coded the button rather than mapping a semantic action. Sony finally standardized on Cross globally with the PlayStation 5 in 2020, but the transition was controversial and some Japanese players still prefer Circle. Meanwhile, Nintendo's Switch places its "A" button where Xbox's "B" sits, and vice versa. A game that reads `controller_button(0)` will get a different physical button on every platform. A game that reads `action_pressed("confirm")` and ships with per-platform default bindings handles all of these conventions correctly, and a player who disagrees with the platform default can rebind.
+The history of the confirm button illustrates why action mapping and per-platform defaults must work together. On PlayStation, the confirm button was traditionally Cross in Western territories and Circle in Japan, a split that persisted for over 25 years. Japanese players who imported Western games (or vice versa) found that confirm and cancel were swapped, because the game had hard-coded the button rather than mapping a semantic action. Sony finally standardized on Cross globally with the PlayStation 5 in 2020, but the transition was controversial and some Japanese players still prefer Circle. Meanwhile, Nintendo's Switch places its "A" button where Xbox's "B" sits, and vice versa. A game that reads `controller_button(0)` will get a different physical button on every platform. A game that reads `action_pressed("confirm")` and ships with per-platform default bindings handles all of these conventions correctly, and a player who disagrees with the platform default can rebind.
 :::
 
-### Accessibility and Remapping
+### Text Input
 
-Player-accessible remapping is not a luxury feature. It is a fundamental quality-of-life capability that serves players with motor disabilities, non-standard hardware, personal preferences, and platform-specific conventions. A player who uses a one-handed controller, a player who cannot reach certain keys due to a physical condition, a player who prefers inverted Y-axis for historical reasons, and a player who simply wants ESDF instead of WASD all benefit from the same system. *The Last of Us Part II* (2020) set a new industry benchmark by shipping over 60 accessibility options, including full remapping, button-hold toggles, and custom control presets. *Celeste* (2018) demonstrated that accessibility features (an assist mode that let players customize game speed and invincibility) could ship in a challenging game without diminishing its identity. These examples shifted the industry conversation from "should we support accessibility?" to "how deeply can we support it?"
+When a player presses the W key during gameplay, the engine asks a state question: is the key down? The action system resolves this through the binding table, producing a boolean or an axis value. The entire input model built so far in this chapter is organized around state and edges: what is held, what just changed, what is the current magnitude. But when that same player opens a chat window and presses the W key, the question is no longer about device state. The game needs to know that the character "w" (or "W" if Shift is held, or "ω" on a Greek keyboard layout, or nothing visible yet because the key began a dead-key composition for "ẃ") should be inserted at the cursor position in the text buffer. This is not a more complex version of the same question. It is a fundamentally different question with different data, different timing, and different invariants, and it must travel a different path through the engine.
 
-The action system provides remapping as a structural consequence of its design, not as an afterthought:
+The distinction between physical key state and composed text is the reason text input exists as a separate subsystem rather than a special case of the action system. A scan code identifies which physical key is currently down. A text event identifies which character the operating system's input pipeline has resolved from the user's key sequence, after applying the active keyboard layout, processing dead-key composition, and consulting the Input Method Editor if one is active. These are different layers of the same key press, and they serve different consumers. The action system cares about the first: physical key identity, for mapping to game intent. A text field cares about the second: the resolved character, for insertion into a string.
 
-- Every action can be rebound to any device input of compatible kind (a `Button` action can be bound to any key, mouse button, or controller button; an `Axis2d` action can be bound to any stick, mouse motion, or composite key set).
-- Multiple bindings per action allow simultaneous support for different devices without explicit profiles.
-- User overrides persist to `user://` and survive game updates, as described in @sec-device-to-intent.
-- "Reset to defaults" restores the original bindings without losing other user settings.
+Three properties of text input make it structurally incompatible with the polled-snapshot model that serves action input so well:
 
-The settings screen that presents this capability is game code, not engine code. The engine provides the `ActionMap` asset type, the binding vocabulary, and the `user://` persistence path. The game provides the UI. This separation ensures that the rebinding interface can match the game's visual style and interaction model rather than being a generic engine dialog. It also means the engine does not impose a specific accessibility model: the game can build toggle modes, sensitivity curves, one-handed presets, and any other accommodation on top of the same binding primitives that power standard remapping.
+**Ordering.** A snapshot that reports "A is held, B is held" has lost the information about which key was pressed first. For action input this is harmless: the game evaluates each action independently, and the order of two simultaneous presses does not affect the outcome. For text input, it is fatal: "ab" and "ba" are different strings, and the engine must preserve the order in which characters arrive within a frame.
 
-### IME and Text Composition
+**Composition.** Many writing systems require multiple key presses to produce a single character. European keyboards use dead keys: pressing the acute accent key followed by "e" produces "é", but the accent key alone produces nothing visible until the next key resolves the composition. East Asian languages use Input Method Editors (IMEs), where the user types a phonetic sequence (pinyin for Chinese, romaji for Japanese, jamo for Korean), the OS presents a candidate list of possible characters or words, and the user selects the intended one. The IME maintains a composition buffer, the intermediate text being assembled, that the application must display inline as provisional content (typically underlined or highlighted). The final committed character may bear no visual resemblance to the keys that produced it. This is an event-driven dialog between the OS and the application, with intermediate states that a per-frame snapshot cannot represent: a snapshot has no concept of "text that exists but has not been confirmed yet."
 
-Text entry is a qualitatively different input mode from action-based gameplay input, and it must be handled through a separate path. When a player types into a chat field, a console, or a text input widget, the engine must support:
+**Character identity.** The same physical key produces different characters depending on the keyboard layout (QWERTY, AZERTY, Dvorak, Colemak), the modifier state (Shift, AltGr, Option), the dead-key composition state, and the active IME. A snapshot of key state cannot tell the game what character the user intends to type, because that information exists only after the OS has processed the key through its full input pipeline. The engine must receive the resolved character from the platform, not infer it from scan codes.
 
-- **Character-by-character input** with correct Unicode handling, including multi-byte characters, emoji, and right-to-left scripts.
-- **Input Method Editors (IME)** for languages like Chinese, Japanese, and Korean, where a sequence of key presses composes a character through a candidate selection interface managed by the OS.
-- **Composition state** (the intermediate string that the IME is building but has not yet committed), which must be displayed in the text field but not treated as final input.
+Every engine that supports in-game text input maintains a separate event-driven path for it. Unreal Engine 5's Slate UI framework processes text through `FSlateApplication::OnKeyChar` and IME composition through dedicated `OnIMECommit` and `OnIMECompositionChanged` handlers, entirely separate from Enhanced Input's action resolution. Unity routes text events through UI Toolkit's `KeyDownEvent` (which carries a `character` field distinct from the key code) and composition callbacks on `InputTextField`, bypassing the Input System's action maps. Godot provides `InputEventKey.unicode` for resolved characters and handles IME through platform-specific backends that route composition state through the scene tree's input propagation rather than the action-based `Input` singleton.
 
-These requirements are incompatible with the polled-snapshot model. A snapshot that reports "key A is held" cannot represent a composition sequence. Worse, the IME interaction is inherently event-driven: the OS delivers composition updates, candidate lists, and commit events as a sequence of callbacks.
+@lst-text-event defines the types Smallworld uses for its text input path. `TextEvent` captures the four stages of text input: a resolved character (the common case for Latin-script typing without composition), the start of an IME composition session, an update to the composition buffer (which the text widget displays as provisional, uncommitted content), and the final commit that replaces the composition with the resolved string. `CompositionState` tracks the in-progress composition for display purposes: the text widget renders the `text` field as inline, visually distinct content (typically underlined) with the cursor positioned within it.
 
-Smallworld handles text entry by routing `winit`'s text-related events (character input, IME composition start, composition update, commit) directly to the focused text widget through the UI framework's event path. This path is separate from the action system. While a text field is focused, it pushes a context-stack map that blocks gameplay actions, and the UI framework processes text events through its own retained-mode pipeline. When the text field loses focus, the map is popped, and the action system resumes normal operation.
+\floattop
+```{#lst-text-event .rust lst-cap="TextEvent and CompositionState: the text input path"}
+enum TextEvent {
+    Char(char),
+    CompositionStart,
+    CompositionUpdate { text: String, cursor: usize },
+    CompositionCommit(String),
+}
 
-The key insight is that text input and action input are different in kind, not just in degree. Attempting to unify them under a single model (either by adding text events to the action system or by routing actions through the text path) produces a system that handles neither well. The clean separation keeps each path simple and correct.
+struct CompositionState {
+    active: bool,
+    text:   String,       // the provisional composition string
+    cursor: usize,        // cursor position within the composition
+}
+```
 
-### The Platform Boundary
+During the quarantine drain, `winit`'s text-related events (`Ime::Preedit`, `Ime::Commit`, and character events) are not folded into the `Input` snapshot. They are collected into a per-frame `Vec<TextEvent>` and routed to the currently focused text widget through the UI framework's event dispatch. The UI framework knows which widget holds keyboard focus and delivers text events to that widget's handler in the order they arrived. The widget processes them sequentially, updating its internal text buffer and, when a composition is active, displaying the provisional composition string with appropriate visual treatment.
 
-The platform boundary is the narrow surface through which OS-specific types enter the engine and are translated into engine-owned types. Every engine draws this line somewhere, and the placement determines how much game code must change when the engine ships on a new platform. Draw the line too deep inside the engine, and platform details leak into gameplay systems that should never have seen them. Draw it too wide (abstracting windowing, file IO, threading, timers, and input behind a single platform interface), and you build an abstraction layer that duplicates work already done by the libraries beneath it. The sweet spot is a thin adapter that translates exactly the types that are genuinely platform-specific, and nothing more.
+The context stack cooperates naturally with text input. When a text field receives focus, it pushes a context-stack map with `passthrough: false`, blocking gameplay actions from firing in response to the same key presses that are producing text. Pressing W inserts a character rather than moving the player character, because the text-entry map sits above the gameplay map and blocks it. When the text field loses focus, it pops the map, and the action system resumes normal operation. The W key that was inserting a character a moment ago becomes the "move forward" binding again. The input system and the UI focus system agree on routing because they share the same mechanism: the context stack described in the previous section.
 
-Unreal draws this line at its `FGenericPlatformMisc` and `FGenericApplication` classes, which provide platform-specific subclasses for each target. The depth is justified: Unreal ships on platforms with proprietary input APIs that demand custom backends. Unity draws the line at its native player loop, where platform-specific C++ code feeds events into the managed C# runtime. Godot draws it at `DisplayServer` and the OS-specific input handlers. In each case, the boundary's purpose is the same: game code above the line never sees a platform type.
+The separation between text input and action input is a correctness requirement, not a convenience. Unifying them under a single model would force a choice: either the model loses text ordering and composition state (breaking text input), or it introduces event queues and stateful composition into the action path (breaking the polled-snapshot invariant that makes action input deterministic, replayable, and simple to reason about). Keeping each path optimized for its own invariants avoids both failure modes.
 
-In Smallworld, this boundary has four properties:
 
-**Thin, not deep.** The platform adapter is a small module (a few hundred lines) that drains `winit`'s event loop and a controller library, translates their types, and populates the `Input` struct and `WindowState`. It does not provide a generalized platform-abstraction layer with interfaces for windowing, file IO, threading, and timers. Those are handled by `wgpu` (graphics), Rust's standard library (threads, files, timers), and the asset system (virtual filesystem). The adapter handles only what is genuinely platform-specific at the input boundary.
+## Accessibility {#sec-accessibility}
 
-**Thread-safe value types on all outputs.** The `Input` struct, `WindowState`, and all types they contain are plain value types with no references, no borrowed window handles, and no platform-specific pointer types. They can be sent across threads, stored in arenas, serialized, and recorded without lifetime concerns. In Rust, this property is enforced by the `Send + 'static` bounds that the compiler checks at every thread crossing. In C++, achieving the same guarantee requires discipline and convention; Rust makes it a compile-time invariant.
+The action mapping and rebinding infrastructure described in @sec-device-to-intent provides the motor-input foundation for accessibility: full rebinding, device-agnostic actions, persistent user overrides, and `DeviceFilter` support for adaptive controllers. But accessibility spans far more than input remapping. Motor accommodations (hold-to-toggle, sensitivity curves, one-handed presets), visual accommodations (colorblind modes, font scaling, high-contrast UI), auditory accommodations (subtitles, visual indicators for sound cues, mono audio), and cognitive accommodations (difficulty scaling, navigation assistance, reduced UI complexity) each touch different engine subsystems and carry their own certification requirements.
 
-**Stable across platform adapter changes.** Game code depends on `Input`, `WindowState`, `KeyCode`, `ActionMap`, and other engine types. It does not depend on `winit::event::KeyEvent`, `winit::window::Window`, or any other library type. If the engine replaces `winit` with a different windowing library, or writes its own platform layer for a console port, game code is unaffected. The adapter is the only module that must change.
+Chapter 25 covers accessibility as a dedicated, cross-cutting topic, building on the input primitives established here and the UI, audio, and rendering infrastructure introduced in later chapters.
 
-**Connection to Chapter 2's package map.** The platform adapter sits at the bottom band of the package map introduced in Chapter 2. It is a leaf dependency: it depends on platform libraries, and nothing else in the engine depends on it except the boot sequence and the INPUT phase. This is the structural realization of the principle that platform details should terminate at a narrow adapter layer rather than leak through the game model.
 
-::: {.callout-warning appearance="simple" title="The Platform Adapter Is Not the Input System"}
-A common architectural mistake is to conflate the platform adapter with the input system. The platform adapter translates OS events into engine types. The input system manages the snapshot, edge detection, action mapping, context stack, and intent patterns. They are separate concerns with separate responsibilities. The adapter runs during INPUT and produces raw data; the input system consumes that data and produces the game-facing API. Collapsing them into a single module creates a system that is simultaneously too close to the platform (it imports OS types) and too close to the game (it implements action logic), making it difficult to test, port, or replace.
-:::
-
-### The GameContext: Input in Its Place
+## Input in the GameContext
 
 The `Input` struct does not exist in isolation. Game code receives it as part of the `GameContext`, the single borrow that provides everything a game system needs during its phase. @lst-game-context defines the struct, showing `Input` as an immutable borrow alongside mutable access to the `World`, `AssetServer`, and other services.
 
@@ -525,11 +623,18 @@ struct GameContext<'a> {
     events: &'a mut EventBus,
     window: &'a WindowState,
 }
+
+impl GameContext<'_> {
+    // Context-stack operations mutate engine state,
+    // never the frozen Input snapshot
+    fn push_map(&mut self, map: AssetHandle<ActionMap>);
+    fn pop_map(&mut self);
+}
 ```
 
-Input is an immutable borrow (`&Input`). Game code can read it but cannot modify it: the snapshot was frozen during INPUT, and no game system should be able to alter what other systems see. This is a deliberate asymmetry: `world` and `assets` are mutable borrows because game systems legitimately mutate game state and request asset operations; `input`, `time`, and `window` are immutable borrows because they describe the external environment, which the game observes but does not control.
+@lst-game-context shows a deliberate asymmetry in mutability. `world` and `assets` are mutable borrows because game systems legitimately mutate game state and request asset operations. `input`, `time`, and `window` are immutable because they describe the external environment, which the game observes but does not control. The snapshot was frozen during INPUT, and no game system should be able to alter what other systems see.
 
-The `push_map` and `pop_map` methods are the exception: they modify the context stack. Because reading input and modifying the stack are logically distinct operations (one observes, the other mutates), the engine routes them through separate paths on `GameContext`. Stack operations go through a dedicated method on `GameContext` rather than through the immutable `input` borrow, ensuring that reading and writing never conflict. This separation reflects a general API design principle: when a subsystem has both read-only queries and mutating commands, exposing them through separate access paths prevents callers from accidentally mixing the two.
+The `push_map` and `pop_map` methods in the impl block are the exception: they modify the context stack. Because reading input and modifying the stack are logically distinct operations (one observes, the other mutates), the engine routes stack operations through these dedicated methods on `GameContext`, backed by engine state outside the public fields, rather than through the immutable `input` borrow. Reading and writing never conflict, and the snapshot's immutability guarantee survives.
 
 
 ## Chapter Summary {.unnumbered}
@@ -538,17 +643,19 @@ This chapter has traced the path from raw platform signals to game-facing intent
 
 1. **The quarantine principle.** The INPUT phase drains the OS event pump (`winit` for window and keyboard events, a controller library for gamepads) into a single polled `Input` snapshot. From this point forward, game code sees a frozen, consistent, platform-independent view of all device state. The quarantine serves three goals: consistency (every system in the tick sees the same input), determinism (the snapshot is a reproducible record), and platform isolation (no library types leak past the boundary).
 
-2. **Two layers of abstraction.** The raw polling API (`key_held`, `key_pressed`, `mouse_delta`) provides device-level queries with edge detection for discrete inputs and accumulation for analog inputs. The action mapping layer (`action_pressed("jump")`, `axis2d("move")`) adds named, rebindable, device-agnostic actions defined as data-driven `ActionMap` assets. The raw layer exists for tools and debug; the action layer is the standard game-facing API.
+2. **Two layers of abstraction.** The raw polling API (`key_held`, `key_pressed`, `mouse_delta`) provides device-level queries with edge detection for discrete inputs and accumulation for analog inputs. The action mapping layer (`action_pressed("jump")`, `axis2d("move")`) adds named, rebindable, device-agnostic actions defined as data-driven `ActionMap` assets. The raw layer exists for tools and debug, while the action layer is the standard game-facing API.
 
-3. **The context stack.** Active action maps stack with push/pop semantics and a `passthrough` flag. Opening a pause menu pushes a blocking UI map; gameplay actions beneath it are silenced. This implements UI focus and capture structurally (through the same mechanism the input system uses for all action resolution) rather than through scattered boolean flags.
+3. **The context stack.** Active action maps stack with push/pop semantics and a `passthrough` flag. Opening a pause menu pushes a blocking UI map, and gameplay actions beneath it are silenced. This implements UI focus and capture structurally (through the same mechanism the input system uses for all action resolution) rather than through scattered boolean flags.
 
 4. **Rebinding as a data operation.** Action maps are assets. User overrides serialize to `user://`. The settings screen reads and writes `ActionMap` data through the same types the engine uses internally. Reset to defaults is a file deletion.
 
-5. **The fixed-tick edge problem and the intent pattern.** Per-frame edges (`pressed`, `released`) are invisible to fixed ticks that do not run, and fire multiple times in fixed ticks that run more than once. The documented pattern (read the edge in `update`, set an intent flag, consume and clear the flag in `fixed_update`) bridges the mismatch explicitly. The engine documents the pattern rather than hiding it behind fragile buffering.
+5. **The fixed-tick edge problem and tick-stamped edges.** Per-frame edges (`pressed`, `released`) are invisible to fixed ticks that do not run, and fire multiple times in fixed ticks that run more than once. The engine provides `fixed_action_pressed` and `fixed_action_released` as tick-stamped edge queries: each edge is stamped with the index of the next fixed tick, and the query is true only in that tick. The queries are pure (reading them mutates nothing) and serve any number of consumers. The manual intent-flag pattern remains available for custom consumption semantics.
 
-6. **Replay and determinism.** The polled snapshot is a compact, serializable, per-frame record. Combined with Chapter 4's deterministic fixed timestep, it provides the foundation for replay, automated testing, and network input prediction.
+6. **The input foundation for replay.** The polled snapshot is a compact, serializable, per-frame record. Combined with Chapter 4's deterministic fixed timestep, it provides the input-side foundation for replay, automated testing, and network input prediction. Chapter 22 covers replay, recording, and determinism as a dedicated topic.
 
-7. **Cross-platform policy.** One action vocabulary serves all devices. Composite bindings bridge digital keys and analog axes. Dead zones are a binding-level concern. IME and text composition travel a separate event path to the focused UI widget. The platform adapter is a thin shell that translates `winit` types into `Send + 'static` engine types; everything above it is platform-independent.
+7. **Cross-platform policy.** One action vocabulary serves all devices. Last-active-device tracking with hysteresis enables seamless device switching, and a glyph query maps action names to device-appropriate prompt icons. Platform button conventions are handled by per-platform default action maps. Text input travels a separate event-driven path to the focused UI widget, because text is sequential, composed, and stateful in ways that the polled-snapshot model cannot represent.
+
+8. **Accessibility.** The input system provides the motor-accessibility foundation (rebinding, device-agnostic actions, adaptive controller support). Chapter 25 covers accessibility as a cross-cutting concern spanning input, UI, audio, and visual design.
 
 The input system provides the engine with a stable, frame-synchronized vocabulary of player intent. The next chapter turns to the infrastructure that makes the rest of the engine's data model safe and observable: **memory, handles, and instrumentation**: how generational indices, slot-map arenas, named budgets, and structured diagnostics give every subsystem stable identities, bounded costs, and evidence when something goes wrong.
 
@@ -559,15 +666,15 @@ The input system provides the engine with a stable, frame-synchronized vocabular
 
 2. How does the engine detect that a key was *pressed this frame* rather than merely *held*? What additional state must the INPUT phase maintain, and what is the computational cost?
 
-3. A `Composite` binding maps key pairs to an axis value. Why must the resulting vector be normalized? Calculate the magnitude of the unnormalized vector when two of two axes are active simultaneously (2D case) and when three of three axes are active simultaneously (3D case).
+3. A `Composite` binding maps key pairs to an axis value. Why must the resulting vector's magnitude be clamped to unit length? Calculate the magnitude of the unclamped vector when two of two axes are active simultaneously (2D case) and when three of three axes are active simultaneously (3D case).
 
 4. The context stack uses a `passthrough` flag on each `ActionMap`. Describe a scenario where `passthrough: true` is the correct choice, and a scenario where `passthrough: false` is the correct choice. What would happen if the default were `true` instead of `false`?
 
-5. Explain the fixed-tick edge problem. A game runs at 30 fps with a 60 Hz fixed timestep. The player presses the jump button during one frame. How many times does `fixed_update` run, and how many times would the jump impulse be applied without the intent pattern?
+5. Explain the fixed-tick edge problem. A game runs at 30 fps with a 60 Hz fixed timestep. The player presses the jump button during one frame. How many times does `fixed_update` run, and how many times would the jump impulse be applied if the game read `action_pressed` there instead of the tick-stamped `fixed_action_pressed`? Why does a tick-stamped edge fire exactly once in this scenario?
 
 6. Why does Smallworld handle text entry (IME, character composition) through a separate path from the action system, rather than routing text through the same `Input` snapshot? What information would be lost if text entry used the polled-snapshot model?
 
-7. The `Input` struct contains a fixed-size array `[Option<ControllerState>; 4]` rather than a `Vec<ControllerState>`. What are the trade-offs of this choice? Under what circumstances would a dynamic collection be preferable?
+7. The `Input` struct stores controllers in `Vec<Option<ControllerState>>` connection slots and identifies each device by `ControllerId` (vendor, product, serial). Why does a disconnect leave a `None` hole instead of removing the entry? Why is device identity important for the binding system, and what would go wrong if bindings referenced controllers by slot index alone?
 
 8. A game developer wants to add a "vehicle" context with actions like "steer" and "accelerate" that should replace the character controller's "move" and "jump" when the player enters a vehicle. Describe how the context stack and action maps implement this transition, and what happens when the player exits the vehicle.
 

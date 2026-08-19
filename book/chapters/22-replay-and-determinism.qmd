@@ -1,0 +1,50 @@
+# Replay, Recording, and Determinism
+
+> **Draft chapter map.** A dedicated treatment of replay as a cross-cutting engine capability, covering input replay, gameplay state recording, network demo recording, determinism requirements, rollback netcode, and automated testing.
+
+## Input Replay
+
+- The `Input` snapshot (Chapter 5) is a serializable, self-contained value type. Recording input means saving one snapshot per frame; replaying means feeding recorded snapshots into the INPUT phase in place of the live quarantine drain.
+- Recording format: header (engine version, `fixed_dt`, configuration hash) followed by a sequence of `(frame_index, game_delta, Input)` triples. Only simulation-affecting fields need recording; window state and platform metadata can be omitted.
+- The per-frame `game_delta` is not optional: the accumulator must reproduce the same tick cadence (zero/one/two fixed ticks per frame) so that Chapter 5's tick stamps land on the same ticks. Without it, every `fixed_action_pressed` result can diverge on replay. This answers Chapter 5's review question about what the recording must include beyond the snapshot.
+- This is the simplest form of replay and the foundation for all others. *StarCraft* (1998) used input-only replay because the game state was too large to snapshot at useful frequency; the replay file was under 100 KB for a 30-minute match.
+
+## Gameplay State Replay
+
+- UE5's Replay System records gameplay state (network-level demo recording), not raw input. It captures actor state, property replication, and RPC events as a network stream written to disk. Playback reconstructs the game by replaying the stream through the replication system.
+- This approach does not require determinism: the recording includes enough state to reconstruct the world regardless of floating-point drift or hash-map ordering differences. The trade-off is file size and the inability to "what-if" with modified input.
+- Compare the two approaches: input replay is compact and supports counterfactual replay but demands strict determinism. State replay is larger and cannot be modified but tolerates nondeterminism.
+
+## Network Replay and Demo Recording
+
+- Server-authoritative recording: the server records each client's input and the authoritative simulation state. Playback can reproduce the match from the server's perspective.
+- Client-side recording: the client records its local prediction and correction stream. Useful for bug reproduction but not authoritative.
+- Source engine and Unreal both use this approach for competitive match review and broadcast.
+
+## Determinism Requirements and Pitfalls
+
+- Input replay only works if the simulation is deterministic given the same inputs. Chapter 4's fixed timestep provides half of this guarantee; the other half must come from the game and engine logic.
+- Sources of nondeterminism: uninitialized memory, hash-map iteration order (Rust's `HashMap` is intentionally randomized), floating-point non-associativity in parallel reductions, thread scheduling, system clock reads, random number generators without fixed seeds.
+- Mitigation strategies: deterministic hash maps (`IndexMap`, `BTreeMap`), fixed seeds for RNG, sequential reductions for floating-point sums, avoiding system clock reads in simulation logic.
+- Testing determinism: run the same input recording twice and diff the world state at each frame. Any divergence indicates a nondeterminism source.
+
+## Rollback Netcode
+
+- GGPO (now integrated into virtually every modern fighting game) records each player's input per frame and replays the simulation to reconcile prediction errors. When the server receives a corrected input, it rolls back to the last confirmed state and re-simulates forward using the corrected input stream.
+- This is input replay running backward: the engine must be able to snapshot game state, restore it, and re-simulate a range of *ticks* with different input.
+- Rollback operates on the per-tick input record (`TickInput`), not the per-frame snapshot: Chapter 21 materializes it from Chapter 5's tick stamps, and re-simulation swaps the backing store of `fixed_action_pressed` from live stamps to recorded `TickInput` while the query API stays unchanged. Showcase this swap explicitly; it is the payoff of Chapter 5's escape-hatch design.
+- Requirements: deterministic simulation, fast state snapshot/restore, and the ability to re-run N fixed ticks without rendering.
+- Racing games use input recording for ghost replay: *Gran Turismo* and *Forza* record the player's input (steering, throttle, brake) per tick and replay it to produce the ghost car in time trials.
+
+## Automated Testing via Replay
+
+- Recorded input sessions can be used for regression testing: a recorded playthrough that completes successfully on one build but fails on another isolates the breaking change to the commits between them.
+- Bungie has described using this approach for *Halo*'s gameplay systems.
+- Property-based testing: generate random input sequences, run them, and check invariants (no crashes, no NaN positions, no physics tunneling).
+- Performance profiling: replay a demanding input sequence under a profiler to measure frame time regression without human variance.
+
+## Engine vs. Game Responsibility
+
+- **Research finding:** Unity is the only major engine that ships raw input recording as engine infrastructure (`InputEventTrace` and `InputRecorder` in the Input System package). UE5, Godot, and all other major engines treat replay as game code or plugin territory.
+- The engine's responsibility is to provide the *foundation*: serializable input snapshots, deterministic fixed timestep, and (for rollback) fast state snapshot/restore. The recording infrastructure itself can live at either level.
+- Design question: should Smallworld ship a built-in recorder (like Unity) or provide only the foundation (like UE5/Godot)?

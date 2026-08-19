@@ -318,6 +318,9 @@ impl GameContext<'_> {
 
     // Render feedback — fn feedback(), fn gpu_frame_time(): defined in
     // Frame Pipeline — Render-to-Game Feedback (not repeated here).
+
+    // Input context stack — fn push_map(), fn pop_map(): defined in
+    // Input — Action Mapping (not repeated here).
 }
 
 struct Time {
@@ -529,7 +532,8 @@ Accumulated per-frame on the main thread. Provides held/pressed/released semanti
 struct Input {
     keyboard:    KeyboardState,
     mouse:       MouseState,
-    controllers: Vec<ControllerState>,
+    controllers: Vec<Option<ControllerState>>,  // connection slots; None = disconnected hole
+                                                // (indices stable within a session)
 }
 
 impl Input {
@@ -580,22 +584,32 @@ struct ActionDef {
     bindings: Vec<Binding>,          // rebindable; user edits serialize to user://
 }
 
+enum StickSide { Left, Right }
+
 enum Binding {
     Key(KeyCode),
     MouseButton(MouseButton),
     MouseMotion,                                       // Axis2d
     ControllerButton { device: DeviceFilter, button: u8 },
-    ControllerAxis  { device: DeviceFilter, axis: u8, dead_zone: f32 },
+    ControllerAxis  { device: DeviceFilter, axis: u8, dead_zone: f32 },        // scalar; per-axis dead zone
+    ControllerStick { device: DeviceFilter, stick: StickSide, dead_zone: f32 },// 2D unit; RADIAL dead zone
     Composite { axes: Vec<(KeyCode, KeyCode)> },           // (positive, negative) per axis
 }
 
 impl Input {
     fn action_held(&self, name: &str) -> bool;
-    fn action_pressed(&self, name: &str) -> bool;      // frame edge — see fixed-tick rule
+    fn action_pressed(&self, name: &str) -> bool;      // frame edge
     fn action_released(&self, name: &str) -> bool;
+    fn fixed_action_pressed(&self, name: &str) -> bool;  // pure tick-stamped edge query
+    fn fixed_action_released(&self, name: &str) -> bool; //   (see fixed-tick edge rule)
     fn axis1d(&self, name: &str) -> f32;
     fn axis2d(&self, name: &str) -> Vec2;
     fn axis3d(&self, name: &str) -> Vec3;
+}
+
+// Context-stack ops are methods on GameContext, NOT on Input — the snapshot
+// stays immutable; stack mutation routes through engine state (2026-08-19):
+impl GameContext<'_> {
     fn push_map(&mut self, map: AssetHandle<ActionMap>);
     fn pop_map(&mut self);
 }
@@ -603,7 +617,8 @@ impl Input {
 
 - **Context stack.** Active maps stack: opening the pause menu pushes the `ui` map, which (by default, `passthrough: false`) blocks gameplay actions beneath it — this is the input half of the UI focus/capture rule (OQ 18). Popping restores gameplay.
 - **Rebinding & persistence.** `ActionMap`s are assets; user rebinds serialize to `user://` (the settings screen edits bindings; the VFS persists them).
-- **Fixed-tick edge rule.** Action edges are per-_frame_, but a frame may run zero or two fixed ticks — so edges can be missed or double-seen by fixed logic. The documented pattern: read edges in `update`, convert to intent state ("jump requested"), consume the intent in `fixed_update`. The engine documents the pattern rather than hiding it.
+- **Fixed-tick edge rule.** _(Revised 2026-08-19 during the Ch05 internal pass; was a consumed-once latch.)_ Action edges are per-_frame_, but a frame may run zero or two fixed ticks — so edges can be missed or double-seen by fixed logic. During INPUT the engine stamps each action edge with the index of the **next fixed tick to run**; `fixed_action_pressed`/`fixed_action_released` return true only in the fixed tick whose index matches the stamp (Godot-style clock-aware edges). The queries are **pure**: nothing is consumed on read, so any number of systems can read the same edge in the same tick. Zero-tick frames defer the edge to the next tick that runs; multi-tick frames fire it exactly once. Edges are stamped only for actions that resolve through the active context stack (a blocked action never latches a phantom edge). Game code in `fixed_update` calls these instead of `action_pressed`. The manual intent-flag pattern remains available for custom consumption semantics.
+- **Axis resolution & dead zones.** _(2026-08-19.)_ When multiple bindings are active, an axis action resolves to the contribution with the **largest magnitude** that frame (Unity-style disambiguation; deterministic, no cross-frame history). Action edges are computed at the action layer by diffing resolved values frame-over-frame (covers controller buttons with no device-level edge state; multi-bound actions edge once). `Composite` output is clamped to unit length. `ControllerStick` applies its dead zone **radially** on the 2D vector (direction-preserving rescale); `ControllerAxis` applies a scalar dead zone. Per-axis dead zones on stick pairs are forbidden (cross-shaped dead region artifact).
 
 ### 6. Audio
 

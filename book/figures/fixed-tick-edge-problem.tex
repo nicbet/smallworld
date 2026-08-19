@@ -17,7 +17,7 @@
   % Tick annotation
   \node[font=\sffamily\tiny, black!55, anchor=north] at (3.2,4.15) {1 tick};
   % Result
-  \node[font=\sffamily\tiny, black!65, anchor=west] at (6.2,4.5) {Jump fires once --- correct};
+  \node[font=\sffamily\tiny, black!65, anchor=west] at (6.2,4.5) {Jump fires once: correct};
   \node[font=\sffamily\tiny, black!45, anchor=west] at (6.2,4.15) {(common at 60 fps / 60 Hz fixed)};
 
   % --- Case 2: Zero ticks (edge lost) ---
@@ -33,7 +33,7 @@
   % Strikethrough on FIXED
   \draw[line width=0.5pt, black!40] (2.65,2.5) -- (3.75,2.5);
   % Result
-  \node[font=\sffamily\tiny, black!65, anchor=west] at (6.2,2.5) {Edge never seen --- jump lost};
+  \node[font=\sffamily\tiny, black!65, anchor=west] at (6.2,2.5) {Edge never seen: jump lost};
   \node[font=\sffamily\tiny, black!45, anchor=west] at (6.2,2.15) {(fast frame: 240 fps / 60 Hz fixed)};
 
   % --- Case 3: Two ticks (double fire) ---
@@ -49,10 +49,10 @@
   % Tick annotation
   \node[font=\sffamily\tiny, black!55, anchor=north] at (3.75,0.15) {2 ticks};
   % Result
-  \node[font=\sffamily\tiny, black!65, anchor=west] at (7.4,0.5) {Edge seen twice --- double jump};
+  \node[font=\sffamily\tiny, black!65, anchor=west] at (7.4,0.5) {Edge seen twice: double jump};
   \node[font=\sffamily\tiny, black!45, anchor=west] at (7.4,0.15) {(slow frame: 30 fps / 60 Hz fixed)};
 \end{tikzpicture}
-\caption{The fixed-tick edge problem. A per-frame edge (``pressed'') is visible to zero, one, or two fixed ticks depending on the frame rate. Without the intent pattern, edges can be lost (Case~2) or double-fired (Case~3).}
+\caption{The fixed-tick edge problem. A per-frame edge (``pressed'') is visible to zero, one, or two fixed ticks depending on the frame rate: naive edge reads lose the edge (Case~2) or double-fire it (Case~3).}
 \label{fig:fixed-tick-edge-problem}
 \end{figure}
 \FloatBarrier

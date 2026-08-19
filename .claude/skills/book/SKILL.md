@@ -70,6 +70,23 @@ each idea comes from and why it endures:
   survived after decades of shipped games. Anecdotes from real engines (id Tech,
   Unreal, Unity, Godot, Frostbite, CryEngine) give decisions weight that an
   abstract argument cannot.
+- **Compare engine-offered solutions, then argue the winner on merits.** Scale
+  the treatment to how much the engines actually disagree:
+  1. *Engines diverge and Smallworld picks one (or invents its own):* full
+     treatment. Present each engine's strategy, verified against vendor docs
+     rather than memory, then argue explicitly why Smallworld's pick wins over
+     each alternative, on the merits, in Smallworld's context. "Consensus,"
+     "first one that looked good," or an unexamined alternative are never
+     acceptable rationales: Smallworld cherry-picks the absolute best ideas,
+     and the prose must show the comparison that earned the pick. (Ceiling
+     example: Chapter 5's Tick-Stamped Edges section.)
+  2. *Engines converge and Smallworld follows:* a consensus statement plus
+     historical grounding for why the pattern won. The industry already ran
+     the tournament; do not force a per-alternative rationale onto settled
+     questions.
+  3. *Internal micro-decisions with no engine-visible precedent* (field
+     layouts, container choices, naming): a sentence of local rationale; no
+     comparison owed.
 - **Distinguish winners from compromises.** Some patterns recur because they are
   genuinely best-in-class (ECS for game objects, extract-and-render firewalls,
   fixed timesteps). Others recur because an older constraint forced them and
@@ -98,8 +115,16 @@ TOC entry, use a bold lead-in in the prose.
 
 ## Target length
 
-Roughly 8,000-10,000 words per chapter (30-40k characters). Enough for a substantial
-textbook chapter, not a survey article.
+8,000-10,000 words per chapter (30-40k characters) is a reference point, not a
+cap. It exists to flag runaway writing; different chapters legitimately need
+different budgets depending on the depth of their material, and a chapter dense
+with genuine engine-divergence comparisons runs longer than a survey chapter,
+and should. Never cut comparison depth, winner rationales, or industry
+grounding to hit the number. Treat significant overshoot as a soft signal to
+investigate: first hunt for redundancy and duplicated arguments; if the chapter
+is lean and still far over, that is evidence it wants to split into two
+chapters, which is an outline decision to raise with the author, never a trim
+to perform silently.
 
 ## Verification checklist
 

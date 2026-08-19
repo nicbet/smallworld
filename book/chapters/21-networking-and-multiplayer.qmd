@@ -26,11 +26,13 @@
 
 - Introduce client prediction, reconciliation, and visual interpolation.
 - Connect them to the fixed/variable time model from Chapter 4.
+- Pick up Chapter 5's tick-stamped edges and take the marshaling escape hatch named there: prediction requires each tick's input as a serializable value. Materialize the per-tick input record (`TickInput`: resolved action values plus every edge stamped for tick T) directly from the stamps; this is the point where Smallworld adopts the data shape of UE5's `UAsyncPhysicsInputComponent` without changing the query API.
+- Showcase the backing-store swap: `fixed_action_pressed`/`axis2d` keep their signatures; the backing store is live stamps during normal play and the transmitted/recorded `TickInput` during rollback re-simulation. Add what networking layers on top: per-player input streams, input delay windows, server-authoritative input validation.
 
 #### Rollback and Determinism
 
 - Explain what rollback requires and why not every engine or game needs it.
-- Identify deterministic boundaries, input history, and reproducibility requirements.
+- Identify deterministic boundaries, input history, and reproducibility requirements. Rollback re-simulates *ticks*, not frames: the re-run consumes recorded `TickInput` values, and the purity of the tick-stamped queries (Chapter 5) is what makes re-running a tick multiple times safe.
 
 ## Networking Meets Engine Services
 
