@@ -1,0 +1,3 @@
+# Walkthrough (summary)
+
+Ch01+Ch02 comparison retrofit (audit items CH01-F1, CH02-F1, CH02-F2). The wgpu argument now rests on the full survey (Unity device abstraction, Godot RenderingDevice over Vulkan/D3D12/Metal, verified); boundary enforcement gains Unity assembly definitions plus the missing per-alternative rationale (compile-checked permitted surface, no reflection bypass); the boot survey gains Unity's opaque-init contrast. Fact-check round on this branch softened two absolutes in the same paragraphs (UBT cycle handling, Godot init independence). Details in the diff.
