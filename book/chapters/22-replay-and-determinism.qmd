@@ -39,7 +39,7 @@
 ## Automated Testing via Replay
 
 - Recorded input sessions can be used for regression testing: a recorded playthrough that completes successfully on one build but fails on another isolates the breaking change to the commits between them.
-- Bungie has described using this approach for *Halo*'s gameplay systems.
+- Rare built *Sea of Thieves* with automated gameplay testing from the start (Robert Masella, GDC 2019, "Automated Testing of Gameplay Features in Sea of Thieves") — the documented industry example for this section; note their tests are scenario-driven rather than input-replay-driven, which is worth contrasting with the replay approach here.
 - Property-based testing: generate random input sequences, run them, and check invariants (no crashes, no NaN positions, no physics tunneling).
 - Performance profiling: replay a demanding input sequence under a profiler to measure frame time regression without human variance.
 

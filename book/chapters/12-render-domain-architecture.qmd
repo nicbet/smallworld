@@ -60,7 +60,7 @@
 
 - Compare mature engine proxy/extraction models at a conceptual level.
 - Identify the durable pattern independent of language or graphics API.
-- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** Chapter 3 explicitly defers the mechanism fork here: Unreal's persistent per-primitive `FSceneProxy` with dirty-marked pushes, Godot's `RenderingServer` command interface over RIDs, Unity's SRP/DOTS chunk-batched extraction [verify], versus Smallworld's owned delta `FramePacket`. Compare all four and argue the winner per-alternative, not just "same principle, different machinery."
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** Chapter 3 explicitly defers the mechanism fork here: Unreal's persistent per-primitive scene proxies (`FPrimitiveSceneProxy`) with dirty-marked pushes, Godot's `RenderingServer` command interface over RIDs, Unity's SRP/DOTS chunk-batched extraction [verify], versus Smallworld's owned delta `FramePacket`. Compare all four and argue the winner per-alternative, not just "same principle, different machinery."
 
 #### Smallworld’s Firewall
 
