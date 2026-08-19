@@ -1,0 +1,3 @@
+# Walkthrough (summary)
+
+Ch06 rider (audit item CH03-F2 + budget precedent check). Added the lifetime fork to the identity section: "identity is where the engines converge; lifetime is where they fork" — UE UObject GC + TWeakObjectPtr, Unity's split GC/explicit-destroy model, Godot RefCounted + manual RIDs, versus generational handles where refcounts answer residency (evictable-at-zero, never evicted-at-zero), argued per-alternative with the honest cost tied to the residency invariant. Budget section gained the UE-explicit vs Unity-implicit precedent sentence; fact-check round softened NDA'd cert absolutes and the iOS memory-kill phrasing. Details in the diff.
