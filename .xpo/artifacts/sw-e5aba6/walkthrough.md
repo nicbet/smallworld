@@ -1,0 +1,3 @@
+# Walkthrough (summary)
+
+Removed `book/The-Modern-Game-Engine.tex` from git tracking and added it to `.gitignore` (commit 0126c83): it is regenerated on every Quarto build, and its tracked-but-modified state was blocking xpo merges (hit during the sw-e78dea merge). The file stays on disk for local builds; it just no longer appears in git status or diffs. Author-ordered housekeeping, done directly in the hub checkout.

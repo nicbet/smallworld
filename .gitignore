@@ -18,3 +18,4 @@ book/**/*.quarto_ipynb
 book/_output/
 /.quarto/
 **/*.quarto_ipynb
+book/The-Modern-Game-Engine.tex
