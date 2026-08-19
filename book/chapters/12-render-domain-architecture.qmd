@@ -6,6 +6,7 @@
 
 - Revisit the cost of renderer access to mutable game state.
 - Compare single-threaded direct access, snapshots, and retained render-side state.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** Chapter 1 states the hybrid thesis (voxel volumes and triangle meshes sharing one rendering and lighting model) in a single uncompared sentence. When this domain is designed on the page, compare how the majors handle volumetric content (Unreal: separate plugin paths beside Nanite; Unity: no first-class voxel path; Godot: voxels only as lighting probes) [verify all] and argue the unified-domain pick per-alternative.
 
 ### Extraction as a Data Contract
 
@@ -59,6 +60,7 @@
 
 - Compare mature engine proxy/extraction models at a conceptual level.
 - Identify the durable pattern independent of language or graphics API.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** Chapter 3 explicitly defers the mechanism fork here: Unreal's persistent per-primitive `FSceneProxy` with dirty-marked pushes, Godot's `RenderingServer` command interface over RIDs, Unity's SRP/DOTS chunk-batched extraction [verify], versus Smallworld's owned delta `FramePacket`. Compare all four and argue the winner per-alternative, not just "same principle, different machinery."
 
 #### Smallworld’s Firewall
 

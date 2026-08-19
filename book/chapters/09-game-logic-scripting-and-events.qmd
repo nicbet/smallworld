@@ -16,6 +16,7 @@
 
 - Discuss the strengths and limitations of code, declarative data, and visual graphs.
 - Frame tooling choices around debuggability, reviewability, and iteration—not ideology.
+- **Decided home for the code-first fork (2026-08-19 audit, sw-438537):** this chapter owns the comparison of game-description entry points: Unreal's editor-project model with Blueprints, Unity's scene/prefab authoring with C# scripting, Godot's everything-is-a-scene composition with GDScript, versus Smallworld's code-first `App` trait plus `EngineConfig` with data descriptors and no editor-project artifact. Argue the winner on the industry trajectory: Godot removed VisualScript in 4.0, and UE6 is dropping Blueprints, which validates code-first as the durable direction [verify both against current sources]. Chapter 2 keeps only the preview.
 
 ## Events and Commands
 

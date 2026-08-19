@@ -6,6 +6,7 @@
 
 - Compare inheritance-heavy object models with composition-oriented game state.
 - Explain why games need flexible combinations of behavior and data.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** this chapter owns the full engine comparison: Unreal's Actor/Component object model, Unity's GameObject/MonoBehaviour with optional DOTS entities, and Godot's scene-tree nodes are three divergent shipped answers, and none is archetypal ECS by default. Argue ECS as the winner per-alternative in Smallworld's context; Chapter 3 carries the history, this chapter owns the model comparison.
 
 ### Entities, Components, and Systems
 
@@ -16,6 +17,7 @@
 
 - Reinforce the distinction between the game-facing World and renderer, streaming, or GPU internals.
 - Connect data structure choice to access pattern rather than ideology.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** the hybrid data model is itself a fork: Unity's DOTS Entities Graphics routes render data through the entity model, while Unreal and Godot keep renderer state in side structures [verify]. Smallworld picks side structures for engine internals; cite the sw-cf6350 benchmarks (archetype churn 500-660x slower than field mutation; dense-iteration workloads favor plain arrays) as the evidence behind the pick.
 
 ## Storage and Queries
 

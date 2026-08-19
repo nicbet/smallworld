@@ -51,6 +51,7 @@
 
 - Use the engine’s raster-first direction, software GI clipmap, captured probes, and optional ray-tracing upgrades as a concrete example.
 - State the quality, portability, and complexity trade-offs honestly.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537):** the raster-first, ray-tracing-as-secondary-effects pick needs the full engine comparison: Unreal's Lumen (software and hardware GI as the default path), Unity's HDRP optional ray tracing plus probe-based GI, Godot's SDFGI/VoxelGI raster-compatible ladder [verify all]. Argue Smallworld's capability-ladder pick per-alternative; Chapter 1's one-sentence thesis defers here.
 
 #### Measuring Lighting Cost and Quality
 
