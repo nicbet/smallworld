@@ -1,0 +1,40 @@
+# Extension and Plugin Architecture
+
+> **Draft chapter map.** How the engine is extended without eroding its contracts: narrow per-role registration seams, plugin packaging and versioning, and the Voxel Plugin as the proof that the seams can carry a flagship feature.
+
+## Extension Is an Architectural Contract
+
+- Why engines need extension without forking: the erosion failure mode where each plugin reaches a little deeper into internals until the boundaries no longer guarantee anything.
+- **Tier-1 comparison obligation (2026-08-19 audit, sw-438537 / sw-e78dea):** this chapter owns the fork. Unreal's C++ module plugins receive broad engine-API reach; Unity's packages and C# assemblies extend through managed code with reflection-wide access; Godot's GDExtension and addons bind through a C interface into the scene/server model [verify all against vendor docs]. Smallworld's answer is narrow per-role registration seams. Argue the winner per-alternative: what broad reach buys (power, and UE's plugin ecosystem proves it), what it costs (every plugin becomes a compatibility liability against internals), and why role-scoped contracts fit an engine whose boundaries are compile-time.
+- Connect back to Chapter 2's package map (the plugin band) and Chapter 9's scripting boundary: scripting extends *behavior inside the World*; plugins extend *the engine's own vocabulary*.
+
+### The Per-Role Registration Seams
+
+- Enumerate the seams and their contracts: component types and systems (`register_system`, phase-scoped), geometry backends and renderers (`register_geometry_backend`), draw processors (`set_draw_processor`), asset importers (cook-time `AssetLoader`), tool panels (Chapter 23's diagnostics surfaces). Each seam hands the plugin exactly the contract for its role, never ambient engine access.
+- Registration happens at init through `GameContext`; the engine owns lifecycle and ordering, the plugin supplies behavior at the seam.
+
+#### What a Plugin Cannot Do
+
+- No reaching into renderer internals, platform handles, or another domain's mutable state; the crate structure from Chapter 2 makes violations compile errors, not conventions.
+- The discipline is the point: a seam that cannot be bypassed is a seam the engine can evolve behind.
+
+## Packaging, Versioning, and the Binary Boundary
+
+- A plugin is a crate first: compile-time composition, ordinary Cargo dependencies, semver against the public API crate.
+- The C ABI vtable is the designed seam for binary plugins (see `docs/architecture/capability-tiers.md`, Scripting/behaviors row): where source composition ends and a stable binary contract begins, and what that contract can and cannot promise across engine versions.
+- Engine-version compatibility policy: what the public API crate guarantees, what registration seams guarantee, and how a plugin declares the capability tiers it requires.
+
+### Extension in the AI-Assisted Workflow
+
+- Code-first, text-based seams are machine-legible: an assistant can read the public API crate and write a plugin against it, which is an argument for narrow typed seams over reflection-discovered surfaces. Industry signal: Immens (2026) is building an engine around exactly this claim, that a codebase designed for extension is what lets small teams and their AI tooling extend it safely [bib candidate: GamesIndustry.biz 2026-08-18 interview; author to add].
+- Contrast with editor-first extension models where the extension surface is discovered through the editor rather than declared in the API.
+
+## The Voxel Plugin as Proof
+
+- The flagship test: voxel volumes ship as a plugin, not as engine core. Volume components and generators, the extraction backend, render passes and materials, the physics ring, and editor tooling all arrive through the public seams.
+- If the seams cannot carry the Voxel Plugin, the seams are wrong: every internal API the plugin needed but the seams lacked is a finding against the engine's API design, and the feedback loop from plugin needs to seam evolution is part of the architecture, not an embarrassment to it.
+
+### Measuring Seam Sufficiency
+
+- Define what sufficiency means: the plugin compiles against the public API crate alone, registers through the documented seams, and survives engine upgrades that do not change those seams.
+- Diagnostics for the boundary: which seams the plugin exercises, what it registers, and what the engine reports when a seam contract is violated.

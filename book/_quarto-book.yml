@@ -52,7 +52,8 @@ book:
        - chapters/23-developer-tools-and-diagnostics.qmd
        - chapters/24-user-interface.qmd
        - chapters/25-accessibility.qmd
-       - chapters/26-game-production.qmd
+       - chapters/26-extension-and-plugin-architecture.qmd
+       - chapters/27-game-production.qmd
   appendices:
    - appendices/a-mathematics-for-game-engines.qmd
    - appendices/b-glossary.qmd
